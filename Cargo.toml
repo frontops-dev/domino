@@ -1,0 +1,85 @@
+[package]
+authors      = ["domino contributors"]
+description  = "True Affected - Semantic change detection for monorepos"
+edition      = "2021"
+license      = "MIT"
+name         = "domino"
+rust-version = "1.89.0"
+version      = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "domino"
+path = "src/main.rs"
+
+[dependencies]
+# NAPI
+napi = { version = "3.0.0", default-features = false, features = [
+  "napi3",
+  "napi4",
+  "napi5",
+  "napi6",
+  "napi7",
+  "napi8",
+] }
+napi-derive = "3.0.0"
+
+# CLI
+clap    = { version = "4.5", features = ["derive", "env"] }
+colored = "2.1"
+
+# Error handling
+anyhow    = "1.0"
+thiserror = "1.0"
+
+
+# Oxc - The Foundation
+oxc_allocator = "0.97"
+oxc_ast       = "0.97"
+oxc_parser    = "0.97"
+oxc_semantic  = "0.97"
+oxc_span      = "0.97"
+oxc_syntax    = "0.97"
+
+# Module resolution
+oxc_resolver = "11.13"
+
+# File operations
+glob    = "0.3"
+ignore  = "0.4"
+walkdir = "2.5"
+
+# Regex
+regex = "1.11"
+
+# Serialization
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Collections
+indexmap   = "2.6"
+rustc-hash = "2.0"
+
+# Path handling
+pathdiff = "0.2"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile   = "3.13"
+
+[profile.release]
+codegen-units = 1
+lto           = true
+opt-level     = 3
+strip         = true

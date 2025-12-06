@@ -1,0 +1,7 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": ["frontops", "msvc", "napi", "turborepo"],
+  "ignoreWords": [],
+  "ignorePaths": ["node_modules", "target", "dist", "build", "*.lock", "*.log", "Cargo.lock"]
+}

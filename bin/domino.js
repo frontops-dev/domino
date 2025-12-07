@@ -38,13 +38,28 @@ function findBinary() {
     path.join(packageRoot, 'bin', `domino${exeExt}`),
     // Platform-specific npm packages (napi-rs structure)
     ...(platformPkg ? [
+      // Direct sibling (most common in node_modules)
       path.join(packageRoot, '..', `@front-ops/domino-${platformPkg}`, `domino${exeExt}`),
+      // One level up (for nested node_modules structures)
       path.join(packageRoot, '..', '..', `@front-ops/domino-${platformPkg}`, `domino${exeExt}`),
     ] : []),
   ];
 
   for (const binPath of possiblePaths) {
     if (fs.existsSync(binPath)) {
+      // Check if file is executable (on Unix-like systems)
+      if (platform !== 'win32') {
+        try {
+          fs.accessSync(binPath, fs.constants.X_OK);
+        } catch (err) {
+          // Try to make it executable if possible
+          try {
+            fs.chmodSync(binPath, 0o755);
+          } catch (chmodErr) {
+            // If we can't chmod, still try to run it (might work)
+          }
+        }
+      }
       return binPath;
     }
   }

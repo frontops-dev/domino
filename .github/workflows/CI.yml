@@ -107,10 +107,27 @@ jobs:
           sudo apt-get install -y build-essential pkg-config perl
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      - name: Build
+      - name: Build native addon
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
         run: ${{ matrix.settings.build }}
+        shell: bash
+      - name: Build binary executable
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+        run: |
+          if [[ "${{ matrix.settings.target }}" == *"windows"* ]]; then
+            cargo build --release --target ${{ matrix.settings.target }} --bin domino
+            BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino.exe"
+            BINARY_DEST="domino-${{ matrix.settings.target }}.exe"
+          else
+            cargo build --release --target ${{ matrix.settings.target }} --bin domino
+            BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino"
+            BINARY_DEST="domino-${{ matrix.settings.target }}"
+          fi
+          # Copy binary to repo root with target suffix (like oxc: domino-{target} or domino-{target}.exe)
+          cp "$BINARY_SOURCE" "$BINARY_DEST"
+          echo "BINARY_PATH=$BINARY_DEST" >> $GITHUB_ENV
         shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -119,6 +136,7 @@ jobs:
           path: |
             ${{ env.APP_NAME }}.*.node
             ${{ env.APP_NAME }}.*.wasm
+            ${{ env.BINARY_PATH }}
           if-no-files-found: error
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
@@ -250,6 +268,10 @@ jobs:
           path: artifacts
       - name: Move artifacts
         run: yarn artifacts
+      - name: Run prepublish to generate package.json files
+        run: yarn napi prepublish -t npm
+      - name: Copy binaries and update package.json (like oxc)
+        run: node scripts/generate-packages.js
       - name: List packages
         run: ls -R ./npm
         shell: bash

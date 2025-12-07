@@ -1,6 +1,6 @@
 {
   "name": "@front-ops/domino",
-  "version": "0.2.1-0",
+  "version": "0.2.2-0",
   "description": "True Affected - Semantic change detection for monorepos",
   "main": "index.js",
   "repository": {

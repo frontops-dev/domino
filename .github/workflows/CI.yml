@@ -280,11 +280,11 @@ jobs:
                   binary_name="domino"
                   ;;
                 x86_64-pc-windows-msvc)
-                  pkg_name="win32-x64"
+                  pkg_name="win32-x64-msvc"
                   binary_name="domino.exe"
                   ;;
                 x86_64-unknown-linux-gnu)
-                  pkg_name="linux-x64"
+                  pkg_name="linux-x64-gnu"
                   binary_name="domino"
                   ;;
                 *)
@@ -295,7 +295,7 @@ jobs:
 
               # Find the binary in the artifact directory (it will be nested as target/{target}/release/{binary_name})
               binary_path=$(find "$artifact_dir" -name "$binary_name" -type f | head -1)
-              pkg_dir="./npm/@front-ops/domino-${pkg_name}"
+              pkg_dir="./npm/${pkg_name}"
 
               if [ -z "$binary_path" ]; then
                 echo "Warning: Binary $binary_name not found in $artifact_dir"

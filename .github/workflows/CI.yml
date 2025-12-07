@@ -260,17 +260,11 @@ jobs:
           cache: yarn
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      - name: create npm dirs
-        run: yarn napi create-npm-dirs
       - name: Download all artifacts
         uses: actions/download-artifact@v6
         with:
           path: artifacts
-      - name: Move artifacts
-        run: yarn artifacts
-      - name: Run prepublish to generate package.json files
-        run: yarn napi prepublish -t npm
-      - name: Copy binaries and update package.json (like oxc)
+      - name: Generate packages (like oxc)
         run: node scripts/generate-packages.js
       - name: List packages
         run: ls -R ./npm

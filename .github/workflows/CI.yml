@@ -293,18 +293,26 @@ jobs:
                   ;;
               esac
 
-              # Find the binary in the artifact directory (it might be nested)
+              # Find the binary in the artifact directory (it will be nested as target/{target}/release/{binary_name})
               binary_path=$(find "$artifact_dir" -name "$binary_name" -type f | head -1)
               pkg_dir="./npm/@front-ops/domino-${pkg_name}"
 
-              if [ -n "$binary_path" ] && [ -f "$binary_path" ] && [ -d "$pkg_dir" ]; then
-                echo "Copying $binary_name from $binary_path to $pkg_dir"
-                cp "$binary_path" "$pkg_dir/"
-                if [[ "$binary_name" != *.exe ]]; then
-                  chmod +x "$pkg_dir/$binary_name"
-                fi
-              else
-                echo "Warning: Binary $binary_name not found in $artifact_dir or package dir $pkg_dir not found"
+              if [ -z "$binary_path" ]; then
+                echo "Warning: Binary $binary_name not found in $artifact_dir"
+                echo "Files in $artifact_dir:"
+                find "$artifact_dir" -type f | head -10 || true
+                continue
+              fi
+
+              if [ ! -d "$pkg_dir" ]; then
+                echo "Warning: Package directory $pkg_dir not found"
+                continue
+              fi
+
+              echo "Copying $binary_name from $binary_path to $pkg_dir"
+              cp "$binary_path" "$pkg_dir/"
+              if [[ "$binary_name" != *.exe ]]; then
+                chmod +x "$pkg_dir/$binary_name"
               fi
             fi
           done

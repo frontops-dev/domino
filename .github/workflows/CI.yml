@@ -107,23 +107,10 @@ jobs:
           sudo apt-get install -y build-essential pkg-config perl
       - name: Install dependencies
         run: yarn install --frozen-lockfile
-      - name: Build native addon
+      - name: Build
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
         run: ${{ matrix.settings.build }}
-        shell: bash
-      - name: Build binary executable
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-        run: |
-          if [[ "${{ matrix.settings.target }}" == *"windows"* ]]; then
-            cargo build --release --target ${{ matrix.settings.target }} --bin domino
-            BINARY_NAME="domino.exe"
-          else
-            cargo build --release --target ${{ matrix.settings.target }} --bin domino
-            BINARY_NAME="domino"
-          fi
-          echo "BINARY_PATH=target/${{ matrix.settings.target }}/release/$BINARY_NAME" >> $GITHUB_ENV
         shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -132,7 +119,6 @@ jobs:
           path: |
             ${{ env.APP_NAME }}.*.node
             ${{ env.APP_NAME }}.*.wasm
-            ${{ env.BINARY_PATH }}
           if-no-files-found: error
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
@@ -264,59 +250,6 @@ jobs:
           path: artifacts
       - name: Move artifacts
         run: yarn artifacts
-      - name: Copy binary executables to platform packages
-        run: |
-          for artifact_dir in artifacts/bindings-*; do
-            if [ -d "$artifact_dir" ]; then
-              target=$(basename "$artifact_dir" | sed 's/bindings-//')
-
-              case "$target" in
-                x86_64-apple-darwin)
-                  pkg_name="darwin-x64"
-                  binary_name="domino"
-                  ;;
-                aarch64-apple-darwin)
-                  pkg_name="darwin-arm64"
-                  binary_name="domino"
-                  ;;
-                x86_64-pc-windows-msvc)
-                  pkg_name="win32-x64-msvc"
-                  binary_name="domino.exe"
-                  ;;
-                x86_64-unknown-linux-gnu)
-                  pkg_name="linux-x64-gnu"
-                  binary_name="domino"
-                  ;;
-                *)
-                  echo "Unknown target: $target, skipping"
-                  continue
-                  ;;
-              esac
-
-              # Find the binary in the artifact directory (it will be nested as target/{target}/release/{binary_name})
-              binary_path=$(find "$artifact_dir" -name "$binary_name" -type f | head -1)
-              pkg_dir="./npm/${pkg_name}"
-
-              if [ -z "$binary_path" ]; then
-                echo "Warning: Binary $binary_name not found in $artifact_dir"
-                echo "Files in $artifact_dir:"
-                find "$artifact_dir" -type f | head -10 || true
-                continue
-              fi
-
-              if [ ! -d "$pkg_dir" ]; then
-                echo "Warning: Package directory $pkg_dir not found"
-                continue
-              fi
-
-              echo "Copying $binary_name from $binary_path to $pkg_dir"
-              cp "$binary_path" "$pkg_dir/"
-              if [[ "$binary_name" != *.exe ]]; then
-                chmod +x "$pkg_dir/$binary_name"
-              fi
-            fi
-          done
-        shell: bash
       - name: List packages
         run: ls -R ./npm
         shell: bash

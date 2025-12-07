@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-const { spawnSync } = require('child_process');
-const { platform, arch } = process;
+const { spawnSync } = require('child_process')
+const { platform, arch } = process
 
-const BIN_NAME = 'domino';
+const BIN_NAME = 'domino'
 
 const PLATFORMS = {
   win32: {
@@ -36,27 +36,27 @@ const PLATFORMS = {
       gnu: `@front-ops/domino-linux-arm64-gnu/${BIN_NAME}`,
     },
   },
-};
+}
 
 const isMusl = () => {
   if (platform !== 'linux') {
-    return false;
+    return false
   }
 
   try {
-    const { readFileSync } = require('fs');
-    return readFileSync('/usr/bin/ldd', 'utf-8').includes('musl');
+    const { readFileSync } = require('fs')
+    return readFileSync('/usr/bin/ldd', 'utf-8').includes('musl')
   } catch {
     try {
-      const { execSync } = require('child_process');
-      return execSync('ldd --version', { encoding: 'utf8' }).includes('musl');
+      const { execSync } = require('child_process')
+      return execSync('ldd --version', { encoding: 'utf8' }).includes('musl')
     } catch {
-      return false;
+      return false
     }
   }
-};
+}
 
-let binPath = PLATFORMS[platform]?.[arch]?.[isMusl() ? 'musl' : 'gnu'];
+let binPath = PLATFORMS[platform]?.[arch]?.[isMusl() ? 'musl' : 'gnu']
 
 if (binPath) {
   try {
@@ -64,25 +64,25 @@ if (binPath) {
       shell: false,
       stdio: 'inherit',
       env: process.env,
-    });
+    })
 
     if (result.error) {
-      throw result.error;
+      throw result.error
     }
 
-    process.exitCode = result.status ?? 0;
+    process.exitCode = result.status ?? 0
   } catch (error) {
-    console.error(`Error running domino: ${error.message}`);
-    process.exitCode = 1;
+    console.error(`Error running domino: ${error.message}`)
+    process.exitCode = 1
   }
 } else {
-  let target = `${platform}-${arch}`;
+  let target = `${platform}-${arch}`
   if (isMusl()) {
-    target = `${target}-musl`;
+    target = `${target}-musl`
   }
   console.error(
     `The domino CLI package doesn't ship with prebuilt binaries for your platform (${target}) yet. ` +
       'Please create an issue at https://github.com/frontops-dev/domino/issues for support.',
-  );
-  process.exitCode = 1;
+  )
+  process.exitCode = 1
 }

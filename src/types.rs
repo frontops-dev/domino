@@ -90,4 +90,68 @@ pub struct TrueAffectedConfig {
 pub struct AffectedResult {
   /// List of affected project names
   pub affected_projects: Vec<String>,
+  /// Detailed report with causality information (optional)
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub report: Option<AffectedReport>,
+}
+
+/// Detailed report of affected projects with causality information
+#[derive(Debug, Clone, Serialize)]
+pub struct AffectedReport {
+  /// Information about each affected project
+  pub projects: Vec<AffectedProjectInfo>,
+}
+
+/// Information about why a project is affected
+#[derive(Debug, Clone, Serialize)]
+pub struct AffectedProjectInfo {
+  /// Project name
+  pub name: String,
+  /// Reasons why this project is affected
+  pub causes: Vec<AffectCause>,
+}
+
+/// Reason why a project is affected
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "type")]
+pub enum AffectCause {
+  /// Direct change to a file in this project
+  #[serde(rename = "direct_change")]
+  DirectChange {
+    /// File that was changed
+    file: PathBuf,
+    /// Symbol that was changed (if identified)
+    symbol: Option<String>,
+    /// Line number where the change occurred
+    line: usize,
+  },
+  /// Imported a changed symbol from another project
+  #[serde(rename = "imported_symbol")]
+  ImportedSymbol {
+    /// Source project that was changed
+    source_project: String,
+    /// The symbol that was imported
+    symbol: String,
+    /// File where the import occurs
+    via_file: PathBuf,
+    /// Original file where symbol was changed
+    source_file: PathBuf,
+  },
+  /// Re-exported a changed symbol
+  #[serde(rename = "re_exported")]
+  #[allow(dead_code)]
+  ReExported {
+    /// File that re-exports the symbol
+    through_file: PathBuf,
+    /// The symbol being re-exported
+    symbol: String,
+    /// Original source file
+    source_file: PathBuf,
+  },
+  /// Implicit dependency on another affected project
+  #[serde(rename = "implicit_dependency")]
+  ImplicitDependency {
+    /// Project this depends on
+    depends_on: String,
+  },
 }

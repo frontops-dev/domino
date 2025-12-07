@@ -3,6 +3,7 @@ mod core;
 mod error;
 mod git;
 mod profiler;
+mod report;
 mod semantic;
 mod types;
 mod utils;

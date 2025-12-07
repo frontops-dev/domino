@@ -53,6 +53,10 @@ enum Commands {
     /// Enable performance profiling (also: DOMINO_PROFILE=1)
     #[arg(long)]
     profile: bool,
+
+    /// Generate HTML dependency graph report
+    #[arg(long)]
+    report: Option<PathBuf>,
   },
 }
 
@@ -84,6 +88,7 @@ pub fn run() -> Result<()> {
       all,
       ts_config,
       profile,
+      report,
     } => {
       let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
@@ -147,7 +152,26 @@ pub fn run() -> Result<()> {
         ],
       };
 
-      let result = core::find_affected(config, profiler)?;
+      // Use the report-generating version if --report is specified
+      let result = if report.is_some() {
+        core::find_affected_with_report(config, profiler)?
+      } else {
+        core::find_affected(config, profiler)?
+      };
+
+      // Generate HTML report if requested
+      if let Some(report_path) = report {
+        if let Some(report_data) = &result.report {
+          crate::report::generate_html_report(report_data, &report_path)?;
+          eprintln!(
+            "{} {}",
+            "✓".green(),
+            format!("HTML report generated: {}", report_path.display()).bold()
+          );
+        } else {
+          eprintln!("{} {}", "⚠".yellow(), "No report data available".yellow());
+        }
+      }
 
       if json {
         println!(

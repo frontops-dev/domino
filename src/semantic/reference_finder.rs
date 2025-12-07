@@ -151,18 +151,14 @@ impl<'a> ReferenceFinder<'a> {
           // Recursively find references to the re-export
           self.find_refs_recursive(local_name, importing_file, all_refs, visited)?;
         } else {
-          // Symbol is used but not re-exported - check ALL exports from this file
-          // and recursively find their references (they may transitively depend on our symbol)
+          // Symbol is used but not re-exported
+          // The references found via find_local_references above are sufficient
+          // The cascade will happen naturally in core.rs when processing
+          // the container symbols that actually use this symbol
           debug!(
-            "Symbol '{}' is used in {:?}, checking its exports",
+            "Symbol '{}' is used in {:?} (not re-exported)",
             local_name, importing_file
           );
-          if let Some(exports) = self.analyzer.exports.get(importing_file) {
-            for export in exports {
-              debug!("Recursively checking export '{}'", export.exported_name);
-              self.find_refs_recursive(&export.exported_name, importing_file, all_refs, visited)?;
-            }
-          }
         }
       }
     }

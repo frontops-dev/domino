@@ -128,3 +128,6 @@ Cargo.lock
 !.yarn/sdks
 !.yarn/versions
 /npm
+
+# Test fixture git repo (initialized during tests)
+tests/fixtures/monorepo/.git

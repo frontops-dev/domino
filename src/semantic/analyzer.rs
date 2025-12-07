@@ -15,11 +15,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
 
-/// Import reference: (importing_file, local_name, from_module)
-type ImportReference = (PathBuf, String, String);
-
-/// Import index: (source_file, symbol_name) -> [import_references]
-type ImportIndex = FxHashMap<(PathBuf, String), Vec<ImportReference>>;
+/// Type alias for import index entries: (importing_file, local_name, from_module)
+type ImportIndexEntry = Vec<(PathBuf, String, String)>;
+/// Type alias for the import index map: (source_file, symbol_name) -> entries
+type ImportIndexMap = FxHashMap<(PathBuf, String), ImportIndexEntry>;
 
 /// Semantic data for a single file
 pub struct FileSemanticData {
@@ -42,7 +41,7 @@ pub struct WorkspaceAnalyzer {
   /// Reverse import index: (source_file, symbol_name) -> [(importing_file, local_name, from_module)]
   /// This index maps from a file+symbol to all the places that import it
   /// The from_module is kept for re-export checking
-  pub import_index: ImportIndex,
+  pub import_index: ImportIndexMap,
   /// Profiler for performance measurement
   pub profiler: Arc<Profiler>,
 }
@@ -97,7 +96,7 @@ impl WorkspaceAnalyzer {
     let resolver = Resolver::new(options);
     use tracing::debug;
 
-    let mut index: ImportIndex = FxHashMap::default();
+    let mut index: ImportIndexMap = FxHashMap::default();
 
     // For each file and its imports
     for (importing_file, file_imports) in &self.imports {
@@ -267,12 +266,11 @@ impl WorkspaceAnalyzer {
     }
 
     // Extract imports and exports
-    let relative_path_buf = relative_path.to_path_buf();
     let imports = Self::extract_imports(&parse_result.program, relative_path);
     let exports = Self::extract_exports(&parse_result.program);
 
-    self.imports.insert(relative_path_buf.clone(), imports);
-    self.exports.insert(relative_path_buf.clone(), exports);
+    self.imports.insert(relative_path.to_path_buf(), imports);
+    self.exports.insert(relative_path.to_path_buf(), exports);
 
     // Store semantic data
     // Safety: We're storing the semantic data with its allocator, which is valid
@@ -284,7 +282,7 @@ impl WorkspaceAnalyzer {
     };
 
     self.files.insert(
-      relative_path_buf.clone(),
+      relative_path.to_path_buf(),
       FileSemanticData {
         source,
         allocator,

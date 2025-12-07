@@ -5,6 +5,7 @@ pub mod core;
 pub mod error;
 pub mod git;
 pub mod profiler;
+pub mod report;
 pub mod semantic;
 pub mod types;
 pub mod utils;

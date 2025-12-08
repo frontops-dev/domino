@@ -274,6 +274,7 @@ fn test_json_output_no_extra_logs() {
   let output = branch.run_domino(&["affected", "--base", "main", "--json"]);
 
   let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
 
   // Stdout should ONLY contain JSON, no debug/info messages
   assert!(
@@ -287,6 +288,13 @@ fn test_json_output_no_extra_logs() {
   assert!(
     json_result.is_ok(),
     "Entire stdout should be valid JSON with no extra text"
+  );
+
+  // Stderr should not contain warnings in JSON mode
+  assert!(
+    !stderr.contains("WARN") && !stderr.contains("Source root does not exist"),
+    "Stderr should not contain warnings in JSON mode. Stderr: {}",
+    stderr
   );
 }
 

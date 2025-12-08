@@ -314,21 +314,34 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           path: artifacts
-      - name: Generate packages (like oxc)
+      - name: Generate packages
         run: node scripts/generate-packages.js
       - name: List packages
         run: ls -R ./npm
         shell: bash
-      - name: Publish
+      - name: Publish preview release
+        if: github.event_name == 'pull_request'
+        run: |
+          # Publish ALL packages: platform-specific packages + main package
+          # This is similar to pkg.pr.new approach
+          node scripts/publish-preview.js ./npm/darwin-arm64 ./npm/darwin-x64 ./npm/linux-arm64-musl ./npm/linux-x64-gnu ./npm/linux-x64-musl ./npm/win32-x64-msvc .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+      - name: Publish to npm
+        if: github.event_name != 'pull_request'
         run: |
           npm config set provenance true
+          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
+
+          # Publish release version for version tags
           if git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+$";
           then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
             npm publish --access public
           elif git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+";
           then
-            echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
             npm publish --tag next --access public
           else
             echo "Not a release, skipping publish"

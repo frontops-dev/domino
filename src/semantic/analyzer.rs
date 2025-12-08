@@ -507,12 +507,9 @@ impl WorkspaceAnalyzer {
       .get(file_path)
       .ok_or_else(|| DominoError::FileNotFound(file_path.display().to_string()))?;
 
-    // Get the offset range for the entire line
+    // Get the offset for the line start
     let line_start = crate::utils::line_to_offset(&file_data.source, line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
-
-    let line_end =
-      crate::utils::line_to_offset(&file_data.source, line + 1).unwrap_or(file_data.source.len());
 
     // Find nodes at this position
     let nodes = file_data.semantic.nodes();
@@ -582,44 +579,16 @@ impl WorkspaceAnalyzer {
       current_id = parent_id;
     }
 
-    // If we found a top-level declaration, return it
-    if top_level_name.is_some() {
-      return Ok(top_level_name);
-    }
-
-    // Fallback: Try to find an identifier on this line (old behavior)
-    let mut best_match: Option<String> = None;
-
-    for node in nodes.iter() {
-      match node.kind() {
-        AstKind::BindingIdentifier(ident) => {
-          if (ident.span.start as usize) >= line_start && (ident.span.start as usize) < line_end {
-            if let Some(start_time) = start {
-              self
-                .profiler
-                .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
-            }
-            return Ok(Some(ident.name.to_string()));
-          }
-        }
-        AstKind::IdentifierReference(ident) => {
-          if best_match.is_none()
-            && (ident.span.start as usize) >= line_start
-            && (ident.span.start as usize) < line_end
-          {
-            best_match = Some(ident.name.to_string());
-          }
-        }
-        _ => {}
-      }
-    }
-
+    // Record profiling time
     if let Some(start_time) = start {
       self
         .profiler
         .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
     }
 
-    Ok(best_match)
+    // Return the top-level declaration if found, otherwise None
+    // When None is returned, it means the line doesn't contain a trackable symbol
+    // (e.g., object literal properties, comments, or code not in a top-level declaration)
+    Ok(top_level_name)
   }
 }

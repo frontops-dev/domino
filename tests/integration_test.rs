@@ -497,3 +497,92 @@ export function useMyOptions(options: MyOptions): string {
     "Interface property reorder should affect all projects that transitively use it"
   );
 }
+
+#[test]
+fn test_object_literal_property_reorder() {
+  let branch = TestBranch::new("test-object-literal-reorder");
+
+  // Create initial theme.ts with object literal
+  branch.make_change(
+    "proj1/theme.ts",
+    r#"// This file simulates a scenario like vanilla-extract's createGlobalTheme
+// where object literals are passed to function calls for side effects
+
+// Simulate imported colors
+const colors = {
+  red: '#ff0000',
+  blue: '#0000ff',
+  green: '#00ff00',
+};
+
+// Simulate a theme creation function (like vanilla-extract's createGlobalTheme)
+function createTheme(selector: string, vars: any) {
+  // Side effect: registers theme globally
+  // Returns nothing or void
+}
+
+// Create theme with object literal
+// Changes to property order here should NOT trigger false positive symbol tracking
+createTheme('.theme', {
+  primaryColor: colors.blue,
+  secondaryColor: colors.red,
+  accentColor: colors.green,
+});
+
+// This is what proj2 would actually import - the exported function
+export function getTheme() {
+  return 'theme-applied';
+}
+"#,
+  );
+
+  // Now reorder properties in the object literal (simulating the colorVars bug)
+  branch.make_change(
+    "proj1/theme.ts",
+    r#"// This file simulates a scenario like vanilla-extract's createGlobalTheme
+// where object literals are passed to function calls for side effects
+
+// Simulate imported colors
+const colors = {
+  red: '#ff0000',
+  blue: '#0000ff',
+  green: '#00ff00',
+};
+
+// Simulate a theme creation function (like vanilla-extract's createGlobalTheme)
+function createTheme(selector: string, vars: any) {
+  // Side effect: registers theme globally
+  // Returns nothing or void
+}
+
+// Create theme with object literal
+// Changes to property order here should NOT trigger false positive symbol tracking
+createTheme('.theme', {
+  secondaryColor: colors.red,  // MOVED: was second, now first
+  primaryColor: colors.blue,   // MOVED: was first, now second
+  accentColor: colors.green,
+});
+
+// This is what proj2 would actually import - the exported function
+export function getTheme() {
+  return 'theme-applied';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // Only proj1 should be affected (the file itself changed)
+  // proj3 should also be affected due to implicit dependency on proj1
+  // proj2 should NOT be affected because getTheme (the exported symbol) didn't change
+  let mut sorted_affected = affected.clone();
+  sorted_affected.sort();
+
+  // Before the fix: would incorrectly track "colors" as changed symbol and mark proj2 as affected
+  // After the fix: only proj1 and proj3 (implicit dep) are affected
+  assert_eq!(
+    sorted_affected,
+    vec!["proj1", "proj3"],
+    "Object literal property reorder should only affect owning project and implicit deps, not consumers"
+  );
+}

@@ -63,9 +63,13 @@ enum Commands {
 pub fn run() -> Result<()> {
   let cli = Cli::parse();
 
+  // Check if json mode is enabled (need to extract from command)
+  let json_mode = matches!(&cli.command, Commands::Affected { json: true, .. });
+
   // Setup logging with cleaner formatting
-  let log_level = if cli.ci {
-    "error" // CI mode: only errors
+  // In JSON mode, suppress warnings to ensure clean JSON output
+  let log_level = if cli.ci || json_mode {
+    "error" // CI/JSON mode: only errors
   } else if cli.debug {
     "debug" // Debug mode: show debug and warnings
   } else {
@@ -94,7 +98,7 @@ pub fn run() -> Result<()> {
 
       // Enable profiling via --profile flag or DOMINO_PROFILE env var
       let enable_profiling = profile || std::env::var("DOMINO_PROFILE").is_ok();
-      if enable_profiling {
+      if enable_profiling && !json {
         eprintln!("📊 Performance profiling enabled");
       }
 
@@ -111,7 +115,9 @@ pub fn run() -> Result<()> {
       let projects = workspace::discover_projects(&cwd)?;
 
       if projects.is_empty() {
-        eprintln!("{}", "No projects found in workspace".red());
+        if !json {
+          eprintln!("{}", "No projects found in workspace".red());
+        }
         return Ok(());
       }
 
@@ -163,12 +169,14 @@ pub fn run() -> Result<()> {
       if let Some(report_path) = report {
         if let Some(report_data) = &result.report {
           crate::report::generate_html_report(report_data, &report_path)?;
-          eprintln!(
-            "{} {}",
-            "✓".green(),
-            format!("HTML report generated: {}", report_path.display()).bold()
-          );
-        } else {
+          if !json {
+            eprintln!(
+              "{} {}",
+              "✓".green(),
+              format!("HTML report generated: {}", report_path.display()).bold()
+            );
+          }
+        } else if !json {
           eprintln!("{} {}", "⚠".yellow(), "No report data available".yellow());
         }
       }

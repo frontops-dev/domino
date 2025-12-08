@@ -57,9 +57,15 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: yarn build --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: yarn build --target x86_64-unknown-linux-musl -x
           - host: macos-latest
             target: aarch64-apple-darwin
             build: yarn build --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: yarn build --target aarch64-unknown-linux-musl -x
     name: stable - ${{ matrix.settings.target }} - node@22
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -76,6 +82,7 @@ jobs:
           targets: ${{ matrix.settings.target }}
       - name: Cache cargo
         uses: actions/cache@v4
+        if: ${{ !contains(matrix.settings.target, 'linux-gnu') }}
         with:
           path: |
             ~/.cargo/registry/index/
@@ -85,6 +92,26 @@ jobs:
             .cargo-cache
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      # NO cargo cache for Linux GNU - cross builds in Docker with different GLIBC
+      # Caching host-compiled dependencies would contaminate cross build with wrong GLIBC version
+      # - name: Cache cargo (no target for Linux GNU)
+      #   uses: actions/cache@v4
+      #   if: ${{ contains(matrix.settings.target, 'linux-gnu') }}
+      #   with:
+      #     path: |
+      #       ~/.cargo/registry/index/
+      #       ~/.cargo/registry/cache/
+      #       ~/.cargo/git/db/
+      #       ~/.napi-rs
+      #       .cargo-cache
+      #     key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'linux-gnu') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cross
       - uses: mlugg/setup-zig@v2
         if: ${{ contains(matrix.settings.target, 'musl') }}
         with:
@@ -120,6 +147,23 @@ jobs:
             cargo build --release --target ${{ matrix.settings.target }} --bin domino
             BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino.exe"
             BINARY_DEST="domino-${{ matrix.settings.target }}.exe"
+          elif [[ "${{ matrix.settings.target }}" == *"linux-gnu"* ]]; then
+            # Use cross to build with older GLIBC version (same approach as oxc)
+            # Clean everything to avoid contamination from host-compiled dependencies
+            rm -rf target/${{ matrix.settings.target }}
+            rm -rf ~/.cargo/registry/cache
+            rm -rf ~/.cargo/git/checkouts
+            cross build --release --target=${{ matrix.settings.target }} --bin domino
+            BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino"
+            BINARY_DEST="domino-${{ matrix.settings.target }}"
+            # Verify GLIBC requirement
+            echo "Checking GLIBC requirement for binary:"
+            objdump -T "$BINARY_SOURCE" | grep GLIBC | sed 's/.*GLIBC_\([.0-9]*\).*/\1/g' | sort -V | tail -1 || echo "No GLIBC symbols found"
+          elif [[ "${{ matrix.settings.target }}" == *"musl"* ]]; then
+            # Use cargo-zigbuild for musl targets (same approach as oxc)
+            cargo zigbuild --release --target=${{ matrix.settings.target }} --bin domino
+            BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino"
+            BINARY_DEST="domino-${{ matrix.settings.target }}"
           else
             cargo build --release --target ${{ matrix.settings.target }} --bin domino
             BINARY_SOURCE="target/${{ matrix.settings.target }}/release/domino"
@@ -188,6 +232,7 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
         node:
           - '20'
           - '22'
@@ -240,7 +285,12 @@ jobs:
         with:
           image: ${{ steps.docker.outputs.IMAGE }}
           options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
-          run: yarn test
+          run: |
+            # Reinstall dependencies inside container to get correct platform binaries
+            # Host installed GNU binaries, but Alpine/musl needs musl binaries
+            # This allows Yarn to re-evaluate optionalDependencies for the current platform
+            yarn install
+            yarn test
   publish:
     name: Publish
     runs-on: ubuntu-latest

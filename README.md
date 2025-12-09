@@ -11,7 +11,7 @@ domino is a drop-in replacement for the TypeScript version of [traf](https://git
 - **Semantic Change Detection**: Analyzes actual code changes at the AST level, not just file changes
 - **Cross-File Reference Tracking**: Follows symbol references across your entire workspace
 - **Fast Oxc Parser**: 3-5x faster than TypeScript's compiler API
-- **Nx & Turbo Support**: Works with both Nx and Turborepo monorepos
+- **Workspace Support**: Works with Nx, Turborepo, and generic npm/yarn/pnpm/bun workspaces
 - **Module Resolution**: Uses oxc_resolver (same as Rolldown and Nova) for accurate module resolution
 
 ## Quick Start
@@ -98,7 +98,7 @@ Thanks to Rust and Oxc, domino is significantly faster than the TypeScript versi
 ### Core Components
 
 - **Git Integration** (`src/git.rs`): Parses git diffs to identify changed files and lines
-- **Workspace Discovery** (`src/workspace/`): Discovers projects in Nx and Turbo workspaces
+- **Workspace Discovery** (`src/workspace/`): Discovers projects in Nx, Turbo, and generic npm/yarn/pnpm/bun workspaces
 - **Semantic Analyzer** (`src/semantic/analyzer.rs`): Uses Oxc to parse and analyze TypeScript/JavaScript
 - **Reference Finder** (`src/semantic/reference_finder.rs`): Tracks cross-file symbol references
 - **Core Algorithm** (`src/core.rs`): Orchestrates the affected detection logic

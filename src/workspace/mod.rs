@@ -1,5 +1,6 @@
 pub mod nx;
 pub mod turbo;
+pub mod workspaces;
 
 use crate::error::Result;
 use crate::types::Project;
@@ -12,11 +13,16 @@ pub fn discover_projects(cwd: &Path) -> Result<Vec<Project>> {
     return nx::get_projects(cwd);
   }
 
-  // Try Turbo
+  // Try Turbo (turbo.json)
   if turbo::is_turbo_workspace(cwd) {
     return turbo::get_projects(cwd);
   }
 
-  // If neither, return empty
+  // Try generic workspaces (npm/yarn/pnpm/bun)
+  if workspaces::is_workspace(cwd) {
+    return workspaces::get_projects(cwd);
+  }
+
+  // If none found, return empty
   Ok(vec![])
 }

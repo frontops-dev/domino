@@ -30,6 +30,16 @@ const TARGET_TO_PACKAGE = {
     binary: 'domino',
     ext: '',
   },
+  'x86_64-unknown-linux-musl': {
+    name: 'linux-x64-musl',
+    binary: 'domino',
+    ext: '',
+  },
+  'aarch64-unknown-linux-musl': {
+    name: 'linux-arm64-musl',
+    binary: 'domino',
+    ext: '',
+  },
 }
 
 function readRootPackageJson() {
@@ -151,7 +161,11 @@ function main() {
     version,
   ])
 
-  mainManifest.optionalDependencies = Object.fromEntries(nativePackages)
+  // Merge with existing optionalDependencies to preserve @oxc-node packages
+  mainManifest.optionalDependencies = {
+    ...mainManifest.optionalDependencies,
+    ...Object.fromEntries(nativePackages),
+  }
 
   fs.writeFileSync(mainManifestPath, JSON.stringify(mainManifest, null, 2) + '\n')
   console.log(`✓ Updated main package.json with optionalDependencies`)

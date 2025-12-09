@@ -43,7 +43,9 @@ __metadata:
     "@oxc-node/core": "npm:^0.0.34"
     "@oxc-node/core-darwin-arm64": "npm:^0.0.34"
     "@oxc-node/core-darwin-x64": "npm:^0.0.34"
+    "@oxc-node/core-linux-arm64-musl": "npm:^0.0.35"
     "@oxc-node/core-linux-x64-gnu": "npm:^0.0.34"
+    "@oxc-node/core-linux-x64-musl": "npm:^0.0.35"
     "@taplo/cli": "npm:^0.7.0"
     "@tybys/wasm-util": "npm:^0.10.0"
     ava: "npm:^6.4.1"
@@ -59,7 +61,11 @@ __metadata:
       optional: true
     "@oxc-node/core-darwin-x64":
       optional: true
+    "@oxc-node/core-linux-arm64-musl":
+      optional: true
     "@oxc-node/core-linux-x64-gnu":
+      optional: true
+    "@oxc-node/core-linux-x64-musl":
       optional: true
   bin:
     domino: ./bin/domino.js
@@ -1129,6 +1135,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@oxc-node/core-linux-arm64-musl@npm:^0.0.35":
+  version: 0.0.35
+  resolution: "@oxc-node/core-linux-arm64-musl@npm:0.0.35"
+  conditions: os=linux & cpu=arm64 & libc=musl
+  languageName: node
+  linkType: hard
+
 "@oxc-node/core-linux-ppc64-gnu@npm:0.0.34":
   version: 0.0.34
   resolution: "@oxc-node/core-linux-ppc64-gnu@npm:0.0.34"
@@ -1153,6 +1166,13 @@ __metadata:
 "@oxc-node/core-linux-x64-musl@npm:0.0.34":
   version: 0.0.34
   resolution: "@oxc-node/core-linux-x64-musl@npm:0.0.34"
+  conditions: os=linux & cpu=x64 & libc=musl
+  languageName: node
+  linkType: hard
+
+"@oxc-node/core-linux-x64-musl@npm:^0.0.35":
+  version: 0.0.35
+  resolution: "@oxc-node/core-linux-x64-musl@npm:0.0.35"
   conditions: os=linux & cpu=x64 & libc=musl
   languageName: node
   linkType: hard

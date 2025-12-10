@@ -495,7 +495,7 @@ impl WorkspaceAnalyzer {
   }
 
   /// Find node at a specific line in a file
-  pub fn find_node_at_line(&self, file_path: &Path, line: usize) -> Result<Option<String>> {
+  pub fn find_node_at_line(&self, file_path: &Path, line: usize, column: usize) -> Result<Option<String>> {
     let start = if self.profiler.is_enabled() {
       Some(Instant::now())
     } else {
@@ -507,25 +507,32 @@ impl WorkspaceAnalyzer {
       .get(file_path)
       .ok_or_else(|| DominoError::FileNotFound(file_path.display().to_string()))?;
 
-    // Get the offset for the line start
+    // Get the exact offset using both line and column
     let line_start = crate::utils::line_to_offset(&file_data.source, line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
+    let exact_offset = line_start + column;
 
     // Find nodes at this position
     let nodes = file_data.semantic.nodes();
 
-    // First pass: Find any node that CONTAINS this line (not just starts on it)
-    // This handles cases like blank lines inside class bodies
+    // First pass: Find the SMALLEST node that CONTAINS this exact position
+    // Using the exact offset (line + column) allows us to pinpoint the specific node
     let mut node_on_line_id = None;
+    let mut smallest_span_size = usize::MAX;
+
     for node in nodes.iter() {
       let span = node.kind().span();
       let node_start = span.start as usize;
       let node_end = span.end as usize;
 
-      // Check if this line is within the node's span
-      if node_start <= line_start && node_end >= line_start {
-        node_on_line_id = Some(node.id());
-        // Don't break - we want the smallest containing node, so keep searching
+      // Check if this exact offset is within the node's span
+      if node_start <= exact_offset && node_end >= exact_offset {
+        let span_size = node_end - node_start;
+        // Keep the smallest containing node
+        if span_size < smallest_span_size {
+          smallest_span_size = span_size;
+          node_on_line_id = Some(node.id());
+        }
       }
     }
 

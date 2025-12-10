@@ -156,6 +156,63 @@ async function main() {
   console.log('Direct URL (no auth required):')
   console.log(`  ${installUrl}`)
   console.log('')
+
+  // Post or update comment on PR with installation instructions
+  console.log('💬 Managing PR comment...')
+
+  // Add a unique marker to identify our comments
+  const commentMarker = '<!-- domino-preview-release -->'
+  const commentBody = `${commentMarker}
+## 📦 Preview Release Available
+
+A preview release has been published for commit ${shortSha}.
+
+### Installation
+
+\`\`\`bash
+npm install ${installUrl}
+\`\`\`
+
+### Details
+
+- **Release**: [${tagName}](https://github.com/${repository}/releases/tag/${tagName})
+- **Direct URL**: ${installUrl}`
+
+  // Check for existing comment with our marker
+  let existingCommentId = null
+  try {
+    const commentsJson = execCommandCapture(`gh api repos/${repository}/issues/${prNumber}/comments --paginate`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const comments = JSON.parse(commentsJson)
+
+    // Find comment with our marker
+    const existingComment = comments.find((c) => c.body && c.body.includes(commentMarker))
+    if (existingComment) {
+      existingCommentId = existingComment.id
+    }
+  } catch (error) {
+    console.log('Note: Could not fetch existing comments, will create new comment')
+  }
+
+  // Write comment body to temp file to handle multiline content safely
+  const commentFile = path.join(REPO_ROOT, '.preview-comment.md')
+  fs.writeFileSync(commentFile, commentBody, 'utf8')
+
+  try {
+    if (existingCommentId) {
+      // Update existing comment
+      execCommand(`gh api -X PATCH repos/${repository}/issues/comments/${existingCommentId} -F body=@"${commentFile}"`)
+      console.log(`✓ Updated existing comment on PR #${prNumber}`)
+    } else {
+      // Create new comment
+      execCommand(`gh pr comment ${prNumber} --body-file "${commentFile}"`)
+      console.log(`✓ Posted new comment on PR #${prNumber}`)
+    }
+  } finally {
+    // Clean up temp file
+    fs.unlinkSync(commentFile)
+  }
 }
 
 if (require.main === module) {

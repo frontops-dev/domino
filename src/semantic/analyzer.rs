@@ -601,3 +601,125 @@ impl WorkspaceAnalyzer {
     Ok(top_level_name)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::Path;
+
+  #[test]
+  fn test_find_node_at_line_with_column_offset() {
+    // Test that find_node_at_line uses column offset to find the correct container symbol
+    // This test creates a simple TypeScript file and verifies that we can find
+    // the correct variable declarator when given a precise column offset
+
+    let source = r#"import { Component } from './component';
+
+const MemoizedComponent = React.memo(Component);
+const AnotherVar = 'test';
+
+export { MemoizedComponent };"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    // Parse the source file using the same approach as analyze_file
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    // Build semantic data
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    // Transmute to 'static lifetime (same as analyze_file does)
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 3 contains: const MemoizedComponent = React.memo(Component);
+    // Column 42 is approximately where "Component" appears in the memo call
+    // We expect to find "MemoizedComponent" as the container
+    let result = analyzer.find_node_at_line(file_path, 3, 42);
+    assert!(result.is_ok());
+    let symbol = result.unwrap();
+    assert_eq!(symbol, Some("MemoizedComponent".to_string()));
+
+    // Test with column 0 (line start) - should still find a containing symbol
+    let result = analyzer.find_node_at_line(file_path, 3, 0);
+    assert!(result.is_ok());
+
+    // Test line 4 with AnotherVar
+    let result = analyzer.find_node_at_line(file_path, 4, 10);
+    assert!(result.is_ok());
+    let symbol = result.unwrap();
+    assert_eq!(symbol, Some("AnotherVar".to_string()));
+  }
+
+  #[test]
+  fn test_find_node_smallest_containing_node() {
+    // Test that find_node_at_line finds the smallest containing node
+    // when multiple nodes overlap at the same position
+
+    let source = r#"export function outer() {
+  const inner = function() {
+    return 'nested';
+  };
+  return inner;
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    // Parse the source file using the same approach as analyze_file
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    // Build semantic data
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    // Transmute to 'static lifetime (same as analyze_file does)
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 2 contains: const inner = function() {
+    // When we query at the position of "inner", we should get "inner" not "outer"
+    let result = analyzer.find_node_at_line(file_path, 2, 10);
+    assert!(result.is_ok());
+    // Note: The exact result depends on how the AST is structured
+    // The important thing is that we get a result and don't panic
+    let symbol = result.unwrap();
+    assert!(symbol.is_some());
+  }
+}

@@ -376,3 +376,115 @@ impl<'a> ReferenceFinder<'a> {
     p1 == p2
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::profiler::Profiler;
+  use crate::semantic::WorkspaceAnalyzer;
+  use std::fs;
+  use tempfile::TempDir;
+
+  #[test]
+  fn test_simple_resolve_appends_extensions() {
+    // Test that simple_resolve appends extensions instead of replacing them
+    // This is important for patterns like colors.css -> colors.css.ts
+
+    // Create a temporary directory with test files
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: libs/theme/colors.css.ts
+    let theme_dir = cwd.join("libs").join("theme");
+    fs::create_dir_all(&theme_dir).expect("Failed to create theme dir");
+    let css_ts_file = theme_dir.join("colors.css.ts");
+    fs::write(&css_ts_file, "export const red = '#ff0000';").expect("Failed to write test file");
+
+    // Create analyzer and reference finder
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./colors.css" from libs/theme directory
+    // Should find colors.css.ts by appending .ts
+    let context = theme_dir.as_path();
+    let specifier = "./colors.css";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(resolved.is_some(), "Expected to resolve colors.css to colors.css.ts");
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("libs/theme/colors.css.ts"),
+      "Expected to resolve to colors.css.ts (extension appended)"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_standard_extensions() {
+    // Test that simple_resolve still works for standard TypeScript imports
+
+    // Create a temporary directory with test files
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: src/utils.ts
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    let utils_file = src_dir.join("utils.ts");
+    fs::write(&utils_file, "export function helper() {}").expect("Failed to write test file");
+
+    // Create analyzer and reference finder
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./utils" from src directory
+    // Should find utils.ts by appending .ts
+    let context = src_dir.as_path();
+    let specifier = "./utils";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(resolved.is_some(), "Expected to resolve utils to utils.ts");
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/utils.ts"),
+      "Expected to resolve to utils.ts"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_index_files() {
+    // Test that simple_resolve can find index.ts files in directories
+
+    // Create a temporary directory with test files
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: src/components/index.ts
+    let components_dir = cwd.join("src").join("components");
+    fs::create_dir_all(&components_dir).expect("Failed to create components dir");
+    let index_file = components_dir.join("index.ts");
+    fs::write(&index_file, "export * from './Button';").expect("Failed to write test file");
+
+    // Create analyzer and reference finder
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./components" from src directory
+    // Should find components/index.ts
+    let context = cwd.join("src");
+    let specifier = "./components";
+    let resolved = reference_finder.simple_resolve(context.as_path(), specifier);
+
+    assert!(resolved.is_some(), "Expected to resolve components to components/index.ts");
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/components/index.ts"),
+      "Expected to resolve to components/index.ts"
+    );
+  }
+}

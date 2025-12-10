@@ -131,7 +131,9 @@ impl WorkspaceAnalyzer {
               let candidate = if ext.starts_with('/') {
                 base.join(ext.trim_start_matches('/'))
               } else {
-                base.with_extension(ext.trim_start_matches('.'))
+                // Append extension instead of replacing it
+                // This handles cases like colors.css -> colors.css.ts (vanilla-extract)
+                PathBuf::from(format!("{}{}", base.display(), ext))
               };
               if cwd.join(&candidate).exists() {
                 if let Ok(p) = candidate.strip_prefix(cwd) {

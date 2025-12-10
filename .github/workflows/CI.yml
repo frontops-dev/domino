@@ -297,6 +297,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      pull-requests: write
     needs:
       - lint
       - test-macOS-windows-binding

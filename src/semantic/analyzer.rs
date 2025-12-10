@@ -497,7 +497,12 @@ impl WorkspaceAnalyzer {
   }
 
   /// Find node at a specific line in a file
-  pub fn find_node_at_line(&self, file_path: &Path, line: usize, column: usize) -> Result<Option<String>> {
+  pub fn find_node_at_line(
+    &self,
+    file_path: &Path,
+    line: usize,
+    column: usize,
+  ) -> Result<Option<String>> {
     let start = if self.profiler.is_enabled() {
       Some(Instant::now())
     } else {
@@ -622,7 +627,8 @@ export { MemoizedComponent };"#;
 
     let cwd = Path::new(".");
     let profiler = Arc::new(Profiler::new(false));
-    let mut analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
 
     // Parse the source file using the same approach as analyze_file
     let file_path = Path::new("test.ts");
@@ -684,7 +690,8 @@ export { MemoizedComponent };"#;
 
     let cwd = Path::new(".");
     let profiler = Arc::new(Profiler::new(false));
-    let mut analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
 
     // Parse the source file using the same approach as analyze_file
     let file_path = Path::new("test.ts");

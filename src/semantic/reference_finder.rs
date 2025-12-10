@@ -402,7 +402,8 @@ mod tests {
 
     // Create analyzer and reference finder
     let profiler = Arc::new(Profiler::new(false));
-    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
     let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
 
     // Test: resolve "./colors.css" from libs/theme directory
@@ -411,7 +412,10 @@ mod tests {
     let specifier = "./colors.css";
     let resolved = reference_finder.simple_resolve(context, specifier);
 
-    assert!(resolved.is_some(), "Expected to resolve colors.css to colors.css.ts");
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve colors.css to colors.css.ts"
+    );
     let resolved_path = resolved.unwrap();
     assert_eq!(
       resolved_path,
@@ -436,7 +440,8 @@ mod tests {
 
     // Create analyzer and reference finder
     let profiler = Arc::new(Profiler::new(false));
-    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
     let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
 
     // Test: resolve "./utils" from src directory
@@ -470,7 +475,8 @@ mod tests {
 
     // Create analyzer and reference finder
     let profiler = Arc::new(Profiler::new(false));
-    let analyzer = WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
     let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
 
     // Test: resolve "./components" from src directory
@@ -479,7 +485,10 @@ mod tests {
     let specifier = "./components";
     let resolved = reference_finder.simple_resolve(context.as_path(), specifier);
 
-    assert!(resolved.is_some(), "Expected to resolve components to components/index.ts");
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve components to components/index.ts"
+    );
     let resolved_path = resolved.unwrap();
     assert_eq!(
       resolved_path,

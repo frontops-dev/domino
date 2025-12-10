@@ -87,7 +87,10 @@ fn find_affected_internal(
       if generate_report {
         // For each changed line, record it as a direct change
         for &line in &changed_file.changed_lines {
-          let symbol = analyzer.find_node_at_line(file_path, line, 0).ok().flatten();
+          let symbol = analyzer
+            .find_node_at_line(file_path, line, 0)
+            .ok()
+            .flatten();
           project_causes
             .entry(pkg.clone())
             .or_default()
@@ -236,7 +239,9 @@ fn process_changed_symbol(
 
   for local_ref in local_refs {
     // Find the root symbol containing this reference
-    if let Some(container_symbol) = analyzer.find_node_at_line(file_path, local_ref.line, local_ref.column)? {
+    if let Some(container_symbol) =
+      analyzer.find_node_at_line(file_path, local_ref.line, local_ref.column)?
+    {
       // Skip if it's the same symbol (self-reference)
       if container_symbol != symbol_name {
         debug!(

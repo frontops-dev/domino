@@ -1,0 +1,23 @@
+{
+  "tagName": "pr-local-f0b7249",
+  "releaseName": "PR #local Preview (f0b7249)",
+  "shortSha": "f0b7249",
+  "version": "0.1.0",
+  "repository": "frontops-dev/domino",
+  "prNumber": "local",
+  "commitSha": "f0b7249ff1aba8757b3d0a990f907f5d6e7cd0f0",
+  "releaseNotes": "Preview build for PR #local (commit f0b7249)",
+  "packages": [
+    {
+      "name": "@domino/test-platform",
+      "tarball": "domino-test-platform-0.1.0.tgz",
+      "path": "/Users/shahar.kazaz/WebstormProjects/domino/tests/fixtures/test-repo/npm/test-platform/domino-test-platform-0.1.0.tgz"
+    }
+  ],
+  "mainPackage": {
+    "tarball": "domino-test-0.1.0.tgz",
+    "path": "/Users/shahar.kazaz/WebstormProjects/domino/tests/fixtures/test-repo/domino-test-0.1.0.tgz"
+  },
+  "installUrl": "https://github.com/frontops-dev/domino/releases/download/pr-local-f0b7249/domino-test-0.1.0.tgz",
+  "commentBody": "<!-- domino-preview-release -->\n## 📦 Preview Release Available\n\nA preview release has been published for commit f0b7249.\n\n### Installation\n\n```bash\nnpm install https://github.com/frontops-dev/domino/releases/download/pr-local-f0b7249/domino-test-0.1.0.tgz\n```\n\n### Details\n\n- **Release**: [pr-local-f0b7249](https://github.com/frontops-dev/domino/releases/tag/pr-local-f0b7249)\n- **Direct URL**: https://github.com/frontops-dev/domino/releases/download/pr-local-f0b7249/domino-test-0.1.0.tgz"
+}

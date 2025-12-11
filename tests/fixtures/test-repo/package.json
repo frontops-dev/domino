@@ -1,0 +1,9 @@
+{
+  "name": "domino-test",
+  "version": "0.1.0",
+  "description": "Test package for publish-preview.js",
+  "main": "index.js",
+  "optionalDependencies": {
+    "@domino/test-platform": "https://github.com/frontops-dev/domino/releases/download/pr-local-f0b7249/domino-test-platform-0.1.0.tgz"
+  }
+}

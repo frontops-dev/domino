@@ -1,0 +1,6 @@
+{
+  "name": "@domino/test-platform",
+  "version": "0.1.0",
+  "description": "Test platform package",
+  "main": "index.js"
+}

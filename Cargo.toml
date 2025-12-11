@@ -8,7 +8,7 @@ rust-version = "1.89.0"
 version      = "0.1.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "domino"

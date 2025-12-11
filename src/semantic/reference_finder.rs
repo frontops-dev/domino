@@ -174,16 +174,37 @@ impl<'a> ReferenceFinder<'a> {
 
         // For namespace imports, we need to find references to namespace.symbol
         // This is more complex - for now, we'll mark the whole file as potentially affected
-        // TODO: Improve this by finding actual property accesses
+        // We add the file as a reference even if we don't find specific uses of the namespace
+        // This is especially important for dynamic imports where the namespace identifier may be synthetic
         match self
           .analyzer
           .find_local_references(importing_file, local_name)
         {
           Ok(local_refs) => {
-            all_refs.extend(local_refs);
+            if !local_refs.is_empty() {
+              all_refs.extend(local_refs);
+            } else {
+              // No local references found, but namespace import exists
+              // Add a reference to the importing file itself
+              debug!(
+                "No local references to namespace '{}', but marking file {:?} as affected",
+                local_name, importing_file
+              );
+              all_refs.push(Reference {
+                file_path: importing_file.clone(),
+                line: 0,
+                column: 0,
+              });
+            }
           }
           Err(e) => {
             warn!("Error finding local references: {}", e);
+            // Still mark the file as potentially affected
+            all_refs.push(Reference {
+              file_path: importing_file.clone(),
+              line: 0,
+              column: 0,
+            });
           }
         }
       }

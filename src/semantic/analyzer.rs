@@ -2,8 +2,12 @@ use crate::error::{DominoError, Result};
 use crate::profiler::Profiler;
 use crate::types::{Export, Import, Project, Reference};
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier};
+use oxc_ast::ast::{
+  ExportNamedDeclaration, Expression, ImportDeclaration, ImportDeclarationSpecifier,
+};
 use oxc_ast::AstKind;
+use oxc_ast_visit::walk;
+use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -294,18 +298,95 @@ impl WorkspaceAnalyzer {
 
     Ok(())
   }
+}
 
+/// Visitor to collect dynamic imports (import() expressions)
+struct DynamicImportVisitor<'a> {
+  imports: Vec<Import>,
+  dynamic_count: usize,
+  /// Phantom data to maintain lifetime parameter
+  #[allow(dead_code)]
+  _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> DynamicImportVisitor<'a> {
+  fn new() -> Self {
+    Self {
+      imports: Vec::new(),
+      dynamic_count: 0,
+      _phantom: std::marker::PhantomData,
+    }
+  }
+
+  /// Extract imported symbols from .then() callback if present
+  /// Handles patterns like: import('module').then(m => ({ default: m.Symbol }))
+  fn extract_symbols_from_then(
+    &self,
+    _expr: &oxc_ast::ast::ImportExpression<'a>,
+    from_module: &str,
+  ) -> Vec<Import> {
+    // For simplicity, we'll import all exports from the module
+    // A more sophisticated implementation would parse the .then() callback
+    // to extract specific symbols like `m.CookieConsent`
+    vec![Import {
+      imported_name: "*".to_string(),
+      local_name: format!("__dynamic_import_{}", self.dynamic_count),
+      from_module: from_module.to_string(),
+      resolved_file: None,
+      is_type_only: false,
+    }]
+  }
+}
+
+impl<'a> Visit<'a> for DynamicImportVisitor<'a> {
+  fn visit_import_expression(&mut self, expr: &oxc_ast::ast::ImportExpression<'a>) {
+    // Extract the module specifier from the import() call
+    if let Expression::StringLiteral(string_lit) = &expr.source {
+      let from_module = string_lit.value.as_str().to_string();
+
+      debug!("Found dynamic import: {}", from_module);
+
+      // Dynamic imports are always runtime imports (not type-only)
+      // We import everything as a namespace since we can't easily determine
+      // which specific symbols are accessed from the .then() callback
+      let new_imports = self.extract_symbols_from_then(expr, &from_module);
+      self.imports.extend(new_imports);
+
+      self.dynamic_count += 1;
+    }
+
+    // Continue walking the AST
+    walk::walk_import_expression(self, expr);
+  }
+}
+
+impl WorkspaceAnalyzer {
   /// Extract imports from an AST
   fn extract_imports(program: &oxc_ast::ast::Program, file_path: &Path) -> Vec<Import> {
     let mut imports = Vec::new();
 
+    // Extract static imports
     for node in program.body.iter() {
       if let oxc_ast::ast::Statement::ImportDeclaration(import_decl) = node {
         imports.extend(Self::process_import(import_decl));
       }
     }
 
-    debug!("Extracted {} imports from {:?}", imports.len(), file_path);
+    let static_count = imports.len();
+
+    // Extract dynamic imports using visitor
+    let mut visitor = DynamicImportVisitor::new();
+    visitor.visit_program(program);
+    let dynamic_count = visitor.dynamic_count;
+    imports.extend(visitor.imports);
+
+    debug!(
+      "Extracted {} total imports ({} static, {} dynamic) from {:?}",
+      imports.len(),
+      static_count,
+      dynamic_count,
+      file_path
+    );
     imports
   }
 
@@ -728,5 +809,147 @@ export { MemoizedComponent };"#;
     // The important thing is that we get a result and don't panic
     let symbol = result.unwrap();
     assert!(symbol.is_some());
+  }
+
+  #[test]
+  fn test_extract_dynamic_imports_basic() {
+    // Test that dynamic imports are detected
+    let source = r#"
+import { staticImport } from './static';
+
+const LazyComponent = React.lazy(() => import('./LazyComponent'));
+
+async function loadModule() {
+  const module = await import('./dynamic-module');
+  return module;
+}
+"#;
+
+    let file_path = Path::new("test.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 1 static import + 2 dynamic imports
+    assert_eq!(imports.len(), 3);
+
+    // Check static import
+    assert!(imports
+      .iter()
+      .any(|imp| imp.from_module == "./static" && imp.imported_name == "staticImport"));
+
+    // Check dynamic imports
+    let dynamic_imports: Vec<_> = imports
+      .iter()
+      .filter(|imp| imp.from_module == "./LazyComponent" || imp.from_module == "./dynamic-module")
+      .collect();
+    assert_eq!(dynamic_imports.len(), 2);
+
+    // Dynamic imports should be namespace imports
+    for imp in dynamic_imports {
+      assert_eq!(imp.imported_name, "*");
+      assert!(!imp.is_type_only);
+    }
+  }
+
+  #[test]
+  fn test_extract_dynamic_imports_with_then() {
+    // Test dynamic imports with .then() pattern (like the uniclient case)
+    let source = r#"
+const LazyCookieConsent = React.lazy(
+  async () => await import('@lemonade-hq/uniclient-app').then(module => ({ default: module.CookieConsent })),
+);
+"#;
+
+    let file_path = Path::new("App.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 1 dynamic import
+    assert_eq!(imports.len(), 1);
+
+    // Check the dynamic import
+    let imp = &imports[0];
+    assert_eq!(imp.from_module, "@lemonade-hq/uniclient-app");
+    assert_eq!(imp.imported_name, "*"); // Namespace import
+    assert!(!imp.is_type_only);
+  }
+
+  #[test]
+  fn test_extract_no_dynamic_imports() {
+    // Test file with only static imports
+    let source = r#"
+import { Component } from './Component';
+import * as Utils from './utils';
+import type { Props } from './types';
+
+export function MyComponent(props: Props) {
+  return <Component {...props} />;
+}
+"#;
+
+    let file_path = Path::new("test.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 3 static imports, no dynamic imports
+    assert_eq!(imports.len(), 3);
+
+    // None should have synthetic names
+    assert!(!imports
+      .iter()
+      .any(|imp| imp.local_name.starts_with("__dynamic_import_")));
+  }
+
+  #[test]
+  fn test_extract_multiple_dynamic_imports() {
+    // Test multiple dynamic imports in the same file
+    let source = r#"
+const Component1 = React.lazy(() => import('./Component1'));
+const Component2 = React.lazy(() => import('./Component2'));
+const Component3 = React.lazy(() => import('./Component3'));
+
+async function loadAll() {
+  await import('./module1');
+  await import('./module2');
+}
+"#;
+
+    let file_path = Path::new("test.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 5 dynamic imports
+    assert_eq!(imports.len(), 5);
+
+    // All should be namespace imports
+    assert!(imports.iter().all(|imp| imp.imported_name == "*"));
+
+    // Check that all modules are present
+    let modules: Vec<_> = imports.iter().map(|imp| imp.from_module.as_str()).collect();
+    assert!(modules.contains(&"./Component1"));
+    assert!(modules.contains(&"./Component2"));
+    assert!(modules.contains(&"./Component3"));
+    assert!(modules.contains(&"./module1"));
+    assert!(modules.contains(&"./module2"));
   }
 }

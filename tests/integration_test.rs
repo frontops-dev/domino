@@ -586,3 +586,161 @@ export function getTheme() {
     "Object literal property reorder should only affect owning project and implicit deps, not consumers"
   );
 }
+
+#[test]
+fn test_dynamic_import_detection() {
+  let branch = TestBranch::new("test-dynamic-import");
+
+  // Add a file to proj2 that uses dynamic import from proj1
+  branch.make_change(
+    "proj2/lazy-loader.tsx",
+    r#"import React from 'react';
+
+// Dynamic import using React.lazy
+const LazyProj1Component = React.lazy(
+  () => import('@monorepo/proj1').then(m => ({ default: m.proj1 }))
+);
+
+export function LazyLoader() {
+  return <React.Suspense fallback={<div>Loading...</div>}>
+    <LazyProj1Component />
+  </React.Suspense>;
+}
+"#,
+  );
+
+  // Now change proj1 - proj2 should be affected due to dynamic import
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-modified-for-dynamic-import';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // proj1 changed, proj2 has a dynamic import of proj1, proj3 has implicit dependency
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (changed)"
+  );
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (has dynamic import from proj1)"
+  );
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dependency on proj1)"
+  );
+}
+
+#[test]
+fn test_multiple_dynamic_imports() {
+  let branch = TestBranch::new("test-multiple-dynamic-imports");
+
+  // Add a file with multiple dynamic imports
+  branch.make_change(
+    "proj3/dynamic-loader.tsx",
+    r#"import React from 'react';
+
+const Component1 = React.lazy(() => import('@monorepo/proj1'));
+const Component2 = React.lazy(() => import('@monorepo/proj2'));
+
+async function loadModules() {
+  const mod1 = await import('@monorepo/proj1');
+  const mod2 = await import('@monorepo/proj2');
+  return { mod1, mod2 };
+}
+
+export { Component1, Component2, loadModules };
+"#,
+  );
+
+  // Change proj1
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-updated';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // proj1 changed, proj3 dynamically imports it
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected"
+  );
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (has dynamic imports from proj1)"
+  );
+}
+
+#[test]
+fn test_dynamic_import_only_affects_when_changed() {
+  let branch = TestBranch::new("test-dynamic-import-selective");
+
+  // Add a file to proj2 with dynamic import from proj1
+  branch.make_change(
+    "proj2/conditional-import.ts",
+    r#"export async function conditionalLoad() {
+  if (condition) {
+    const module = await import('@monorepo/proj1');
+    return module.proj1();
+  }
+  return 'default';
+}
+"#,
+  );
+
+  // Change proj2's own code, NOT proj1
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+
+export { proj1 } from '@monorepo/proj1';
+
+export function proj2() {
+  proj1();
+  return 'proj2-changed-locally';
+}
+
+export function anotherFn() {
+  return 'anotherFn-modified';
+}
+
+const Decorator = () => (target: typeof MyClass) => target;
+
+@Decorator()
+export class MyClass {
+  constructor() {
+    proj1();
+  }
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // Only proj2 should be affected (it changed), not proj1
+  // proj3 should NOT be affected (proj1 didn't change)
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (it changed)"
+  );
+  assert!(
+    !affected.contains(&"proj1".to_string()),
+    "proj1 should NOT be affected (it didn't change)"
+  );
+}

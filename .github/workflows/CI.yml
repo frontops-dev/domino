@@ -43,6 +43,8 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy
+      - name: Test publish-preview script
+        run: node --test tests/publish-preview.test.js
   build:
     strategy:
       fail-fast: false
@@ -320,17 +322,139 @@ jobs:
       - name: List packages
         run: ls -R ./npm
         shell: bash
-      - name: Publish preview release
+      - name: Prepare preview release
         if: github.event_name == 'pull_request'
         run: |
-          # Publish ALL packages: platform-specific packages + main package
+          # Pack ALL packages: platform-specific packages + main package
           # This is similar to pkg.pr.new approach
           node scripts/publish-preview.js ./npm/darwin-arm64 ./npm/darwin-x64 ./npm/linux-arm64-musl ./npm/linux-x64-gnu ./npm/linux-x64-musl ./npm/win32-x64-msvc .
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Read manifest
+        if: github.event_name == 'pull_request'
+        id: manifest
+        run: |
+          echo "data=$(cat manifest.json | jq -c)" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.data }}
+        with:
+          script: |
+            const manifest = JSON.parse(process.env.MANIFEST);
+
+            console.log(`Creating release: ${manifest.tagName}`);
+
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: manifest.tagName,
+              name: manifest.releaseName,
+              body: manifest.releaseNotes,
+              draft: false,
+              prerelease: true,
+              target_commitish: manifest.commitSha
+            });
+
+            console.log(`✓ Created release: ${release.data.html_url}`);
+            return release.data.id;
+
+      - name: Upload Release Assets
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.data }}
+        with:
+          script: |
+            const fs = require('fs');
+            const manifest = JSON.parse(process.env.MANIFEST);
+
+            // Get the release
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: manifest.tagName
+            });
+
+            console.log(`Uploading assets to release ${manifest.tagName}...`);
+
+            // Upload platform packages
+            for (const pkg of manifest.packages) {
+              console.log(`  Uploading ${pkg.tarball}...`);
+
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+                name: pkg.tarball,
+                data: await fs.promises.readFile(pkg.path)
+              });
+
+              console.log(`  ✓ Uploaded ${pkg.tarball}`);
+            }
+
+            // Upload main package
+            console.log(`  Uploading ${manifest.mainPackage.tarball}...`);
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              name: manifest.mainPackage.tarball,
+              data: await fs.promises.readFile(manifest.mainPackage.path)
+            });
+
+            console.log(`  ✓ Uploaded ${manifest.mainPackage.tarball}`);
+            console.log(`\n✓ All assets uploaded successfully`);
+
+      - name: Post or Update PR Comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.data }}
+        with:
+          script: |
+            const manifest = JSON.parse(process.env.MANIFEST);
+            const marker = '<!-- domino-preview-release -->';
+
+            console.log(`Managing PR comment for PR #${manifest.prNumber}...`);
+
+            // Find existing comment with our marker
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(comment =>
+              comment.body?.includes(marker)
+            );
+
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: manifest.commentBody
+              });
+              console.log(`✓ Updated existing comment #${existingComment.id}`);
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: manifest.commentBody
+              });
+              console.log(`✓ Created new comment`);
+            }
+
       - name: Publish to npm
         if: github.event_name != 'pull_request'
         run: |

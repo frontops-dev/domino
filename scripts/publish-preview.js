@@ -4,7 +4,8 @@ const fs = require('fs')
 const path = require('path')
 const { execSync } = require('child_process')
 
-const REPO_ROOT = path.resolve(__dirname, '..')
+// Use current working directory as repo root to support running from different directories
+const REPO_ROOT = process.cwd()
 
 function execCommand(command, options = {}) {
   console.log(`> ${command}`)
@@ -25,14 +26,18 @@ function execCommandCapture(command, options = {}) {
 }
 
 async function main() {
-  // Get environment variables
-  const prNumber = process.env.PR_NUMBER
-  const commitSha = process.env.COMMIT_SHA
-  const repository = process.env.GITHUB_REPOSITORY
-
-  if (!prNumber || !commitSha || !repository) {
-    throw new Error('Missing required environment variables: PR_NUMBER, COMMIT_SHA, GITHUB_REPOSITORY')
-  }
+  // Get environment variables with fallbacks for local development
+  const prNumber = process.env.PR_NUMBER || 'local'
+  const commitSha = process.env.COMMIT_SHA || execCommandCapture('git rev-parse HEAD').substring(0, 40)
+  const repository = process.env.GITHUB_REPOSITORY || (() => {
+    try {
+      const remoteUrl = execCommandCapture('git config --get remote.origin.url')
+      const match = remoteUrl.match(/github\.com[:/](.+?)(?:\.git)?$/)
+      return match ? match[1] : 'owner/repo'
+    } catch {
+      return 'owner/repo'
+    }
+  })()
 
   // Get package paths from command line arguments
   const packagePaths = process.argv.slice(2)
@@ -54,20 +59,11 @@ async function main() {
   console.log(`Version: ${version}`)
   console.log(`Packages to publish: ${packagePaths.join(', ')}`)
 
-  // Create GitHub Release
-  console.log('\n📦 Creating GitHub Release...')
-  execCommand(
-    `gh release create "${tagName}" ` +
-      `--title "${releaseName}" ` +
-      `--notes "Preview build for PR #${prNumber} (commit ${shortSha})" ` +
-      `--prerelease ` +
-      `--target "${commitSha}"`,
-  )
-
-  // Pack and upload platform-specific packages
-  console.log('\n📦 Packing and uploading platform packages...')
+  // Pack platform-specific packages
+  console.log('\n📦 Packing platform packages...')
   const platformUrls = {}
   const publishedPackageNames = new Set()
+  const packages = []
 
   for (const packagePath of packagePaths) {
     const platformDir = path.resolve(REPO_ROOT, packagePath)
@@ -101,15 +97,21 @@ async function main() {
     const packInfo = JSON.parse(packOutput)
     const tarball = packInfo[0].filename
 
-    // Upload to release
+    // Store tarball info
     const tarballPath = path.join(platformDir, tarball)
-    execCommand(`gh release upload "${tagName}" "${tarballPath}"`)
 
     // Store URL for package.json update
     platformUrls[packageName] = `${releaseUrl}/${tarball}`
     publishedPackageNames.add(packageName)
 
-    console.log(`✓ Uploaded ${tarball} (${packageName})`)
+    // Add to packages array for manifest
+    packages.push({
+      name: packageName,
+      tarball: tarball,
+      path: tarballPath,
+    })
+
+    console.log(`✓ Packed ${tarball} (${packageName})`)
   }
 
   // Update main package.json optionalDependencies with release URLs
@@ -134,14 +136,14 @@ async function main() {
   console.log('Updated optionalDependencies:')
   console.log(JSON.stringify(newOptDeps, null, 2))
 
-  // Pack and upload main package
-  console.log('\n📦 Packing and uploading main package...')
+  // Pack main package
+  console.log('\n📦 Packing main package...')
   const mainPackOutput = execCommandCapture('npm pack --json')
   const mainPackInfo = JSON.parse(mainPackOutput)
   const mainTarball = mainPackInfo[0].filename
+  const mainTarballPath = path.join(REPO_ROOT, mainTarball)
 
-  execCommand(`gh release upload "${tagName}" "${mainTarball}"`)
-  console.log(`✓ Uploaded ${mainTarball}`)
+  console.log(`✓ Packed ${mainTarball}`)
 
   // Print installation instructions
   const installUrl = `${releaseUrl}/${mainTarball}`
@@ -157,10 +159,9 @@ async function main() {
   console.log(`  ${installUrl}`)
   console.log('')
 
-  // Post or update comment on PR with installation instructions
-  console.log('💬 Managing PR comment...')
+  // Generate manifest for CI workflow
+  console.log('\n📝 Generating manifest.json...')
 
-  // Add a unique marker to identify our comments
   const commentMarker = '<!-- domino-preview-release -->'
   const commentBody = `${commentMarker}
 ## 📦 Preview Release Available
@@ -178,41 +179,30 @@ npm install ${installUrl}
 - **Release**: [${tagName}](https://github.com/${repository}/releases/tag/${tagName})
 - **Direct URL**: ${installUrl}`
 
-  // Check for existing comment with our marker
-  let existingCommentId = null
-  try {
-    const commentsJson = execCommandCapture(`gh api repos/${repository}/issues/${prNumber}/comments --paginate`, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    const comments = JSON.parse(commentsJson)
-
-    // Find comment with our marker
-    const existingComment = comments.find((c) => c.body && c.body.includes(commentMarker))
-    if (existingComment) {
-      existingCommentId = existingComment.id
-    }
-  } catch (error) {
-    console.log('Note: Could not fetch existing comments, will create new comment')
+  const manifest = {
+    tagName,
+    releaseName,
+    shortSha,
+    version,
+    repository,
+    prNumber,
+    commitSha,
+    releaseNotes: `Preview build for PR #${prNumber} (commit ${shortSha})`,
+    packages,
+    mainPackage: {
+      tarball: mainTarball,
+      path: mainTarballPath,
+    },
+    installUrl,
+    commentBody,
   }
 
-  // Write comment body to temp file to handle multiline content safely
-  const commentFile = path.join(REPO_ROOT, '.preview-comment.md')
-  fs.writeFileSync(commentFile, commentBody, 'utf8')
+  const manifestPath = path.join(REPO_ROOT, 'manifest.json')
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  console.log(`✓ Manifest written to ${manifestPath}`)
 
-  try {
-    if (existingCommentId) {
-      // Update existing comment
-      execCommand(`gh api -X PATCH repos/${repository}/issues/comments/${existingCommentId} -F body=@"${commentFile}"`)
-      console.log(`✓ Updated existing comment on PR #${prNumber}`)
-    } else {
-      // Create new comment
-      execCommand(`gh pr comment ${prNumber} --body-file "${commentFile}"`)
-      console.log(`✓ Posted new comment on PR #${prNumber}`)
-    }
-  } finally {
-    // Clean up temp file
-    fs.unlinkSync(commentFile)
-  }
+  console.log('\n✅ Preview release prepared successfully!')
+  console.log('📄 manifest.json contains all the information needed for CI to publish the release.')
 }
 
 if (require.main === module) {

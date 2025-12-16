@@ -535,8 +535,19 @@ impl WorkspaceAnalyzer {
       // Check if this exact offset is within the node's span
       if node_start <= exact_offset && node_end >= exact_offset {
         let span_size = node_end - node_start;
-        // Keep the smallest containing node
-        if span_size < smallest_span_size {
+
+        // Keep the smallest containing node, but prefer non-Program nodes when sizes are equal
+        // This handles the case where an ExportNamedDeclaration spans the entire file
+        let should_update = if span_size < smallest_span_size {
+          true
+        } else if span_size == smallest_span_size {
+          // When sizes are equal, prefer non-Program nodes
+          !matches!(node.kind(), AstKind::Program(_))
+        } else {
+          false
+        };
+
+        if should_update {
           smallest_span_size = span_size;
           node_on_line_id = Some(node.id());
         }
@@ -550,6 +561,58 @@ impl WorkspaceAnalyzer {
     // Find the containing top-level declaration (exported symbol)
     let mut current_id = node_on_line_id.unwrap();
     let mut top_level_name: Option<String> = None;
+    let mut found_export_wrapper = false;
+
+    // First check the current node itself
+    let current_node = nodes.get_node(current_id);
+    // Handle export wrappers - look inside them for the actual declaration
+    if let AstKind::ExportNamedDeclaration(export_decl) = current_node.kind() {
+      found_export_wrapper = true;
+      // Check if there's an inline declaration (export const x = ...)
+      if let Some(decl) = &export_decl.declaration {
+        match decl {
+          oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+            for declarator in &var_decl.declarations {
+              if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind {
+                top_level_name = Some(id.name.to_string());
+                break;
+              }
+            }
+          }
+          oxc_ast::ast::Declaration::FunctionDeclaration(func_decl) => {
+            if let Some(id) = &func_decl.id {
+              top_level_name = Some(id.name.to_string());
+            }
+          }
+          oxc_ast::ast::Declaration::ClassDeclaration(class_decl) => {
+            if let Some(id) = &class_decl.id {
+              top_level_name = Some(id.name.to_string());
+            }
+          }
+          oxc_ast::ast::Declaration::TSInterfaceDeclaration(interface) => {
+            top_level_name = Some(interface.id.name.to_string());
+          }
+          oxc_ast::ast::Declaration::TSTypeAliasDeclaration(type_alias) => {
+            top_level_name = Some(type_alias.id.name.to_string());
+          }
+          oxc_ast::ast::Declaration::TSEnumDeclaration(enum_decl) => {
+            top_level_name = Some(enum_decl.id.name.to_string());
+          }
+          _ => {}
+        }
+      }
+    }
+
+    // If we found the symbol at the current node level, return it
+    if found_export_wrapper && top_level_name.is_some() {
+      // Record profiling time
+      if let Some(start_time) = start {
+        self
+          .profiler
+          .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+      }
+      return Ok(top_level_name);
+    }
 
     // Walk up the tree to find a top-level exported declaration
     loop {
@@ -561,33 +624,93 @@ impl WorkspaceAnalyzer {
       let parent_node = nodes.get_node(parent_id);
 
       match parent_node.kind() {
+        // Handle export wrappers - look inside them for the actual declaration
+        AstKind::ExportNamedDeclaration(export_decl) => {
+          found_export_wrapper = true;
+          // Check if there's an inline declaration (export const x = ...)
+          if let Some(decl) = &export_decl.declaration {
+            match decl {
+              oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+                for declarator in &var_decl.declarations {
+                  if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) =
+                    &declarator.id.kind
+                  {
+                    top_level_name = Some(id.name.to_string());
+                    break;
+                  }
+                }
+              }
+              oxc_ast::ast::Declaration::FunctionDeclaration(func_decl) => {
+                if let Some(id) = &func_decl.id {
+                  top_level_name = Some(id.name.to_string());
+                }
+              }
+              oxc_ast::ast::Declaration::ClassDeclaration(class_decl) => {
+                if let Some(id) = &class_decl.id {
+                  top_level_name = Some(id.name.to_string());
+                }
+              }
+              oxc_ast::ast::Declaration::TSInterfaceDeclaration(interface) => {
+                top_level_name = Some(interface.id.name.to_string());
+              }
+              oxc_ast::ast::Declaration::TSTypeAliasDeclaration(type_alias) => {
+                top_level_name = Some(type_alias.id.name.to_string());
+              }
+              oxc_ast::ast::Declaration::TSEnumDeclaration(enum_decl) => {
+                top_level_name = Some(enum_decl.id.name.to_string());
+              }
+              _ => {}
+            }
+          }
+        }
+        AstKind::ExportDefaultDeclaration(_) => {
+          found_export_wrapper = true;
+          top_level_name = Some("default".to_string());
+        }
         // Top-level declarations that can be exported
         AstKind::Function(func) => {
-          if let Some(id) = &func.id {
-            top_level_name = Some(id.name.to_string());
+          if !found_export_wrapper {
+            if let Some(id) = &func.id {
+              top_level_name = Some(id.name.to_string());
+            }
           }
         }
         AstKind::Class(class) => {
-          if let Some(id) = &class.id {
-            top_level_name = Some(id.name.to_string());
+          if !found_export_wrapper {
+            if let Some(id) = &class.id {
+              top_level_name = Some(id.name.to_string());
+            }
           }
         }
         AstKind::TSInterfaceDeclaration(interface) => {
-          top_level_name = Some(interface.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(interface.id.name.to_string());
+          }
         }
         AstKind::TSTypeAliasDeclaration(type_alias) => {
-          top_level_name = Some(type_alias.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(type_alias.id.name.to_string());
+          }
         }
         AstKind::TSEnumDeclaration(enum_decl) => {
-          top_level_name = Some(enum_decl.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(enum_decl.id.name.to_string());
+          }
         }
         AstKind::VariableDeclarator(var_decl) => {
           // For const/let declarations, get the binding name
-          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
-            top_level_name = Some(ident.name.to_string());
+          if !found_export_wrapper {
+            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
+              top_level_name = Some(ident.name.to_string());
+            }
           }
         }
         _ => {}
+      }
+
+      // If we found a symbol from an export wrapper, we can stop
+      if found_export_wrapper && top_level_name.is_some() {
+        break;
       }
 
       current_id = parent_id;
@@ -728,5 +851,108 @@ export { MemoizedComponent };"#;
     // The important thing is that we get a result and don't panic
     let symbol = result.unwrap();
     assert!(symbol.is_some());
+  }
+
+  #[test]
+  fn test_find_node_at_line_simple_export() {
+    // Test finding an exported const on the first line of a file
+    let source = r#"export const MAX_WIDTH = 5;"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    // Parse the source file
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    // Build semantic data
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 1, column 0 should find MAX_WIDTH
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok(), "Should not error: {:?}", result);
+    let symbol = result.unwrap();
+    assert_eq!(
+      symbol,
+      Some("MAX_WIDTH".to_string()),
+      "Should find MAX_WIDTH at line 1 column 0"
+    );
+  }
+
+  #[test]
+  fn test_find_node_at_line_exported_const() {
+    // Test that we can find an exported const variable at its declaration line
+    // This reproduces the bug where `export const TITLE_COLUMNS = 5;` wasn't being found
+    let source = r#"import { Component } from './component';
+
+export const TITLE_COLUMNS = 5;
+
+export function MyComponent() {
+  return <div>Test</div>;
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    // Parse the source file
+    let file_path = Path::new("test.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    // Build semantic data
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 3 contains: export const TITLE_COLUMNS = 5;
+    // With column 0, we're at the 'e' in 'export'
+    // We should find "TITLE_COLUMNS" as the variable being declared
+    let result = analyzer.find_node_at_line(file_path, 3, 0);
+    assert!(result.is_ok(), "Should not error: {:?}", result);
+    let symbol = result.unwrap();
+    assert_eq!(
+      symbol,
+      Some("TITLE_COLUMNS".to_string()),
+      "Should find TITLE_COLUMNS at line 3 column 0"
+    );
   }
 }

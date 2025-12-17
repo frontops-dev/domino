@@ -52,6 +52,9 @@ pub struct Import {
   /// Whether this is a type-only import
   #[allow(dead_code)]
   pub is_type_only: bool,
+  /// Whether this import comes from a dynamic import() expression
+  /// Dynamic imports get conservative treatment for namespace resolution
+  pub is_dynamic: bool,
 }
 
 /// Export information

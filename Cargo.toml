@@ -38,6 +38,7 @@ thiserror = "1.0"
 # Oxc - The Foundation
 oxc_allocator = "0.97"
 oxc_ast       = "0.97"
+oxc_ast_visit = "0.97"
 oxc_parser    = "0.97"
 oxc_semantic  = "0.97"
 oxc_span      = "0.97"

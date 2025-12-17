@@ -197,8 +197,8 @@ impl<'a> ReferenceFinder<'a> {
               );
               all_refs.push(Reference {
                 file_path: importing_file.clone(),
-                line: 0,  // Sentinel value: line 0 indicates "entire file affected"
-                column: 0,  // Sentinel value: column 0 with line 0
+                line: 0,   // Sentinel value: line 0 indicates "entire file affected"
+                column: 0, // Sentinel value: column 0 with line 0
               });
             }
             // For static namespace imports (import * as foo), if we don't find any references

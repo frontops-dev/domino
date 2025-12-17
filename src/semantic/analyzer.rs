@@ -20,7 +20,8 @@ use std::time::Instant;
 use tracing::{debug, warn};
 
 /// Type alias for import index entries: (importing_file, local_name, from_module)
-type ImportIndexEntry = Vec<(PathBuf, String, String)>;
+/// (importing_file, local_name, from_module, is_dynamic)
+type ImportIndexEntry = Vec<(PathBuf, String, String, bool)>;
 /// Type alias for the import index map: (source_file, symbol_name) -> entries
 type ImportIndexMap = FxHashMap<(PathBuf, String), ImportIndexEntry>;
 
@@ -153,12 +154,13 @@ impl WorkspaceAnalyzer {
           }
         };
 
-        // Add to index: (resolved_file, imported_symbol) -> (importing_file, local_name, from_module)
+        // Add to index: (resolved_file, imported_symbol) -> (importing_file, local_name, from_module, is_dynamic)
         let key = (resolved, import.imported_name.clone());
         index.entry(key).or_default().push((
           importing_file.clone(),
           import.local_name.clone(),
           import.from_module.clone(),
+          import.is_dynamic,
         ));
       }
     }
@@ -305,7 +307,7 @@ struct DynamicImportVisitor<'a> {
   imports: Vec<Import>,
   dynamic_count: usize,
   /// Phantom data to maintain lifetime parameter
-  #[allow(dead_code)]
+  /// This zero-sized type marker ensures the visitor maintains the correct lifetime
   _phantom: std::marker::PhantomData<&'a ()>,
 }
 
@@ -318,41 +320,44 @@ impl<'a> DynamicImportVisitor<'a> {
     }
   }
 
-  /// Extract imported symbols from .then() callback if present
-  /// Handles patterns like: import('module').then(m => ({ default: m.Symbol }))
-  fn extract_symbols_from_then(
-    &self,
-    _expr: &oxc_ast::ast::ImportExpression<'a>,
-    from_module: &str,
-  ) -> Vec<Import> {
-    // For simplicity, we'll import all exports from the module
-    // A more sophisticated implementation would parse the .then() callback
-    // to extract specific symbols like `m.CookieConsent`
-    vec![Import {
+  /// Create a namespace import for a dynamic import expression
+  ///
+  /// Since we can't statically analyze which symbols are accessed from dynamic imports
+  /// (especially with .then() transformations), we conservatively treat them as
+  /// namespace imports (import * as ...) to ensure we track the dependency.
+  fn create_namespace_import(&self, from_module: &str) -> Import {
+    Import {
       imported_name: "*".to_string(),
       local_name: format!("__dynamic_import_{}", self.dynamic_count),
       from_module: from_module.to_string(),
       resolved_file: None,
       is_type_only: false,
-    }]
+      is_dynamic: true,
+    }
   }
 }
 
 impl<'a> Visit<'a> for DynamicImportVisitor<'a> {
   fn visit_import_expression(&mut self, expr: &oxc_ast::ast::ImportExpression<'a>) {
     // Extract the module specifier from the import() call
-    if let Expression::StringLiteral(string_lit) = &expr.source {
-      let from_module = string_lit.value.as_str().to_string();
+    match &expr.source {
+      Expression::StringLiteral(string_lit) => {
+        let from_module = string_lit.value.as_str().to_string();
+        debug!("Found dynamic import: {}", from_module);
 
-      debug!("Found dynamic import: {}", from_module);
-
-      // Dynamic imports are always runtime imports (not type-only)
-      // We import everything as a namespace since we can't easily determine
-      // which specific symbols are accessed from the .then() callback
-      let new_imports = self.extract_symbols_from_then(expr, &from_module);
-      self.imports.extend(new_imports);
-
-      self.dynamic_count += 1;
+        // Create a namespace import for this dynamic import
+        let import = self.create_namespace_import(&from_module);
+        self.imports.push(import);
+        self.dynamic_count += 1;
+      }
+      _ => {
+        // Non-string-literal imports (template literals, variables, etc.)
+        // are not currently supported. These would require runtime evaluation.
+        warn!(
+          "Skipping dynamic import with non-string-literal specifier (template literal or variable). \
+           Only string literal dynamic imports are currently supported for affected analysis."
+        );
+      }
     }
 
     // Continue walking the AST
@@ -408,6 +413,7 @@ impl WorkspaceAnalyzer {
               from_module: from_module.clone(),
               resolved_file: None, // Will be resolved later
               is_type_only: is_type_only || spec.import_kind.is_type(),
+              is_dynamic: false,
             });
           }
           ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
@@ -417,6 +423,7 @@ impl WorkspaceAnalyzer {
               from_module: from_module.clone(),
               resolved_file: None,
               is_type_only,
+              is_dynamic: false,
             });
           }
           ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => {
@@ -426,6 +433,7 @@ impl WorkspaceAnalyzer {
               from_module: from_module.clone(),
               resolved_file: None,
               is_type_only,
+              is_dynamic: false,
             });
           }
         }
@@ -951,5 +959,74 @@ async function loadAll() {
     assert!(modules.contains(&"./Component3"));
     assert!(modules.contains(&"./module1"));
     assert!(modules.contains(&"./module2"));
+  }
+
+  #[test]
+  fn test_extract_dynamic_imports_non_string_literal() {
+    // Test that non-string-literal dynamic imports are properly skipped with a warning
+    let source = r#"
+// Template literal (not supported)
+const moduleName = 'dynamic-module';
+const module1 = await import(`./modules/${moduleName}`);
+
+// Variable (not supported)
+const specifier = './some-module';
+const module2 = await import(specifier);
+
+// String literal (supported)
+const module3 = await import('./supported-module');
+"#;
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should only have 1 import (the string literal one)
+    // The template literal and variable imports should be skipped with warnings
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].from_module, "./supported-module");
+    assert_eq!(imports[0].imported_name, "*");
+    assert!(imports[0].is_dynamic);
+  }
+
+  #[test]
+  fn test_dynamic_imports_are_marked() {
+    // Test that dynamic imports have is_dynamic = true and static imports have is_dynamic = false
+    let source = r#"
+import { StaticImport } from './static';
+import * as StaticNamespace from './static-namespace';
+
+const DynamicImport = await import('./dynamic');
+"#;
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 2 static + 1 dynamic = 3 imports
+    assert_eq!(imports.len(), 3);
+
+    // Check static imports
+    let static_imports: Vec<_> = imports.iter().filter(|imp| !imp.is_dynamic).collect();
+    assert_eq!(static_imports.len(), 2);
+    assert!(static_imports
+      .iter()
+      .all(|imp| imp.from_module.starts_with("./static")));
+
+    // Check dynamic import
+    let dynamic_imports: Vec<_> = imports.iter().filter(|imp| imp.is_dynamic).collect();
+    assert_eq!(dynamic_imports.len(), 1);
+    assert_eq!(dynamic_imports[0].from_module, "./dynamic");
+    assert_eq!(dynamic_imports[0].imported_name, "*");
   }
 }

@@ -123,7 +123,7 @@ impl<'a> ReferenceFinder<'a> {
 
     // Use the import index to find direct imports of this symbol
     if let Some(importers) = self.analyzer.import_index.get(&key) {
-      for (importing_file, local_name, _from_module) in importers {
+      for (importing_file, local_name, _from_module, _is_dynamic) in importers {
         debug!(
           "Found import of '{}' in {:?} as '{}'",
           symbol_name, importing_file, local_name
@@ -166,45 +166,49 @@ impl<'a> ReferenceFinder<'a> {
     // Also check for namespace imports (import * as foo)
     let namespace_key = (current_file.to_path_buf(), "*".to_string());
     if let Some(importers) = self.analyzer.import_index.get(&namespace_key) {
-      for (importing_file, local_name, _from_module) in importers {
+      for (importing_file, local_name, _from_module, is_dynamic) in importers {
         debug!(
-          "Found namespace import in {:?} as '{}' (checking for {}.{})",
-          importing_file, local_name, local_name, symbol_name
+          "Found {} namespace import in {:?} as '{}' (checking for {}.{})",
+          if *is_dynamic { "dynamic" } else { "static" },
+          importing_file,
+          local_name,
+          local_name,
+          symbol_name
         );
 
         // For namespace imports, we need to find references to namespace.symbol
-        // This is more complex - for now, we'll mark the whole file as potentially affected
-        // We add the file as a reference even if we don't find specific uses of the namespace
-        // This is especially important for dynamic imports where the namespace identifier may be synthetic
         match self
           .analyzer
           .find_local_references(importing_file, local_name)
         {
           Ok(local_refs) => {
             if !local_refs.is_empty() {
+              // Found actual references to the namespace - these files are definitely affected
               all_refs.extend(local_refs);
-            } else {
-              // No local references found, but namespace import exists
-              // Add a reference to the importing file itself
+            } else if *is_dynamic {
+              // Dynamic imports (from import() expressions) get conservative treatment:
+              // Even if we can't find local references to the synthetic namespace identifier
+              // (like __dynamic_import_0), we still mark the file as affected because
+              // the dynamic import likely uses the module in ways we can't statically analyze
+              // (e.g., import('module').then(m => m.Component))
               debug!(
-                "No local references to namespace '{}', but marking file {:?} as affected",
+                "No local references to dynamic namespace '{}', but marking file {:?} as affected (conservative)",
                 local_name, importing_file
               );
               all_refs.push(Reference {
                 file_path: importing_file.clone(),
-                line: 0,
-                column: 0,
+                line: 0,  // Sentinel value: line 0 indicates "entire file affected"
+                column: 0,  // Sentinel value: column 0 with line 0
               });
             }
+            // For static namespace imports (import * as foo), if we don't find any references
+            // to 'foo', we don't mark the file as affected (strict behavior) since the
+            // import is likely unused or dead code.
           }
           Err(e) => {
-            warn!("Error finding local references: {}", e);
-            // Still mark the file as potentially affected
-            all_refs.push(Reference {
-              file_path: importing_file.clone(),
-              line: 0,
-              column: 0,
-            });
+            // Propagate the error instead of silently marking as affected
+            // This ensures bugs in reference finding don't hide real issues
+            return Err(e);
           }
         }
       }

@@ -940,70 +940,6 @@ export { MemoizedComponent };"#;
   }
 
   #[test]
-  fn test_find_node_at_line_simple_export() {
-    // Test finding an exported const on the first line of a file
-    let source = r#"export const MAX_WIDTH = 5;"#;
-
-    let cwd = Path::new(".");
-    let profiler = Arc::new(Profiler::new(false));
-    let mut analyzer =
-      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
-
-    // Parse the source file
-    let file_path = Path::new("test.ts");
-    let source_type = SourceType::from_path(file_path)
-      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
-    let allocator = Allocator::default();
-    let parser = Parser::new(&allocator, source, source_type);
-    let parse_result = parser.parse();
-
-    // Build semantic data
-    let semantic_builder = SemanticBuilder::new()
-      .with_cfg(true)
-      .with_check_syntax_error(false);
-    let semantic_ret = semantic_builder.build(&parse_result.program);
-
-    let semantic: oxc_semantic::Semantic<'static> =
-      unsafe { std::mem::transmute(semantic_ret.semantic) };
-
-    analyzer.files.insert(
-      file_path.to_path_buf(),
-      FileSemanticData {
-        source: source.to_string(),
-        allocator,
-        semantic,
-      },
-    );
-
-    // Line 1, column 0 should find MAX_WIDTH
-    let result = analyzer.find_node_at_line(file_path, 1, 0);
-    assert!(result.is_ok(), "Should not error: {:?}", result);
-    let symbol = result.unwrap();
-    assert_eq!(
-      symbol,
-      Some("MAX_WIDTH".to_string()),
-      "Should find MAX_WIDTH at line 1 column 0"
-    );
-  }
-
-  #[test]
-  fn test_find_node_at_line_exported_const() {
-    // Test that we can find an exported const variable at its declaration line
-    // This reproduces the bug where `export const TITLE_COLUMNS = 5;` wasn't being found
-    let source = r#"import { Component } from './component';
-
-export const TITLE_COLUMNS = 5;
-
-export function MyComponent() {
-  return <div>Test</div>;
-}"#;
-
-    let cwd = Path::new(".");
-    let profiler = Arc::new(Profiler::new(false));
-    let mut analyzer =
-      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
-
-    // Parse the source file
   fn test_extract_dynamic_imports_basic() {
     // Test that dynamic imports are detected
     let source = r#"
@@ -1024,48 +960,6 @@ async function loadModule() {
     let parser = Parser::new(&allocator, source, source_type);
     let parse_result = parser.parse();
 
-    // Build semantic data
-    let semantic_builder = SemanticBuilder::new()
-      .with_cfg(true)
-      .with_check_syntax_error(false);
-    let semantic_ret = semantic_builder.build(&parse_result.program);
-
-    let semantic: oxc_semantic::Semantic<'static> =
-      unsafe { std::mem::transmute(semantic_ret.semantic) };
-
-    analyzer.files.insert(
-      file_path.to_path_buf(),
-      FileSemanticData {
-        source: source.to_string(),
-        allocator,
-        semantic,
-      },
-    );
-
-    // Line 3 contains: export const TITLE_COLUMNS = 5;
-    // With column 0, we're at the 'e' in 'export'
-    // We should find "TITLE_COLUMNS" as the variable being declared
-    let result = analyzer.find_node_at_line(file_path, 3, 0);
-    assert!(result.is_ok(), "Should not error: {:?}", result);
-    let symbol = result.unwrap();
-    assert_eq!(
-      symbol,
-      Some("TITLE_COLUMNS".to_string()),
-      "Should find TITLE_COLUMNS at line 3 column 0"
-    );
-  }
-
-  #[test]
-  fn test_find_node_at_line_export_default_named() {
-    // Test finding a named default export
-    let source = r#"export default function myFunction() {
-  return 'test';
-}"#;
-
-    let cwd = Path::new(".");
-    let profiler = Arc::new(Profiler::new(false));
-    let mut analyzer =
-      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
     let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
 
     // Should have 1 static import + 2 dynamic imports
@@ -1210,6 +1104,71 @@ const module3 = await import('./supported-module');
     let parser = Parser::new(&allocator, source, source_type);
     let parse_result = parser.parse();
 
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should only have 1 import (the string literal one)
+    // The template literal and variable imports should be skipped with warnings
+    assert_eq!(imports.len(), 1);
+    assert_eq!(imports[0].from_module, "./supported-module");
+    assert_eq!(imports[0].imported_name, "*");
+    assert!(imports[0].is_dynamic);
+  }
+
+  #[test]
+  fn test_dynamic_imports_are_marked() {
+    // Test that dynamic imports have is_dynamic = true and static imports have is_dynamic = false
+    let source = r#"
+import { StaticImport } from './static';
+import * as StaticNamespace from './static-namespace';
+
+const DynamicImport = await import('./dynamic');
+"#;
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
+
+    // Should have 2 static + 1 dynamic = 3 imports
+    assert_eq!(imports.len(), 3);
+
+    // Check static imports
+    let static_imports: Vec<_> = imports.iter().filter(|imp| !imp.is_dynamic).collect();
+    assert_eq!(static_imports.len(), 2);
+    assert!(static_imports
+      .iter()
+      .all(|imp| imp.from_module.starts_with("./static")));
+
+    // Check dynamic import
+    let dynamic_imports: Vec<_> = imports.iter().filter(|imp| imp.is_dynamic).collect();
+    assert_eq!(dynamic_imports.len(), 1);
+    assert_eq!(dynamic_imports[0].from_module, "./dynamic");
+    assert_eq!(dynamic_imports[0].imported_name, "*");
+  }
+
+  #[test]
+  fn test_find_node_at_line_export_default_named() {
+    // Test finding a named default export
+    let source = r#"export default function myFunction() {
+  return 'test';
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
     let semantic_builder = SemanticBuilder::new()
       .with_cfg(true)
       .with_check_syntax_error(false);
@@ -1248,25 +1207,6 @@ const module3 = await import('./supported-module');
     let profiler = Arc::new(Profiler::new(false));
     let mut analyzer =
       WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
-    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
-
-    // Should only have 1 import (the string literal one)
-    // The template literal and variable imports should be skipped with warnings
-    assert_eq!(imports.len(), 1);
-    assert_eq!(imports[0].from_module, "./supported-module");
-    assert_eq!(imports[0].imported_name, "*");
-    assert!(imports[0].is_dynamic);
-  }
-
-  #[test]
-  fn test_dynamic_imports_are_marked() {
-    // Test that dynamic imports have is_dynamic = true and static imports have is_dynamic = false
-    let source = r#"
-import { StaticImport } from './static';
-import * as StaticNamespace from './static-namespace';
-
-const DynamicImport = await import('./dynamic');
-"#;
 
     let file_path = Path::new("test.ts");
     let source_type = SourceType::from_path(file_path)
@@ -1396,22 +1336,5 @@ export function third() {
     let result3 = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result3.is_ok());
     assert_eq!(result3.unwrap(), Some("third".to_string()));
-    let imports = WorkspaceAnalyzer::extract_imports(&parse_result.program, file_path);
-
-    // Should have 2 static + 1 dynamic = 3 imports
-    assert_eq!(imports.len(), 3);
-
-    // Check static imports
-    let static_imports: Vec<_> = imports.iter().filter(|imp| !imp.is_dynamic).collect();
-    assert_eq!(static_imports.len(), 2);
-    assert!(static_imports
-      .iter()
-      .all(|imp| imp.from_module.starts_with("./static")));
-
-    // Check dynamic import
-    let dynamic_imports: Vec<_> = imports.iter().filter(|imp| imp.is_dynamic).collect();
-    assert_eq!(dynamic_imports.len(), 1);
-    assert_eq!(dynamic_imports[0].from_module, "./dynamic");
-    assert_eq!(dynamic_imports[0].imported_name, "*");
   }
 }

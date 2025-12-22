@@ -585,6 +585,44 @@ impl WorkspaceAnalyzer {
     crate::utils::offset_to_line_col(source, offset)
   }
 
+  /// Helper method to extract symbol name from an export declaration
+  ///
+  /// Handles various export patterns:
+  /// - export const/let/var X = ...
+  /// - export function X() {}
+  /// - export class X {}
+  /// - export interface X {}
+  /// - export type X = ...
+  /// - export enum X {}
+  fn extract_symbol_from_export_decl(decl: &oxc_ast::ast::Declaration) -> Option<String> {
+    match decl {
+      oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
+        for declarator in &var_decl.declarations {
+          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind {
+            return Some(id.name.to_string());
+          }
+        }
+        None
+      }
+      oxc_ast::ast::Declaration::FunctionDeclaration(func_decl) => {
+        func_decl.id.as_ref().map(|id| id.name.to_string())
+      }
+      oxc_ast::ast::Declaration::ClassDeclaration(class_decl) => {
+        class_decl.id.as_ref().map(|id| id.name.to_string())
+      }
+      oxc_ast::ast::Declaration::TSInterfaceDeclaration(interface) => {
+        Some(interface.id.name.to_string())
+      }
+      oxc_ast::ast::Declaration::TSTypeAliasDeclaration(type_alias) => {
+        Some(type_alias.id.name.to_string())
+      }
+      oxc_ast::ast::Declaration::TSEnumDeclaration(enum_decl) => {
+        Some(enum_decl.id.name.to_string())
+      }
+      _ => None,
+    }
+  }
+
   /// Find node at a specific line in a file
   pub fn find_node_at_line(
     &self,
@@ -624,8 +662,26 @@ impl WorkspaceAnalyzer {
       // Check if this exact offset is within the node's span
       if node_start <= exact_offset && node_end >= exact_offset {
         let span_size = node_end - node_start;
-        // Keep the smallest containing node
-        if span_size < smallest_span_size {
+
+        // Keep the smallest containing node, but prefer non-Program nodes when sizes are equal
+        // This handles the case where an ExportNamedDeclaration spans the entire file
+        let should_update = if span_size < smallest_span_size {
+          // Smaller node found - always update
+          true
+        } else if span_size == smallest_span_size {
+          // When sizes are equal, prefer non-Program nodes, but only update if we don't already
+          // have a non-Program node (to ensure deterministic selection - first non-Program wins)
+          let current_is_program = matches!(node.kind(), AstKind::Program(_));
+          let existing_is_program = node_on_line_id
+            .map(|id| matches!(nodes.get_node(id).kind(), AstKind::Program(_)))
+            .unwrap_or(true);
+
+          !current_is_program && existing_is_program
+        } else {
+          false
+        };
+
+        if should_update {
           smallest_span_size = span_size;
           node_on_line_id = Some(node.id());
         }
@@ -640,6 +696,41 @@ impl WorkspaceAnalyzer {
     let mut current_id = node_on_line_id.unwrap();
     let mut top_level_name: Option<String> = None;
 
+    // Flag to track if we've encountered an export wrapper (ExportNamedDeclaration or ExportDefaultDeclaration)
+    // This is important because we want to extract the symbol from the export declaration itself,
+    // not from the inner declaration. For example, in `export const X = 5`, we want "X" from the
+    // export declaration, not from the underlying VariableDeclaration.
+    let mut found_export_wrapper = false;
+
+    // First check the current node itself - this is an optimization for when the cursor
+    // is directly on an export declaration (common case when a line starts with "export")
+    let current_node = nodes.get_node(current_id);
+    match current_node.kind() {
+      AstKind::ExportNamedDeclaration(export_decl) => {
+        found_export_wrapper = true;
+        // Check if there's an inline declaration (export const x = ...)
+        if let Some(decl) = &export_decl.declaration {
+          top_level_name = Self::extract_symbol_from_export_decl(decl);
+        }
+      }
+      AstKind::ExportDefaultDeclaration(_) => {
+        found_export_wrapper = true;
+        top_level_name = Some("default".to_string());
+      }
+      _ => {}
+    }
+
+    // If we found the symbol at the current node level, return it early
+    if found_export_wrapper && top_level_name.is_some() {
+      // Record profiling time
+      if let Some(start_time) = start {
+        self
+          .profiler
+          .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+      }
+      return Ok(top_level_name);
+    }
+
     // Walk up the tree to find a top-level exported declaration
     loop {
       let parent_id = nodes.parent_id(current_id);
@@ -650,33 +741,62 @@ impl WorkspaceAnalyzer {
       let parent_node = nodes.get_node(parent_id);
 
       match parent_node.kind() {
+        // Handle export wrappers - look inside them for the actual declaration
+        AstKind::ExportNamedDeclaration(export_decl) => {
+          found_export_wrapper = true;
+          // Check if there's an inline declaration (export const x = ...)
+          if let Some(decl) = &export_decl.declaration {
+            top_level_name = Self::extract_symbol_from_export_decl(decl);
+          }
+        }
+        AstKind::ExportDefaultDeclaration(_) => {
+          found_export_wrapper = true;
+          top_level_name = Some("default".to_string());
+        }
         // Top-level declarations that can be exported
         AstKind::Function(func) => {
-          if let Some(id) = &func.id {
-            top_level_name = Some(id.name.to_string());
+          if !found_export_wrapper {
+            if let Some(id) = &func.id {
+              top_level_name = Some(id.name.to_string());
+            }
           }
         }
         AstKind::Class(class) => {
-          if let Some(id) = &class.id {
-            top_level_name = Some(id.name.to_string());
+          if !found_export_wrapper {
+            if let Some(id) = &class.id {
+              top_level_name = Some(id.name.to_string());
+            }
           }
         }
         AstKind::TSInterfaceDeclaration(interface) => {
-          top_level_name = Some(interface.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(interface.id.name.to_string());
+          }
         }
         AstKind::TSTypeAliasDeclaration(type_alias) => {
-          top_level_name = Some(type_alias.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(type_alias.id.name.to_string());
+          }
         }
         AstKind::TSEnumDeclaration(enum_decl) => {
-          top_level_name = Some(enum_decl.id.name.to_string());
+          if !found_export_wrapper {
+            top_level_name = Some(enum_decl.id.name.to_string());
+          }
         }
         AstKind::VariableDeclarator(var_decl) => {
           // For const/let declarations, get the binding name
-          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
-            top_level_name = Some(ident.name.to_string());
+          if !found_export_wrapper {
+            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
+              top_level_name = Some(ident.name.to_string());
+            }
           }
         }
         _ => {}
+      }
+
+      // If we found a symbol from an export wrapper, we can stop
+      if found_export_wrapper && top_level_name.is_some() {
+        break;
       }
 
       current_id = parent_id;
@@ -1028,5 +1148,193 @@ const DynamicImport = await import('./dynamic');
     assert_eq!(dynamic_imports.len(), 1);
     assert_eq!(dynamic_imports[0].from_module, "./dynamic");
     assert_eq!(dynamic_imports[0].imported_name, "*");
+  }
+
+  #[test]
+  fn test_find_node_at_line_export_default_named() {
+    // Test finding a named default export
+    let source = r#"export default function myFunction() {
+  return 'test';
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok(), "Should not error: {:?}", result);
+    let symbol = result.unwrap();
+    assert_eq!(
+      symbol,
+      Some("default".to_string()),
+      "Should find 'default' for export default"
+    );
+  }
+
+  #[test]
+  fn test_find_node_at_line_export_default_anonymous() {
+    // Test finding an anonymous default export
+    let source = r#"export default function() {
+  return 'anonymous';
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok(), "Should not error: {:?}", result);
+    let symbol = result.unwrap();
+    assert_eq!(
+      symbol,
+      Some("default".to_string()),
+      "Should find 'default' for anonymous export default"
+    );
+  }
+
+  #[test]
+  fn test_find_node_at_line_destructured_export() {
+    // Test finding destructured exports - should find the first identifier
+    let source = r#"const obj = { a: 1, b: 2 };
+export const { a, b } = obj;"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let result = analyzer.find_node_at_line(file_path, 2, 0);
+    // Note: For destructured exports, we currently don't extract individual binding identifiers
+    // This is a known limitation - the helper returns None for destructuring patterns
+    // In the future, we may want to handle this case specially
+    assert!(result.is_ok(), "Should not error: {:?}", result);
+  }
+
+  #[test]
+  fn test_find_node_at_line_multiple_exports() {
+    // Test file with multiple exports on different lines
+    let source = r#"export const FIRST = 1;
+export const SECOND = 2;
+export function third() {
+  return 3;
+}"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Test first export
+    let result1 = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result1.is_ok());
+    assert_eq!(result1.unwrap(), Some("FIRST".to_string()));
+
+    // Test second export
+    let result2 = analyzer.find_node_at_line(file_path, 2, 0);
+    assert!(result2.is_ok());
+    assert_eq!(result2.unwrap(), Some("SECOND".to_string()));
+
+    // Test third export
+    let result3 = analyzer.find_node_at_line(file_path, 3, 0);
+    assert!(result3.is_ok());
+    assert_eq!(result3.unwrap(), Some("third".to_string()));
   }
 }

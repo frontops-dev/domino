@@ -623,6 +623,66 @@ impl WorkspaceAnalyzer {
     }
   }
 
+  /// Check if a symbol is exported from a file
+  pub fn is_symbol_exported(&self, file_path: &Path, symbol_name: &str) -> bool {
+    if let Some(exports) = self.exports.get(file_path) {
+      exports.iter().any(|export| {
+        // Check if the symbol is directly exported
+        export.exported_name == symbol_name
+          // Or if it's exported under a different name (local_name matches)
+          || export.local_name.as_ref().map_or(false, |local| local == symbol_name)
+      })
+    } else {
+      false
+    }
+  }
+
+  /// Get all exported symbols that use a given local symbol
+  /// This is used to find which exported APIs are affected when an internal symbol changes
+  pub fn find_exported_symbols_using(
+    &self,
+    file_path: &Path,
+    local_symbol: &str,
+  ) -> Result<Vec<String>> {
+    let mut exported_symbols = Vec::new();
+
+    // Get all exports from this file
+    if let Some(exports) = self.exports.get(file_path) {
+      for export in exports {
+        // Get the local name (what's actually defined in the file)
+        let local_name = export.local_name.as_ref().unwrap_or(&export.exported_name);
+
+        // Skip if this export is a re-export (from another module)
+        if export.re_export_from.is_some() {
+          continue;
+        }
+
+        // Check if this exported symbol references the local symbol
+        // by finding local references within the exported symbol's definition
+        if local_name != local_symbol {
+          // Find references to the local_symbol within this exported symbol's scope
+          let refs = self.find_local_references(file_path, local_symbol)?;
+
+          // Check if any of these references are within the exported symbol
+          // We do this by checking if the exported symbol's definition contains
+          // references to the local symbol
+          for reference in refs {
+            // Try to find what symbol contains this reference
+            if let Some(container) = self.find_node_at_line(file_path, reference.line, reference.column)? {
+              if container == *local_name {
+                // This exported symbol uses the local symbol
+                exported_symbols.push(export.exported_name.clone());
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    Ok(exported_symbols)
+  }
+
   /// Find node at a specific line in a file
   pub fn find_node_at_line(
     &self,

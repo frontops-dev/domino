@@ -294,14 +294,18 @@ fn test_three_dot_diff_behavior() {
 
   // Make a change in the feature branch
   let file_path = fixture_path().join("proj1/index.ts");
-  fs::write(&file_path, r#"export function proj1() {
+  fs::write(
+    &file_path,
+    r#"export function proj1() {
   return 'proj1-feature-change';
 }
 
 export function unusedFn() {
   return 'unusedFn';
 }
-"#).expect("Failed to write file");
+"#,
+  )
+  .expect("Failed to write file");
   git_command(&["add", "proj1/index.ts"]);
   git_command(&["commit", "-m", "Feature change"]);
 
@@ -309,7 +313,9 @@ export function unusedFn() {
   git_command(&["checkout", "main"]);
 
   let file_path2 = fixture_path().join("proj2/index.ts");
-  fs::write(&file_path2, r#"import { proj1 } from '@monorepo/proj1';
+  fs::write(
+    &file_path2,
+    r#"import { proj1 } from '@monorepo/proj1';
 
 export { proj1 } from '@monorepo/proj1';
 
@@ -321,7 +327,9 @@ export function proj2() {
 export function anotherFn() {
   return 'anotherFn';
 }
-"#).expect("Failed to write file");
+"#,
+  )
+  .expect("Failed to write file");
   git_command(&["add", "proj2/index.ts"]);
   git_command(&["commit", "-m", "Main branch change"]);
 
@@ -367,9 +375,18 @@ export function anotherFn() {
 
   // With three-dot diff, only proj1 and proj3 (implicit dep) should be affected
   // proj2's changes on main should not be included
-  assert!(affected.contains(&"proj1".to_string()), "proj1 should be affected");
-  assert!(affected.contains(&"proj3".to_string()), "proj3 should be affected (implicit dep)");
-  assert!(!affected.contains(&"proj2".to_string()), "proj2 should NOT be affected (change is on main, not in feature branch)");
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected"
+  );
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dep)"
+  );
+  assert!(
+    !affected.contains(&"proj2".to_string()),
+    "proj2 should NOT be affected (change is on main, not in feature branch)"
+  );
 
   // Cleanup
   git_command(&["checkout", "main"]);

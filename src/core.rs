@@ -269,8 +269,20 @@ fn process_changed_symbol(
     symbol_name
   );
 
-  // 3. If no cross-file references and symbol is not exported, find exported symbols that use it
-  // This handles the case where an internal function is changed that's used by exported components
+  // 3. Handle internal (non-exported) symbols with no cross-file references
+  // This is critical for tracking transitive dependencies through exported containers.
+  //
+  // Example scenario:
+  //   - Internal function `helperFn()` is modified (no cross-file refs, not exported)
+  //   - Exported component `MyComponent` uses `helperFn()`
+  //   - Other files import and use `MyComponent`
+  //
+  // Without this check, we'd miss that `MyComponent` is affected, and thus miss
+  // all projects that depend on `MyComponent`. This matches TypeScript's behavior
+  // where findAllReferences tracks symbols through their exported containers.
+  //
+  // We skip exported symbols here because they're already handled by cross-file
+  // reference tracking in step 2 above.
   if cross_file_refs.is_empty() && !analyzer.is_symbol_exported(file_path, symbol_name) {
     debug!(
       "Symbol '{}' has no cross-file references and is not exported. Checking if exported symbols use it.",
@@ -286,6 +298,7 @@ fn process_changed_symbol(
     );
 
     // Recursively process each exported symbol that uses this local symbol
+    // This propagates the change through the export boundary
     for exported_symbol in exported_symbols_using {
       process_changed_symbol(
         analyzer,

@@ -630,7 +630,7 @@ impl WorkspaceAnalyzer {
         // Check if the symbol is directly exported
         export.exported_name == symbol_name
           // Or if it's exported under a different name (local_name matches)
-          || export.local_name.as_ref().map_or(false, |local| local == symbol_name)
+          || export.local_name.as_ref().is_some_and(|local| local == symbol_name)
       })
     } else {
       false
@@ -647,36 +647,60 @@ impl WorkspaceAnalyzer {
     let mut exported_symbols = Vec::new();
 
     // Get all exports from this file
-    if let Some(exports) = self.exports.get(file_path) {
-      for export in exports {
-        // Get the local name (what's actually defined in the file)
-        let local_name = export.local_name.as_ref().unwrap_or(&export.exported_name);
+    let exports = match self.exports.get(file_path) {
+      Some(exports) if !exports.is_empty() => exports,
+      _ => {
+        debug!(
+          "No exports found for {:?} - cannot find exported symbols using '{}'",
+          file_path, local_symbol
+        );
+        return Ok(exported_symbols);
+      }
+    };
 
-        // Skip if this export is a re-export (from another module)
-        if export.re_export_from.is_some() {
-          continue;
-        }
+    // Find all references to the local symbol once (O(n) operation)
+    let refs = self.find_local_references(file_path, local_symbol)?;
+    if refs.is_empty() {
+      debug!(
+        "No references found for '{}' in {:?} - no exported symbols use it",
+        local_symbol, file_path
+      );
+      return Ok(exported_symbols);
+    }
 
-        // Check if this exported symbol references the local symbol
-        // by finding local references within the exported symbol's definition
-        if local_name != local_symbol {
-          // Find references to the local_symbol within this exported symbol's scope
-          let refs = self.find_local_references(file_path, local_symbol)?;
+    // Build a set of container symbols that reference the local symbol
+    // This is O(refs) instead of O(exports × refs)
+    let mut containers = FxHashSet::default();
+    for reference in refs {
+      if let Some(container) =
+        self.find_node_at_line(file_path, reference.line, reference.column)?
+      {
+        containers.insert(container);
+      }
+    }
 
-          // Check if any of these references are within the exported symbol
-          // We do this by checking if the exported symbol's definition contains
-          // references to the local symbol
-          for reference in refs {
-            // Try to find what symbol contains this reference
-            if let Some(container) = self.find_node_at_line(file_path, reference.line, reference.column)? {
-              if container == *local_name {
-                // This exported symbol uses the local symbol
-                exported_symbols.push(export.exported_name.clone());
-                break;
-              }
-            }
-          }
-        }
+    // Now check which exports are in the container set - O(exports)
+    for export in exports {
+      // Skip re-exports (they don't have local implementations)
+      if export.re_export_from.is_some() {
+        continue;
+      }
+
+      // Get the local name (what's actually defined in the file)
+      let local_name = export.local_name.as_ref().unwrap_or(&export.exported_name);
+
+      // Skip if this is the symbol itself (we're looking for symbols that *use* it)
+      if local_name == local_symbol {
+        continue;
+      }
+
+      // Check if this exported symbol contains any references to the local symbol
+      if containers.contains(local_name) {
+        debug!(
+          "Exported symbol '{}' uses local symbol '{}'",
+          export.exported_name, local_symbol
+        );
+        exported_symbols.push(export.exported_name.clone());
       }
     }
 

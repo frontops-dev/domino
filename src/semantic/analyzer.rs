@@ -623,6 +623,90 @@ impl WorkspaceAnalyzer {
     }
   }
 
+  /// Check if a symbol is exported from a file
+  pub fn is_symbol_exported(&self, file_path: &Path, symbol_name: &str) -> bool {
+    if let Some(exports) = self.exports.get(file_path) {
+      exports.iter().any(|export| {
+        // Check if the symbol is directly exported
+        export.exported_name == symbol_name
+          // Or if it's exported under a different name (local_name matches)
+          || export.local_name.as_ref().is_some_and(|local| local == symbol_name)
+      })
+    } else {
+      false
+    }
+  }
+
+  /// Get all exported symbols that use a given local symbol
+  /// This is used to find which exported APIs are affected when an internal symbol changes
+  pub fn find_exported_symbols_using(
+    &self,
+    file_path: &Path,
+    local_symbol: &str,
+  ) -> Result<Vec<String>> {
+    let mut exported_symbols = Vec::new();
+
+    // Get all exports from this file
+    let exports = match self.exports.get(file_path) {
+      Some(exports) if !exports.is_empty() => exports,
+      _ => {
+        debug!(
+          "No exports found for {:?} - cannot find exported symbols using '{}'",
+          file_path, local_symbol
+        );
+        return Ok(exported_symbols);
+      }
+    };
+
+    // Find all references to the local symbol once (O(n) operation)
+    let refs = self.find_local_references(file_path, local_symbol)?;
+    if refs.is_empty() {
+      debug!(
+        "No references found for '{}' in {:?} - no exported symbols use it",
+        local_symbol, file_path
+      );
+      return Ok(exported_symbols);
+    }
+
+    // Build a set of container symbols that reference the local symbol
+    // This is O(refs) instead of O(exports × refs)
+    let mut containers = FxHashSet::default();
+    for reference in refs {
+      if let Some(container) =
+        self.find_node_at_line(file_path, reference.line, reference.column)?
+      {
+        containers.insert(container);
+      }
+    }
+
+    // Now check which exports are in the container set - O(exports)
+    for export in exports {
+      // Skip re-exports (they don't have local implementations)
+      if export.re_export_from.is_some() {
+        continue;
+      }
+
+      // Get the local name (what's actually defined in the file)
+      let local_name = export.local_name.as_ref().unwrap_or(&export.exported_name);
+
+      // Skip if this is the symbol itself (we're looking for symbols that *use* it)
+      if local_name == local_symbol {
+        continue;
+      }
+
+      // Check if this exported symbol contains any references to the local symbol
+      if containers.contains(local_name) {
+        debug!(
+          "Exported symbol '{}' uses local symbol '{}'",
+          export.exported_name, local_symbol
+        );
+        exported_symbols.push(export.exported_name.clone());
+      }
+    }
+
+    Ok(exported_symbols)
+  }
+
   /// Find node at a specific line in a file
   pub fn find_node_at_line(
     &self,

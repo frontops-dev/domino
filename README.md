@@ -17,30 +17,65 @@ domino is a drop-in replacement for the TypeScript version of [traf](https://git
 ## Quick Start
 
 ```bash
-# Clone and build
-git clone git@github.com:jsverse/domino.git
-cd domino
-cargo build --release
+# Run directly with npx (no installation required)
+npx @front-ops/domino@latest affected
 
-# Run in your monorepo
-cd /path/to/your/monorepo
-/path/to/domino/target/release/domino affected
+# Show all projects in the workspace
+npx @front-ops/domino@latest affected --all
 ```
 
 ## Installation
 
-### From Source
+### Using npx (Recommended)
+
+No installation required! Just run:
 
 ```bash
-cd domino
-cargo build --release
+npx @front-ops/domino@latest affected
 ```
 
-The binary will be available at `./target/release/domino`.
+### Binary Installation
+
+If you prefer to use the standalone binary:
+
+```bash
+# Clone and build from source
+git clone git@github.com:frontops-dev/domino.git
+cd domino
+cargo build --release
+
+# The binary will be available at ./target/release/domino
+# You can then run it from anywhere:
+/path/to/domino/target/release/domino affected
+```
 
 ## Usage
 
-### Basic Commands
+### Using npx
+
+```bash
+# Show all projects in the workspace
+npx @front-ops/domino affected --all
+
+# Find affected projects (compared to origin/main)
+npx @front-ops/domino affected
+
+# Use a different base branch
+npx @front-ops/domino affected --base origin/develop
+
+# Output as JSON
+npx @front-ops/domino affected --json
+
+# Enable debug logging
+npx @front-ops/domino affected --debug
+
+# Generate a detailed report
+npx @front-ops/domino affected --report report.html
+```
+
+### Using the Binary
+
+If you've built the binary from source:
 
 ```bash
 # Show all projects in the workspace
@@ -57,6 +92,9 @@ domino affected --json
 
 # Enable debug logging
 domino affected --debug
+
+# Generate a detailed report
+domino affected --report report.html
 ```
 
 ### Options
@@ -64,6 +102,7 @@ domino affected --debug
 - `--base <BRANCH>`: Base branch to compare against (default: `origin/main`)
 - `--all`: Show all projects regardless of changes
 - `--json`: Output results as JSON
+- `--report <PATH>`: Generate a detailed analysis report
 - `--debug`: Enable debug logging
 - `--cwd <PATH>`: Set the current working directory
 

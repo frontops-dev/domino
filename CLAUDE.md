@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 domino is a high-performance Rust implementation of **True Affected** - semantic change detection for monorepos. It's a drop-in replacement for the TypeScript version of traf, using the Oxc parser for 3-5x faster performance. The tool analyzes actual code changes at the AST level (not just file changes) and follows symbol references across the entire workspace to determine which projects are truly affected by changes.
 
 This is a dual-purpose project:
+
 - A standalone CLI binary (`domino`) built with Cargo
 - An npm package with N-API bindings for Node.js integration
 
@@ -62,11 +63,13 @@ yarn lint
 ### Running Tests
 
 **Important**: Integration tests modify git state and MUST run serially:
+
 ```bash
 cargo test --test integration_test -- --test-threads=1
 ```
 
 Unit tests can run in parallel:
+
 ```bash
 cargo test --lib
 ```
@@ -131,11 +134,13 @@ The true-affected detection follows this pipeline (see `src/core.rs`):
 ### Critical Data Structures
 
 **Import Index** (`WorkspaceAnalyzer::import_index`):
+
 - Maps `(source_file, symbol_name)` to all locations that import it
 - Key for efficient reverse lookup when finding references
 - Example: `(utils.ts, "formatDate")` → `[(app.ts, "formatDate", "./utils"), (helper.ts, "format", "./utils")]`
 
 **Resolution Cache** (`ReferenceFinder::resolution_cache`):
+
 - Caches module resolution results: `(from_file, specifier)` → `resolved_path`
 - Uses `RefCell` for interior mutability (not thread-safe currently)
 - Critical for performance when following import chains
@@ -143,6 +148,7 @@ The true-affected detection follows this pipeline (see `src/core.rs`):
 ### Module Resolution
 
 Uses `oxc_resolver` with TypeScript-aware configuration:
+
 - Looks for `tsconfig.base.json` in workspace root for path mappings
 - Supports extensions: `.ts`, `.tsx`, `.js`, `.jsx`, `.d.ts`
 - Handles both relative imports and workspace path aliases
@@ -162,6 +168,7 @@ Uses `oxc_resolver` with TypeScript-aware configuration:
 ### Oxc Integration
 
 This project is built on the Oxc parser ecosystem:
+
 - `oxc_parser`: Fast JavaScript/TypeScript parsing
 - `oxc_semantic`: Semantic analysis and symbol table
 - `oxc_resolver`: Module resolution (same engine as Rolldown and Nova)
@@ -170,6 +177,7 @@ This project is built on the Oxc parser ecosystem:
 ### Lifetime Management
 
 The `WorkspaceAnalyzer` uses `'static` lifetimes for Oxc semantic data via memory transmutation. This is safe because:
+
 - Allocators are stored alongside their semantic data in `FileSemanticData`
 - Data is never accessed after its allocator is dropped
 - All access is contained within the analyzer's lifetime
@@ -184,12 +192,14 @@ The `WorkspaceAnalyzer` uses `'static` lifetimes for Oxc semantic data via memor
 ### N-API Bindings
 
 The crate is configured as both `cdylib` (for Node.js) and `rlib` (for Rust):
+
 ```toml
 [lib]
 crate-type = ["cdylib", "rlib"]
 ```
 
 This allows:
+
 - Building native Node.js modules with `napi-rs`
 - Running Rust unit tests that import the library code
 
@@ -198,3 +208,81 @@ This allows:
 1. **Nx**: Detects via `nx.json`, reads project configuration from `project.json` files
 2. **Turborepo**: Detects via `turbo.json`, reads workspace configuration from root `package.json`
 3. **Generic workspaces**: Falls back to npm/yarn/pnpm/bun workspace detection from `package.json`
+
+## Pre-Commit Checklist
+
+Before committing changes, opening PRs, or pushing code, **ALWAYS** complete the following steps:
+
+### 1. Clean Up External References
+
+- **Remove any references to external repositories** used during debugging
+- Obfuscate repository names, project names, and file paths from examples
+- Use generic names like "app-client", "Component.tsx", "getHelperValue()" instead of real names
+- Check commit messages, PR descriptions, code comments, and test data
+
+### 2. Run Linting
+
+```bash
+cargo clippy --all-targets --all-features
+```
+
+Fix any warnings or errors before committing.
+
+### 3. Run Formatting
+
+```bash
+cargo fmt --all
+```
+
+Ensure all code follows Rust formatting standards.
+
+### 4. Run Tests
+
+```bash
+# Run unit tests
+cargo test --lib
+
+# Run integration tests (must be serial due to git state)
+cargo test --test integration_test -- --test-threads=1
+
+# For JavaScript/Node.js bindings
+yarn test
+```
+
+All tests must pass before committing.
+
+### 5. Rust Code Quality Review
+
+Use the `@agent-rust-specialist` to review:
+
+- Memory safety and ownership patterns
+- Error handling and Result usage
+- Performance considerations
+- API design and documentation
+- Rust best practices and idioms
+
+## PR Requirements
+
+When creating pull requests:
+
+1. **Title**: Clear, descriptive, follows conventional commits format (`fix:`, `feat:`, etc.)
+
+2. **Description must include**:
+   - Problem statement
+   - Solution approach
+   - Key changes made
+   - Testing performed
+   - Related issues (use `#issue_number` format)
+   - Breaking changes (if any)
+
+3. **Code must**:
+   - Pass all automated checks (lint, format, tests)
+   - Be reviewed by rust-specialist agent
+   - Include tests for new functionality
+   - Update documentation if APIs changed
+
+4. **Obfuscation**:
+   - No external repository names in code or docs
+   - No customer/client project names
+   - No real file paths or internal structure from external projects
+   - Use generic, illustrative examples

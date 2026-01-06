@@ -385,6 +385,84 @@ fn test_no_changes() {
 }
 
 #[test]
+fn test_internal_function_affecting_exported_component() {
+  // This test verifies the fix for tracking exported symbols that use internal symbols
+  // Related to issue #16 - when an internal function changes, we need to find which
+  // exported symbols use it and track references to those exported symbols
+  let branch = TestBranch::new("test-internal-fn");
+
+  // Create a file with an internal function used by an exported component
+  branch.make_change(
+    "proj1/utils.ts",
+    r#"
+// Internal helper function (not exported)
+function helperFn() {
+  return 'helper-original';
+}
+
+// Exported component that uses the internal function
+export function PublicAPI() {
+  return helperFn();
+}
+"#,
+  );
+
+  // Create proj2 that imports the exported component
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+import { PublicAPI } from '@monorepo/proj1/utils';
+
+export { proj1 } from '@monorepo/proj1';
+
+export function proj2() {
+  proj1();
+  return PublicAPI();
+}
+"#,
+  );
+
+  // Now change the internal helper function
+  branch.make_change(
+    "proj1/utils.ts",
+    r#"
+// Internal helper function (not exported) - MODIFIED
+function helperFn() {
+  return 'helper-modified';
+}
+
+// Exported component that uses the internal function
+export function PublicAPI() {
+  return helperFn();
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // proj1 should be affected (changed file)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected"
+  );
+
+  // proj2 should be affected because:
+  // 1. helperFn (internal) changed
+  // 2. helperFn is used by PublicAPI (exported)
+  // 3. PublicAPI is imported by proj2
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected when internal function used by imported API changes"
+  );
+
+  // proj3 should also be affected due to implicit dependency on proj1
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dependency)"
+  );
+}
+
+#[test]
 fn test_decorator_change() {
   let branch = TestBranch::new("test-decorator");
 

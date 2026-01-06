@@ -269,6 +269,48 @@ fn process_changed_symbol(
     symbol_name
   );
 
+  // 3. Handle internal (non-exported) symbols with no cross-file references
+  // This is critical for tracking transitive dependencies through exported containers.
+  //
+  // Example scenario:
+  //   - Internal function `helperFn()` is modified (no cross-file refs, not exported)
+  //   - Exported component `MyComponent` uses `helperFn()`
+  //   - Other files import and use `MyComponent`
+  //
+  // Without this check, we'd miss that `MyComponent` is affected, and thus miss
+  // all projects that depend on `MyComponent`. This matches TypeScript's behavior
+  // where findAllReferences tracks symbols through their exported containers.
+  //
+  // We skip exported symbols here because they're already handled by cross-file
+  // reference tracking in step 2 above.
+  if cross_file_refs.is_empty() && !analyzer.is_symbol_exported(file_path, symbol_name) {
+    debug!(
+      "Symbol '{}' has no cross-file references and is not exported. Checking if exported symbols use it.",
+      symbol_name
+    );
+
+    let exported_symbols_using = analyzer.find_exported_symbols_using(file_path, symbol_name)?;
+    debug!(
+      "Found {} exported symbols using '{}': {:?}",
+      exported_symbols_using.len(),
+      symbol_name,
+      exported_symbols_using
+    );
+
+    // Recursively process each exported symbol that uses this local symbol
+    // This propagates the change through the export boundary
+    for exported_symbol in exported_symbols_using {
+      process_changed_symbol(
+        analyzer,
+        reference_finder,
+        file_path,
+        &exported_symbol,
+        projects,
+        state,
+      )?;
+    }
+  }
+
   // For each cross-file reference, recursively process the containing symbol in that file
   for reference in cross_file_refs {
     // Mark the package as affected
@@ -291,23 +333,60 @@ fn process_changed_symbol(
       }
     }
 
-    // Find the root symbol containing this reference in the other file
-    if let Ok(Some(container_symbol)) =
-      analyzer.find_node_at_line(&reference.file_path, reference.line, reference.column)
-    {
+    // Special case: line=0,column=0 is a sentinel for "entire file affected" (from dynamic imports)
+    // In this case, we need to process all exports from that file
+    if reference.line == 0 && reference.column == 0 {
       debug!(
-        "Cross-file reference in '{}' at {:?}:{}",
-        container_symbol, reference.file_path, reference.line
+        "File {:?} is conservatively affected (dynamic import). Processing all its exports.",
+        reference.file_path
       );
-      // Recursively process the containing symbol in the importing file
-      process_changed_symbol(
-        analyzer,
-        reference_finder,
-        &reference.file_path,
-        &container_symbol,
-        projects,
-        state,
-      )?;
+
+      // Get all exports from the affected file
+      if let Some(exports) = analyzer.exports.get(&reference.file_path) {
+        for export in exports {
+          // Skip re-exports - those are handled separately
+          if export.re_export_from.is_some() {
+            continue;
+          }
+
+          // Get the local name (what's actually defined in the file)
+          let local_name = export.local_name.as_ref().unwrap_or(&export.exported_name);
+
+          debug!(
+            "Processing exported symbol '{}' from conservatively affected file {:?}",
+            local_name, reference.file_path
+          );
+
+          // Recursively process this exported symbol
+          process_changed_symbol(
+            analyzer,
+            reference_finder,
+            &reference.file_path,
+            local_name,
+            projects,
+            state,
+          )?;
+        }
+      }
+    } else {
+      // Normal case: find the root symbol containing this reference in the other file
+      if let Ok(Some(container_symbol)) =
+        analyzer.find_node_at_line(&reference.file_path, reference.line, reference.column)
+      {
+        debug!(
+          "Cross-file reference in '{}' at {:?}:{}",
+          container_symbol, reference.file_path, reference.line
+        );
+        // Recursively process the containing symbol in the importing file
+        process_changed_symbol(
+          analyzer,
+          reference_finder,
+          &reference.file_path,
+          &container_symbol,
+          projects,
+          state,
+        )?;
+      }
     }
   }
 

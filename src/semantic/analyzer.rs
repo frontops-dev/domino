@@ -579,6 +579,66 @@ impl WorkspaceAnalyzer {
     Ok(references)
   }
 
+  /// Find all references to a namespace member access pattern (e.g., `theme.DatePicker`)
+  ///
+  /// This is used for namespace imports like `import * as theme from '...'`
+  /// to check if a specific symbol from the namespace is actually accessed.
+  ///
+  /// Unlike `find_local_references` which finds all references to the namespace identifier,
+  /// this function specifically looks for member expressions where the namespace is accessed
+  /// with the given property name.
+  pub fn find_namespace_member_access(
+    &self,
+    file_path: &Path,
+    namespace_name: &str,
+    property_name: &str,
+  ) -> Result<Vec<Reference>> {
+    let file_data = self
+      .files
+      .get(file_path)
+      .ok_or_else(|| DominoError::FileNotFound(file_path.display().to_string()))?;
+
+    let mut references = Vec::new();
+
+    for node in file_data.semantic.nodes().iter() {
+      match node.kind() {
+        AstKind::StaticMemberExpression(member_expr) => {
+          if member_expr.property.name.as_str() == property_name {
+            if let Expression::Identifier(ident) = &member_expr.object {
+              if ident.name.as_str() == namespace_name {
+                let span = member_expr.span;
+                let (line, column) = self.span_to_line_col(&file_data.source, span);
+                references.push(Reference {
+                  file_path: file_path.to_path_buf(),
+                  line,
+                  column,
+                });
+              }
+            }
+          }
+        }
+        AstKind::TSQualifiedName(qualified_name) => {
+          if qualified_name.right.name.as_str() == property_name {
+            if let oxc_ast::ast::TSTypeName::IdentifierReference(ident) = &qualified_name.left {
+              if ident.name.as_str() == namespace_name {
+                let span = qualified_name.span;
+                let (line, column) = self.span_to_line_col(&file_data.source, span);
+                references.push(Reference {
+                  file_path: file_path.to_path_buf(),
+                  line,
+                  column,
+                });
+              }
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+
+    Ok(references)
+  }
+
   /// Convert span to line and column
   fn span_to_line_col(&self, source: &str, span: Span) -> (usize, usize) {
     let offset = span.start as usize;
@@ -1070,10 +1130,10 @@ async function loadModule() {
 
   #[test]
   fn test_extract_dynamic_imports_with_then() {
-    // Test dynamic imports with .then() pattern (like the uniclient case)
+    // Test dynamic imports with .then() pattern
     let source = r#"
-const LazyCookieConsent = React.lazy(
-  async () => await import('@lemonade-hq/uniclient-app').then(module => ({ default: module.CookieConsent })),
+const LazyComponent = React.lazy(
+  async () => await import('@my-org/shared-lib').then(module => ({ default: module.MyComponent })),
 );
 "#;
 
@@ -1091,7 +1151,7 @@ const LazyCookieConsent = React.lazy(
 
     // Check the dynamic import
     let imp = &imports[0];
-    assert_eq!(imp.from_module, "@lemonade-hq/uniclient-app");
+    assert_eq!(imp.from_module, "@my-org/shared-lib");
     assert_eq!(imp.imported_name, "*"); // Namespace import
     assert!(!imp.is_type_only);
   }
@@ -1420,5 +1480,114 @@ export function third() {
     let result3 = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result3.is_ok());
     assert_eq!(result3.unwrap(), Some("third".to_string()));
+  }
+
+  #[test]
+  fn test_find_namespace_member_access() {
+    let source = r#"import * as ui from '@my-org/ui-components';
+import * as utils from './utils';
+
+const button = ui.Button;
+const input = ui.Input;
+const datePicker = ui.DatePicker;
+
+const helper = utils.helper;
+const notUi = someOther.DatePicker;
+
+type Props = ui.ButtonProps;
+"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.tsx");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "ui", "DatePicker")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      1,
+      "Should find exactly 1 reference to ui.DatePicker"
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "ui", "Button")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      1,
+      "Should find exactly 1 reference to ui.Button"
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "ui", "Input")
+      .expect("Should not error");
+    assert_eq!(refs.len(), 1, "Should find exactly 1 reference to ui.Input");
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "utils", "helper")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      1,
+      "Should find exactly 1 reference to utils.helper"
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "ui", "NonExistent")
+      .expect("Should not error");
+    assert_eq!(refs.len(), 0, "Should find no references to ui.NonExistent");
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "utils", "DatePicker")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      0,
+      "Should find no references to utils.DatePicker"
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "someOther", "DatePicker")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      1,
+      "Should find 1 reference to someOther.DatePicker"
+    );
+
+    let refs = analyzer
+      .find_namespace_member_access(file_path, "ui", "ButtonProps")
+      .expect("Should not error");
+    assert_eq!(
+      refs.len(),
+      1,
+      "Should find 1 reference to ui.ButtonProps (type)"
+    );
   }
 }

@@ -176,15 +176,23 @@ impl<'a> ReferenceFinder<'a> {
           symbol_name
         );
 
-        // For namespace imports, we need to find references to namespace.symbol
+        // For namespace imports, we need to find references to namespace.symbol specifically
+        // (e.g., utils.formatDate, not just any reference to utils)
         match self
           .analyzer
-          .find_local_references(importing_file, local_name)
+          .find_namespace_member_access(importing_file, local_name, symbol_name)
         {
-          Ok(local_refs) => {
-            if !local_refs.is_empty() {
-              // Found actual references to the namespace - these files are definitely affected
-              all_refs.extend(local_refs);
+          Ok(member_refs) => {
+            if !member_refs.is_empty() {
+              // Found actual references to namespace.symbol - these files are definitely affected
+              debug!(
+                "Found {} references to {}.{} in {:?}",
+                member_refs.len(),
+                local_name,
+                symbol_name,
+                importing_file
+              );
+              all_refs.extend(member_refs);
             } else if *is_dynamic {
               // Dynamic imports (from import() expressions) get conservative treatment:
               // Even if we can't find local references to the synthetic namespace identifier
@@ -202,8 +210,8 @@ impl<'a> ReferenceFinder<'a> {
               });
             }
             // For static namespace imports (import * as foo), if we don't find any references
-            // to 'foo', we don't mark the file as affected (strict behavior) since the
-            // import is likely unused or dead code.
+            // to 'foo.symbol', we don't mark the file as affected (strict behavior) since the
+            // namespace either doesn't use this specific symbol or is dead code.
           }
           Err(e) => {
             // Propagate the error instead of silently marking as affected

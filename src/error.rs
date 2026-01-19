@@ -5,6 +5,9 @@ pub enum DominoError {
   #[error("IO error: {0}")]
   Io(#[from] std::io::Error),
 
+  #[error("Regex error: {0}")]
+  Regex(#[from] regex::Error),
+
   #[error("Parse error: {0}")]
   Parse(String),
 

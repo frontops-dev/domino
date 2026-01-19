@@ -37,6 +37,21 @@ pub struct Reference {
   pub column: usize,
 }
 
+/// A reference to a non-source asset in a source file
+#[derive(Debug, Clone)]
+pub struct AssetReference {
+  /// The source file containing the reference
+  pub source_file: PathBuf,
+  /// Line number where the reference appears (1-indexed)
+  pub line: usize,
+  /// Column number of the reference start (0-indexed)
+  #[allow(dead_code)]
+  pub column: usize,
+  /// The matched path string from the source file (useful for debugging)
+  #[allow(dead_code)]
+  pub matched_path: String,
+}
+
 /// Import information
 #[derive(Debug, Clone)]
 pub struct Import {
@@ -156,5 +171,15 @@ pub enum AffectCause {
   ImplicitDependency {
     /// Project this depends on
     depends_on: String,
+  },
+  /// Asset file changed and is referenced by source code
+  #[serde(rename = "asset_change")]
+  AssetChange {
+    /// The asset file that changed
+    asset_file: PathBuf,
+    /// Source file that references the asset
+    referenced_in: PathBuf,
+    /// Line where the reference appears
+    line: usize,
   },
 }

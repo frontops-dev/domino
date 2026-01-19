@@ -1,9 +1,10 @@
 use crate::error::Result;
 use crate::git;
 use crate::profiler::Profiler;
-use crate::semantic::{ReferenceFinder, WorkspaceAnalyzer};
+use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
-  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, Project, TrueAffectedConfig,
+  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, Project,
+  TrueAffectedConfig,
 };
 use crate::utils;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -68,13 +69,24 @@ fn find_affected_internal(
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
-  // Step 5: Process each changed file and line
-  for changed_file in &changed_files {
+  // Step 5: Partition changed files into source and non-source
+  let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
+    .iter()
+    .partition(|f| utils::is_source_file(&f.file_path));
+
+  debug!(
+    "Partitioned files: {} source, {} assets",
+    source_files.len(),
+    asset_files.len()
+  );
+
+  // Step 5a: Process source files
+  for changed_file in &source_files {
     let file_path = &changed_file.file_path;
 
     // Check if file exists in our analyzed files
     if !analyzer.files.contains_key(file_path) {
-      debug!("Skipping non-source file: {:?}", file_path);
+      debug!("Skipping unanalyzed source file: {:?}", file_path);
       continue;
     }
 
@@ -120,6 +132,106 @@ fn find_affected_internal(
       ) {
         debug!("Error processing line {} in {:?}: {}", line, file_path, e);
         // Continue processing other lines
+      }
+    }
+  }
+
+  // Step 5b: Process non-source asset files
+  if !asset_files.is_empty() {
+    debug!("Processing {} asset files", asset_files.len());
+    let asset_finder = AssetReferenceFinder::new(&config.cwd);
+
+    for asset_file in &asset_files {
+      let asset_path = &asset_file.file_path;
+
+      // Mark the owning project as affected
+      if let Some(pkg) = utils::get_package_name_by_path(asset_path, &config.projects) {
+        debug!("Asset {:?} belongs to package '{}'", asset_path, pkg);
+        affected_packages.insert(pkg.clone());
+
+        // Record direct change cause if generating report
+        if generate_report {
+          for &line in &asset_file.changed_lines {
+            project_causes
+              .entry(pkg.clone())
+              .or_default()
+              .push(AffectCause::DirectChange {
+                file: asset_path.clone(),
+                symbol: None,
+                line,
+              });
+          }
+        }
+      }
+
+      // Find source files that reference this asset
+      match asset_finder.find_references(asset_path) {
+        Ok(references) => {
+          debug!(
+            "Found {} references to asset {:?}",
+            references.len(),
+            asset_path
+          );
+
+          for reference in references {
+            let source_file = config.cwd.join(&reference.source_file);
+            let source_file_rel = &reference.source_file;
+
+            // Mark the referencing project as affected
+            if let Some(pkg) = utils::get_package_name_by_path(source_file_rel, &config.projects) {
+              affected_packages.insert(pkg.clone());
+
+              // Record asset change cause if generating report
+              if generate_report {
+                project_causes
+                  .entry(pkg.clone())
+                  .or_default()
+                  .push(AffectCause::AssetChange {
+                    asset_file: asset_path.clone(),
+                    referenced_in: source_file_rel.clone(),
+                    line: reference.line,
+                  });
+              }
+            }
+
+            // Find the symbol at this line and trace its references
+            // This propagates the change through the import graph
+            if let Ok(Some(symbol)) = analyzer.find_node_at_line(&source_file, reference.line, 0) {
+              debug!(
+                "Tracing symbol '{}' from asset reference at {:?}:{}",
+                symbol, source_file_rel, reference.line
+              );
+
+              let mut visited = FxHashSet::default();
+              let mut state = AffectedState {
+                affected_packages: &mut affected_packages,
+                project_causes: if generate_report {
+                  Some(&mut project_causes)
+                } else {
+                  None
+                },
+                visited: &mut visited,
+              };
+
+              if let Err(e) = process_changed_symbol(
+                &analyzer,
+                &reference_finder,
+                &source_file,
+                &symbol,
+                &config.projects,
+                &mut state,
+              ) {
+                debug!(
+                  "Error processing symbol '{}' from asset reference: {}",
+                  symbol, e
+                );
+              }
+            }
+          }
+        }
+        Err(e) => {
+          debug!("Error finding references to asset {:?}: {}", asset_path, e);
+        }
       }
     }
   }

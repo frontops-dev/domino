@@ -1,6 +1,19 @@
 use crate::types::Project;
 use std::path::Path;
 
+/// Extensions considered as source files (analyzed by Oxc parser)
+const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
+
+/// Check if a file is a source file (TypeScript/JavaScript)
+/// These are files that can be parsed by the Oxc parser
+pub fn is_source_file(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|ext| ext.to_str())
+    .map(|ext| SOURCE_EXTENSIONS.contains(&ext))
+    .unwrap_or(false)
+}
+
 /// Find which project a file belongs to based on its path
 pub fn get_package_name_by_path(file_path: &Path, projects: &[Project]) -> Option<String> {
   projects
@@ -52,6 +65,24 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_is_source_file() {
+    // Source files
+    assert!(is_source_file(Path::new("index.ts")));
+    assert!(is_source_file(Path::new("component.tsx")));
+    assert!(is_source_file(Path::new("utils.js")));
+    assert!(is_source_file(Path::new("app.jsx")));
+    assert!(is_source_file(Path::new("path/to/file.ts")));
+
+    // Non-source files
+    assert!(!is_source_file(Path::new("styles.css")));
+    assert!(!is_source_file(Path::new("template.html")));
+    assert!(!is_source_file(Path::new("config.json")));
+    assert!(!is_source_file(Path::new("image.png")));
+    assert!(!is_source_file(Path::new("data.yaml")));
+    assert!(!is_source_file(Path::new("no-extension")));
+  }
 
   #[test]
   fn test_line_to_offset() {

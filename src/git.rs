@@ -34,8 +34,6 @@ pub fn detect_default_branch(repo_path: &Path) -> String {
 }
 
 /// Get the merge base between two branches
-/// Note: Currently unused, but kept for potential future use cases
-#[allow(dead_code)]
 pub fn get_merge_base(repo_path: &Path, base: &str, head: &str) -> Result<String> {
   // Try git merge-base first
   let output = Command::new("git")
@@ -70,16 +68,13 @@ pub fn get_merge_base(repo_path: &Path, base: &str, head: &str) -> Result<String
   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Get git diff output between base and HEAD using three-dot diff
-/// This shows changes introduced by the current branch, matching traf's behavior
+/// Get git diff output between a commit and the working tree
+/// Using two-dot diff (no HEAD target) to include staged and unstaged changes,
+/// matching traf's behavior exactly.
 pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
-  // Use three-dot diff to show changes introduced by the current branch
-  // This excludes changes from the base branch that happened after branching
-  let diff_range = format!("{}...HEAD", base);
-
   let output = Command::new("git")
     .arg("diff")
-    .arg(&diff_range)
+    .arg(base)
     .arg("--unified=0")
     .arg("--relative")
     .current_dir(repo_path)
@@ -89,8 +84,8 @@ pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     return Err(DominoError::Other(format!(
-      "Git diff failed for range '{}': {}",
-      diff_range, stderr
+      "Git diff failed for base '{}': {}",
+      base, stderr
     )));
   }
 
@@ -101,9 +96,15 @@ pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
 pub fn get_changed_files(repo_path: &Path, base: &str) -> Result<Vec<ChangedFile>> {
   debug!("Getting diff for base: {}", base);
 
-  // Use three-dot diff directly (base...HEAD) to match traf's behavior
-  // This shows only changes introduced by the current branch
-  let diff = get_diff(repo_path, base)?;
+  // First, find the merge base between base and HEAD
+  // This ensures we only see changes from the current branch, not changes
+  // from the base branch that happened after branching
+  let merge_base = get_merge_base(repo_path, base, "HEAD")?;
+  debug!("Merge base: {}", merge_base);
+
+  // Then diff the merge base against the working tree (not HEAD)
+  // This includes both committed and uncommitted changes, matching traf's behavior
+  let diff = get_diff(repo_path, &merge_base)?;
 
   parse_diff(&diff)
 }

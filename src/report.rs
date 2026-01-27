@@ -850,6 +850,10 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
             .or_default()
             .push("implicit".to_string());
         }
+        AffectCause::AssetChange { .. } => {
+          // Asset changes are direct changes to the owning project
+          direct_changes.insert(project.name.clone());
+        }
       }
     }
   }
@@ -1042,6 +1046,24 @@ fn generate_details_html(report: &AffectedReport) -> String {
           html.push_str("<span class=\"cause-type implicit\">Implicit Dependency</span>");
           html.push_str("<div class=\"cause-details\">");
           html.push_str(&format!("Depends on: <strong>{}</strong>", depends_on));
+          html.push_str("</div>");
+        }
+        AffectCause::AssetChange {
+          asset_file,
+          referenced_in,
+          line,
+        } => {
+          html.push_str("<span class=\"cause-type direct\">Asset Change</span>");
+          html.push_str("<div class=\"cause-details\">");
+          html.push_str(&format!(
+            "Asset: <span class=\"code-path\">{}</span><br/>",
+            asset_file.display()
+          ));
+          html.push_str(&format!(
+            "Referenced in: <span class=\"code-path\">{}</span> (line {})",
+            referenced_in.display(),
+            line
+          ));
           html.push_str("</div>");
         }
       }

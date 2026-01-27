@@ -174,6 +174,12 @@ A preview release has been published for commit ${shortSha}.
 npm install ${installUrl}
 \`\`\`
 
+### Running the preview
+
+\`\`\`bash
+npx ${installUrl} affected
+\`\`\`
+
 ### Details
 
 - **Release**: [${tagName}](https://github.com/${repository}/releases/tag/${tagName})

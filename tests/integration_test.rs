@@ -1203,3 +1203,279 @@ fn test_asset_outside_projects_is_ignored() {
     "No projects should be affected when asset is outside all project roots"
   );
 }
+
+// ============================================================================
+// UNCOMMITTED CHANGES TESTS
+// These tests verify that uncommitted (working tree) changes are detected,
+// matching traf's behavior of using `git diff <merge-base>` (not `base...HEAD`).
+// ============================================================================
+
+/// Helper to restore all uncommitted changes in the fixture repo
+fn restore_fixture_repo() {
+  // Reset any changes
+  let _ = Command::new("git")
+    .args(["checkout", "."])
+    .current_dir(fixture_path())
+    .output();
+  // Clean untracked files
+  let _ = Command::new("git")
+    .args(["clean", "-fd"])
+    .current_dir(fixture_path())
+    .output();
+}
+
+#[test]
+fn test_uncommitted_source_file_change_is_detected() {
+  // Ensure clean state first
+  restore_fixture_repo();
+
+  let branch = TestBranch::new("test-uncommitted-source");
+
+  // Make an uncommitted change to a source file
+  let file_path = fixture_path().join("proj1/index.ts");
+  let original_content = fs::read_to_string(&file_path).expect("Failed to read file");
+
+  // Modify the file without committing
+  fs::write(
+    &file_path,
+    r#"export function proj1() {
+  return 'modified proj1';
+}
+
+export function newFunction() {
+  return 'new';
+}
+"#,
+  )
+  .expect("Failed to write file");
+
+  let affected = branch.get_affected();
+
+  // Restore original content before assertions (so cleanup works)
+  fs::write(&file_path, &original_content).expect("Failed to restore file");
+
+  // proj1 should be affected (uncommitted change)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected by uncommitted source file change"
+  );
+}
+
+#[test]
+fn test_uncommitted_asset_change_is_detected() {
+  // Ensure clean state first
+  restore_fixture_repo();
+
+  let branch = TestBranch::new("test-uncommitted-asset");
+
+  // First, set up an asset file and a component that uses it (committed)
+  branch.make_change(
+    "proj1/logo.svg",
+    r#"<svg width="100" height="100"><circle r="50"/></svg>"#,
+  );
+
+  branch.make_change(
+    "proj1/logo-component.ts",
+    r#"import logo from './logo.svg';
+
+export function LogoComponent() {
+  return logo;
+}
+"#,
+  );
+
+  // Now make an uncommitted change to the asset
+  let asset_path = fixture_path().join("proj1/logo.svg");
+  fs::write(
+    &asset_path,
+    r#"<svg width="200" height="200"><circle r="100"/></svg>"#,
+  )
+  .expect("Failed to write asset");
+
+  let affected = branch.get_affected();
+
+  // Restore the asset file before assertions
+  let _ = Command::new("git")
+    .args(["checkout", "proj1/logo.svg"])
+    .current_dir(fixture_path())
+    .output();
+
+  // proj1 should be affected (uncommitted asset change)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected by uncommitted asset change"
+  );
+}
+
+#[test]
+fn test_staged_but_uncommitted_change_is_detected() {
+  // Ensure clean state first
+  restore_fixture_repo();
+
+  let branch = TestBranch::new("test-staged-uncommitted");
+
+  // Modify proj1/index.ts and stage it (but don't commit)
+  let file_path = fixture_path().join("proj1/index.ts");
+  let original_content = fs::read_to_string(&file_path).expect("Failed to read file");
+
+  fs::write(
+    &file_path,
+    r#"export function proj1() {
+  return 'staged modification';
+}
+"#,
+  )
+  .expect("Failed to write file");
+
+  // Stage the change
+  Command::new("git")
+    .args(["add", "proj1/index.ts"])
+    .current_dir(fixture_path())
+    .output()
+    .expect("Failed to stage file");
+
+  let affected = branch.get_affected();
+
+  // Restore: unstage and restore content before assertions
+  let _ = Command::new("git")
+    .args(["reset", "HEAD", "proj1/index.ts"])
+    .current_dir(fixture_path())
+    .output();
+  fs::write(&file_path, &original_content).expect("Failed to restore file");
+
+  // proj1 should be affected (staged but uncommitted change)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected by staged but uncommitted change"
+  );
+}
+
+// ============================================================================
+// ASSET CHAIN TRACING TESTS
+// These tests verify that when an asset is imported and used by an export,
+// the change propagates through the entire dependency chain.
+// ============================================================================
+
+#[test]
+fn test_asset_change_traces_through_exported_symbol() {
+  let branch = TestBranch::new("test-asset-chain");
+
+  // Create a JSON asset file (simulating a lottie/config)
+  branch.make_change(
+    "proj1/animation.json",
+    r#"{ "name": "animation", "frames": 100 }"#,
+  );
+
+  // Create a component that imports and uses the JSON asset
+  // The key is that the import is used by an exported symbol
+  branch.make_change(
+    "proj1/animation-component.ts",
+    r#"import animationData from './animation.json';
+
+const animationString = JSON.stringify(animationData);
+
+export function AnimationComponent() {
+  return JSON.parse(animationString);
+}
+"#,
+  );
+
+  // proj2 imports AnimationComponent
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+import { AnimationComponent } from '@monorepo/proj1/animation-component';
+
+export { proj1 } from '@monorepo/proj1';
+
+export function proj2() {
+  proj1();
+  return AnimationComponent();
+}
+
+export function anotherFn() {
+  return 'anotherFn';
+}
+"#,
+  );
+
+  // Now change ONLY the JSON asset
+  branch.make_change(
+    "proj1/animation.json",
+    r#"{ "name": "animation", "frames": 200 }"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // proj1 should be affected (owns the asset)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (owns the asset file)"
+  );
+
+  // proj2 should be affected (imports AnimationComponent which uses the asset)
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (imports component that uses the asset)"
+  );
+}
+
+#[test]
+fn test_asset_chain_with_intermediate_constant() {
+  let branch = TestBranch::new("test-asset-intermediate");
+
+  // Create a data file
+  branch.make_change("proj1/data.json", r#"{ "value": 42 }"#);
+
+  // Component with intermediate constant (like diamondLottie → diamondLottieText → Diamond)
+  branch.make_change(
+    "proj1/data-component.ts",
+    r#"import data from './data.json';
+
+const dataText = JSON.stringify(data);
+const processedData = dataText.toUpperCase();
+
+export function DataComponent() {
+  return processedData;
+}
+
+export function getDataLength() {
+  return processedData.length;
+}
+"#,
+  );
+
+  // proj2 imports from proj1
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+import { DataComponent, getDataLength } from '@monorepo/proj1/data-component';
+
+export { proj1 } from '@monorepo/proj1';
+
+export function proj2() {
+  proj1();
+  return { component: DataComponent(), length: getDataLength() };
+}
+
+export function anotherFn() {
+  return 'anotherFn';
+}
+"#,
+  );
+
+  // Change only the data file
+  branch.make_change("proj1/data.json", r#"{ "value": 100 }"#);
+
+  let affected = branch.get_affected();
+
+  // Both projects should be affected
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected"
+  );
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected via asset → constant → export chain"
+  );
+}

@@ -1479,3 +1479,174 @@ export function anotherFn() {
     "proj2 should be affected via asset → constant → export chain"
   );
 }
+
+#[test]
+fn test_reexport_path_change_affects_project() {
+  let branch = TestBranch::new("test-reexport-path-change");
+
+  // Setup: proj1 has a utility file
+  branch.make_change(
+    "proj1/utils.ts",
+    r#"export function helperFn() {
+  return 'helper';
+}
+"#,
+  );
+
+  // proj2 barrel file re-exports from proj1
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+
+export { proj1 } from '@monorepo/proj1';
+export { helperFn } from '@monorepo/proj1/utils';
+
+export function proj2() {
+  proj1();
+  return 'proj2';
+}
+
+export function anotherFn() {
+  return 'anotherFn';
+}
+"#,
+  );
+
+  // Now change ONLY the re-export path (simulating a barrel file update)
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+
+export { proj1 } from '@monorepo/proj1';
+export { helperFn as renamedHelper } from '@monorepo/proj1/utils';
+
+export function proj2() {
+  proj1();
+  return 'proj2';
+}
+
+export function anotherFn() {
+  return 'anotherFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // proj2 should be affected because the re-export specifier changed
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected when a re-export specifier changes. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_renamed_file_detected() {
+  let branch = TestBranch::new("test-renamed-file");
+
+  // Setup: create a file in proj1 that will be renamed
+  branch.make_change(
+    "proj1/old-name.ts",
+    r#"export function renamedFn() {
+  return 'original';
+}
+"#,
+  );
+
+  // Now rename the file using git mv AND modify it
+  let fixture = fixture_path();
+  Command::new("git")
+    .args(["mv", "proj1/old-name.ts", "proj1/new-name.ts"])
+    .current_dir(&fixture)
+    .output()
+    .expect("Failed to git mv");
+
+  // Modify the renamed file's content
+  let new_file_path = fixture.join("proj1/new-name.ts");
+  fs::write(
+    &new_file_path,
+    r#"export function renamedFn() {
+  return 'modified after rename';
+}
+"#,
+  )
+  .expect("Failed to write renamed file");
+
+  git_command(&["add", "."]);
+  git_command(&["commit", "-m", "Rename and modify file"]);
+
+  let affected = branch.get_affected();
+
+  // proj1 should be affected because the renamed file has changes
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected when a renamed file has changes. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_renamed_file_cross_project_reference() {
+  let branch = TestBranch::new("test-renamed-cross-ref");
+
+  // Setup: create a file in proj1 that proj2 imports
+  branch.make_change(
+    "proj1/feature.ts",
+    r#"export function featureFn() {
+  return 'feature';
+}
+"#,
+  );
+
+  // proj2 imports from proj1's feature
+  branch.make_change(
+    "proj2/index.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+import { featureFn } from '@monorepo/proj1/feature';
+
+export { proj1 } from '@monorepo/proj1';
+
+export function proj2() {
+  proj1();
+  featureFn();
+  return 'proj2';
+}
+
+export function anotherFn() {
+  return 'anotherFn';
+}
+"#,
+  );
+
+  // Rename the file in proj1
+  let fixture = fixture_path();
+  Command::new("git")
+    .args(["mv", "proj1/feature.ts", "proj1/renamed-feature.ts"])
+    .current_dir(&fixture)
+    .output()
+    .expect("Failed to git mv");
+
+  // Modify the renamed file
+  let new_file_path = fixture.join("proj1/renamed-feature.ts");
+  fs::write(
+    &new_file_path,
+    r#"export function featureFn() {
+  return 'feature-modified';
+}
+"#,
+  )
+  .expect("Failed to write renamed file");
+
+  git_command(&["add", "."]);
+  git_command(&["commit", "-m", "Rename and modify feature file"]);
+
+  let affected = branch.get_affected();
+
+  // proj1 should be affected
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected when a renamed file has changes. Got: {:?}",
+    affected
+  );
+}

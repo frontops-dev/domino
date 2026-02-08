@@ -1479,3 +1479,113 @@ export function anotherFn() {
     "proj2 should be affected via asset → constant → export chain"
   );
 }
+
+/// Helper to get affected projects with custom include patterns
+fn get_affected_with_include(include: Vec<String>) -> Vec<String> {
+  let config = TrueAffectedConfig {
+    cwd: fixture_path(),
+    base: "main".to_string(),
+    root_ts_config: Some(PathBuf::from("tsconfig.json")),
+    projects: vec![
+      Project {
+        name: "proj1".to_string(),
+        source_root: PathBuf::from("proj1"),
+        ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj2".to_string(),
+        source_root: PathBuf::from("proj2"),
+        ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj3".to_string(),
+        source_root: PathBuf::from("proj3"),
+        ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
+        implicit_dependencies: vec!["proj1".to_string()],
+        targets: vec![],
+      },
+    ],
+    include,
+    ignored_paths: vec![],
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+
+  find_affected(config, profiler)
+    .expect("Failed to find affected projects")
+    .affected_projects
+}
+
+#[test]
+fn test_included_test_file_marks_project_affected() {
+  let branch = TestBranch::new("test-include-spec-file");
+
+  // Create a .spec.ts file in proj1 (test file matching default include pattern)
+  branch.make_change(
+    "proj1/utils.spec.ts",
+    r#"import { proj1 } from './index';
+
+describe('proj1', () => {
+  it('should work', () => {
+    expect(proj1()).toBe('proj1');
+  });
+});
+"#,
+  );
+
+  // Now modify only the test file
+  branch.make_change(
+    "proj1/utils.spec.ts",
+    r#"import { proj1 } from './index';
+
+describe('proj1', () => {
+  it('should work correctly', () => {
+    expect(proj1()).toBe('proj1-modified');
+  });
+});
+"#,
+  );
+
+  // Use default include (empty vec triggers default test file pattern)
+  let affected = get_affected_with_include(vec![]);
+
+  // proj1 should be affected because the .spec.ts file matches the default include pattern
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected when a .spec.ts file changes (default include pattern). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_included_file_with_custom_pattern() {
+  let branch = TestBranch::new("test-include-custom");
+
+  // Create a .stories.ts file in proj2
+  branch.make_change(
+    "proj2/button.stories.ts",
+    r#"export const Primary = { args: { label: 'Click' } };
+"#,
+  );
+
+  // Modify the stories file
+  branch.make_change(
+    "proj2/button.stories.ts",
+    r#"export const Primary = { args: { label: 'Click Me' } };
+"#,
+  );
+
+  // Use a custom include pattern that matches .stories.ts files
+  let affected = get_affected_with_include(vec![r"\.stories\.(ts|js)x?$".to_string()]);
+
+  // proj2 should be affected because the .stories.ts file matches the custom pattern
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected when a .stories.ts file changes (custom include pattern). Got: {:?}",
+    affected
+  );
+}

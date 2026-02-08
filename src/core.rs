@@ -7,11 +7,15 @@ use crate::types::{
   TrueAffectedConfig,
 };
 use crate::utils;
+use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
+
+/// Default include pattern: matches test/spec files (.spec.ts, .test.tsx, etc.)
+const DEFAULT_INCLUDE_PATTERN: &str = r"\.(spec|test)\.(ts|js)x?$";
 
 /// Mutable state for tracking affected symbols during analysis
 struct AffectedState<'a> {
@@ -68,6 +72,41 @@ fn find_affected_internal(
   // Step 4: Track affected packages and their causes
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
+
+  // Step 4b: Process included file patterns (e.g., test files)
+  // Files matching include patterns directly mark their owning project as affected,
+  // matching traf's changedIncludedFilesPackages behavior.
+  let default_include = vec![DEFAULT_INCLUDE_PATTERN.to_string()];
+  let include_patterns = if config.include.is_empty() {
+    &default_include
+  } else {
+    &config.include
+  };
+
+  let compiled_patterns: Vec<Regex> = include_patterns
+    .iter()
+    .filter_map(|p| match Regex::new(p) {
+      Ok(re) => Some(re),
+      Err(e) => {
+        debug!("Invalid include pattern '{}': {}", p, e);
+        None
+      }
+    })
+    .collect();
+
+  for changed_file in &changed_files {
+    let file_str = changed_file.file_path.to_string_lossy();
+    if compiled_patterns.iter().any(|re| re.is_match(&file_str)) {
+      if let Some(pkg) = utils::get_package_name_by_path(&changed_file.file_path, &config.projects)
+      {
+        debug!(
+          "Include pattern matched {:?}, adding package '{}'",
+          changed_file.file_path, pkg
+        );
+        affected_packages.insert(pkg);
+      }
+    }
+  }
 
   // Step 5: Partition changed files into source and non-source
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
@@ -679,5 +718,27 @@ mod tests {
 
     assert!(affected.contains("lib1"));
     assert!(affected.contains("app")); // Should be added as implicit dependent
+  }
+
+  #[test]
+  fn test_default_include_pattern_matches_test_files() {
+    let re = Regex::new(DEFAULT_INCLUDE_PATTERN).expect("Default pattern should compile");
+
+    // Should match spec/test files
+    assert!(re.is_match("proj1/utils.spec.ts"));
+    assert!(re.is_match("proj1/utils.test.ts"));
+    assert!(re.is_match("proj1/component.spec.tsx"));
+    assert!(re.is_match("proj1/component.test.tsx"));
+    assert!(re.is_match("proj1/helper.spec.js"));
+    assert!(re.is_match("proj1/helper.test.jsx"));
+    assert!(re.is_match("tests/validation/roof.step.test.ts"));
+
+    // Should NOT match regular source files
+    assert!(!re.is_match("proj1/utils.ts"));
+    assert!(!re.is_match("proj1/component.tsx"));
+    assert!(!re.is_match("proj1/index.js"));
+    assert!(!re.is_match("proj1/styles.css"));
+    assert!(!re.is_match("proj1/data.json"));
+    assert!(!re.is_match("proj1/test-utils.ts")); // "test" in name but not .test.ts
   }
 }

@@ -856,6 +856,11 @@ impl WorkspaceAnalyzer {
         if let Some(decl) = &export_decl.declaration {
           top_level_name = Self::extract_symbol_from_export_decl(decl);
         }
+        // Handle re-export specifiers (export { X } from './path')
+        if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
+          let specifier = &export_decl.specifiers[0];
+          top_level_name = Some(specifier.exported.name().to_string());
+        }
       }
       AstKind::ExportDefaultDeclaration(_) => {
         found_export_wrapper = true;
@@ -891,6 +896,11 @@ impl WorkspaceAnalyzer {
           // Check if there's an inline declaration (export const x = ...)
           if let Some(decl) = &export_decl.declaration {
             top_level_name = Self::extract_symbol_from_export_decl(decl);
+          }
+          // Handle re-export specifiers (export { X } from './path')
+          if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
+            let specifier = &export_decl.specifiers[0];
+            top_level_name = Some(specifier.exported.name().to_string());
           }
         }
         AstKind::ExportDefaultDeclaration(_) => {
@@ -1589,5 +1599,100 @@ type Props = ui.ButtonProps;
       1,
       "Should find 1 reference to ui.ButtonProps (type)"
     );
+  }
+
+  /// Helper to create an analyzer with a single parsed file
+  fn create_analyzer_with_file(source: &str, file_name: &str) -> (WorkspaceAnalyzer, PathBuf) {
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new(file_name);
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    (analyzer, file_path.to_path_buf())
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_specifier() {
+    let source = "export { Foo } from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Line 1 is the re-export. Should return "Foo".
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, Some("Foo".to_string()));
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_aliased() {
+    let source = "export { Foo as Bar } from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Should return the exported name "Bar", not the local name "Foo".
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, Some("Bar".to_string()));
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_multiple_specifiers() {
+    let source = "export { Alpha, Beta, Gamma } from './module';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Should return the first specifier's name.
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, Some("Alpha".to_string()));
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_wildcard() {
+    let source = "export * from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Wildcard re-exports have no specifiers and no declaration.
+    // find_node_at_line should return None (handled elsewhere by reference finder).
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, None);
+  }
+
+  #[test]
+  fn test_find_node_at_line_inline_export_still_works() {
+    // Ensure the fix didn't break inline exports like `export const X = ...`
+    let source = "export const MyConst = 42;\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, Some("MyConst".to_string()));
   }
 }

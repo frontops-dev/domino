@@ -129,24 +129,34 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().replace('"', "").trim().to_string())?;
 
-      // For renamed files, use the new path instead of the old path.
-      // Git rename diffs include a "rename to <new_path>" line.
-      let file_path = file_diff
+      // For renamed/copied files, use the new path instead of the old path.
+      let new_path = file_diff
         .lines()
-        .find(|line| line.starts_with("rename to "))
-        .map(|line| line.trim_start_matches("rename to ").trim().to_string())
-        .unwrap_or(file_path);
+        .find(|line| line.starts_with("rename to ") || line.starts_with("copy to "))
+        .map(|line| {
+          line
+            .trim_start_matches("rename to ")
+            .trim_start_matches("copy to ")
+            .trim()
+            .to_string()
+        });
+      let is_rename_or_copy = new_path.is_some();
+      let file_path = new_path.unwrap_or(file_path);
 
       // Extract changed line numbers
-      let changed_lines: Vec<usize> = line_regex
+      let mut changed_lines: Vec<usize> = line_regex
         .captures_iter(file_diff)
         .filter_map(|caps| caps.get(1))
         .filter_map(|m| m.as_str().parse::<usize>().ok())
         .collect();
 
       if changed_lines.is_empty() {
-        debug!("No changed lines found for file: {}", file_path);
-        return None;
+        if is_rename_or_copy {
+          changed_lines.push(1);
+        } else {
+          debug!("No changed lines found for file: {}", file_path);
+          return None;
+        }
       }
 
       Some(ChangedFile {
@@ -298,5 +308,33 @@ index 9876543..fedcba9 100644
 
     // Second file: normal, should use the regular path
     assert_eq!(result[1].file_path.to_str().unwrap(), "src/index.ts");
+  }
+
+  #[test]
+  fn test_parse_diff_rename_only() {
+    let diff = r#"diff --git a/src/old/name.ts b/src/new/name.ts
+similarity index 100%
+rename from src/old/name.ts
+rename to src/new/name.ts
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/new/name.ts");
+    assert_eq!(result[0].changed_lines, vec![1]);
+  }
+
+  #[test]
+  fn test_parse_diff_copy_only() {
+    let diff = r#"diff --git a/src/original.ts b/src/copied.ts
+similarity index 100%
+copy from src/original.ts
+copy to src/copied.ts
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/copied.ts");
+    assert_eq!(result[0].changed_lines, vec![1]);
   }
 }

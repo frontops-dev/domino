@@ -99,18 +99,30 @@ fn find_affected_internal(
       if generate_report {
         // For each changed line, record it as a direct change
         for &line in &changed_file.changed_lines {
-          let symbol = analyzer
+          let symbols = analyzer
             .find_node_at_line(file_path, line, 0)
-            .ok()
-            .flatten();
-          project_causes
-            .entry(pkg.clone())
-            .or_default()
-            .push(AffectCause::DirectChange {
-              file: file_path.clone(),
-              symbol,
-              line,
-            });
+            .unwrap_or_default();
+          if symbols.is_empty() {
+            project_causes
+              .entry(pkg.clone())
+              .or_default()
+              .push(AffectCause::DirectChange {
+                file: file_path.clone(),
+                symbol: None,
+                line,
+              });
+          } else {
+            for symbol in symbols {
+              project_causes
+                .entry(pkg.clone())
+                .or_default()
+                .push(AffectCause::DirectChange {
+                  file: file_path.clone(),
+                  symbol: Some(symbol),
+                  line,
+                });
+            }
+          }
         }
       }
     }
@@ -385,16 +397,12 @@ fn process_changed_line(
   affected_packages: &mut FxHashSet<String>,
   project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
 ) -> Result<()> {
-  // Find the node at this line
-  let symbol_name = match analyzer.find_node_at_line(file_path, line, 0)? {
-    Some(name) => name,
-    None => {
-      debug!("No symbol found at line {} in {:?}", line, file_path);
-      return Ok(());
-    }
-  };
-
-  debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
+  // Find the symbols at this line
+  let symbol_names = analyzer.find_node_at_line(file_path, line, 0)?;
+  if symbol_names.is_empty() {
+    debug!("No symbol found at line {} in {:?}", line, file_path);
+    return Ok(());
+  }
 
   // Use a visited set to avoid infinite recursion
   let mut visited = FxHashSet::default();
@@ -403,14 +411,18 @@ fn process_changed_line(
     project_causes,
     visited: &mut visited,
   };
-  process_changed_symbol(
-    analyzer,
-    reference_finder,
-    file_path,
-    &symbol_name,
-    projects,
-    &mut state,
-  )?;
+
+  for symbol_name in symbol_names {
+    debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
+    process_changed_symbol(
+      analyzer,
+      reference_finder,
+      file_path,
+      &symbol_name,
+      projects,
+      &mut state,
+    )?;
+  }
 
   Ok(())
 }
@@ -445,9 +457,9 @@ fn process_changed_symbol(
 
   for local_ref in local_refs {
     // Find the root symbol containing this reference
-    if let Some(container_symbol) =
-      analyzer.find_node_at_line(file_path, local_ref.line, local_ref.column)?
-    {
+    let container_symbols =
+      analyzer.find_node_at_line(file_path, local_ref.line, local_ref.column)?;
+    for container_symbol in container_symbols {
       // Skip if it's the same symbol (self-reference)
       if container_symbol != symbol_name {
         debug!(
@@ -576,22 +588,24 @@ fn process_changed_symbol(
       }
     } else {
       // Normal case: find the root symbol containing this reference in the other file
-      if let Ok(Some(container_symbol)) =
+      if let Ok(container_symbols) =
         analyzer.find_node_at_line(&reference.file_path, reference.line, reference.column)
       {
-        debug!(
-          "Cross-file reference in '{}' at {:?}:{}",
-          container_symbol, reference.file_path, reference.line
-        );
-        // Recursively process the containing symbol in the importing file
-        process_changed_symbol(
-          analyzer,
-          reference_finder,
-          &reference.file_path,
-          &container_symbol,
-          projects,
-          state,
-        )?;
+        for container_symbol in container_symbols {
+          debug!(
+            "Cross-file reference in '{}' at {:?}:{}",
+            container_symbol, reference.file_path, reference.line
+          );
+          // Recursively process the containing symbol in the importing file
+          process_changed_symbol(
+            analyzer,
+            reference_finder,
+            &reference.file_path,
+            &container_symbol,
+            projects,
+            state,
+          )?;
+        }
       }
     }
   }

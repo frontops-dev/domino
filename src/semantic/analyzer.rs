@@ -74,31 +74,9 @@ impl WorkspaceAnalyzer {
   /// Build reverse import index: (source_file, symbol) -> [(importing_file, local_name, from_module)]
   /// This must be called after analyze_workspace and needs a resolver
   fn build_import_index(&mut self, cwd: &Path) -> Result<()> {
-    use oxc_resolver::{ResolveOptions, Resolver};
+    use oxc_resolver::Resolver;
 
-    // Create resolver for building the index
-    let tsconfig_path = cwd.join("tsconfig.base.json");
-    let options = ResolveOptions {
-      extensions: vec![
-        ".ts".into(),
-        ".tsx".into(),
-        ".js".into(),
-        ".jsx".into(),
-        ".d.ts".into(),
-      ],
-      tsconfig: if tsconfig_path.exists() {
-        Some(oxc_resolver::TsconfigDiscovery::Manual(
-          oxc_resolver::TsconfigOptions {
-            config_file: tsconfig_path.clone(),
-            references: oxc_resolver::TsconfigReferences::Auto,
-          },
-        ))
-      } else {
-        None
-      },
-      ..Default::default()
-    };
-    let resolver = Resolver::new(options);
+    let resolver = Resolver::new(super::create_resolve_options(cwd));
     use tracing::debug;
 
     let mut index: ImportIndexMap = FxHashMap::default();
@@ -125,33 +103,10 @@ impl WorkspaceAnalyzer {
               Err(_) => continue,
             }
           }
-          Err(_) => {
-            // Try simple relative resolution as fallback
-            if !import.from_module.starts_with('.') {
-              continue;
-            }
-            let base = context.join(&import.from_module);
-            let mut resolved_path = None;
-            for ext in &[".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"] {
-              let candidate = if ext.starts_with('/') {
-                base.join(ext.trim_start_matches('/'))
-              } else {
-                // Append extension instead of replacing it
-                // This handles cases like colors.css -> colors.css.ts (vanilla-extract)
-                PathBuf::from(format!("{}{}", base.display(), ext))
-              };
-              if cwd.join(&candidate).exists() {
-                if let Ok(p) = candidate.strip_prefix(cwd) {
-                  resolved_path = Some(p.to_path_buf());
-                  break;
-                }
-              }
-            }
-            match resolved_path {
-              Some(p) => p,
-              None => continue,
-            }
-          }
+          Err(_) => match Self::simple_resolve_relative(cwd, context, &import.from_module) {
+            Some(p) => p,
+            None => continue,
+          },
         };
 
         // Add to index: (resolved_file, imported_symbol) -> (importing_file, local_name, from_module, is_dynamic)
@@ -178,6 +133,63 @@ impl WorkspaceAnalyzer {
     self.import_index = index;
 
     Ok(())
+  }
+
+  /// Fallback resolution for relative imports when oxc_resolver fails.
+  /// Handles .js/.jsx → .ts/.tsx remapping and standard extension probing.
+  fn simple_resolve_relative(cwd: &Path, context: &Path, specifier: &str) -> Option<PathBuf> {
+    if !specifier.starts_with('.') {
+      return None;
+    }
+
+    let try_candidate = |candidate: &Path| -> Option<PathBuf> {
+      if cwd.join(candidate).exists() {
+        candidate.strip_prefix(cwd).ok().map(|p| p.to_path_buf())
+      } else {
+        None
+      }
+    };
+
+    // 1. .js/.jsx → .ts/.tsx remapping
+    if let Some(stem) = specifier.strip_suffix(".js") {
+      let stem_path = context.join(stem);
+      let stem_str = stem_path.to_string_lossy();
+      for ext in &[".ts", ".tsx"] {
+        let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
+        if let Some(p) = try_candidate(&candidate) {
+          return Some(p);
+        }
+      }
+    } else if let Some(stem) = specifier.strip_suffix(".jsx") {
+      let candidate = PathBuf::from(format!("{}.tsx", context.join(stem).to_string_lossy()));
+      if let Some(p) = try_candidate(&candidate) {
+        return Some(p);
+      }
+    }
+
+    // 2. Standard extension probing + index file resolution
+    let base = context.join(specifier);
+    let base_str = base.to_string_lossy();
+    for suffix in &[
+      ".ts",
+      ".tsx",
+      ".js",
+      ".jsx",
+      "/index.ts",
+      "/index.tsx",
+      "/index.js",
+    ] {
+      let candidate = if suffix.starts_with('/') {
+        base.join(&suffix[1..])
+      } else {
+        PathBuf::from(format!("{}{}", base_str, suffix))
+      };
+      if let Some(p) = try_candidate(&candidate) {
+        return Some(p);
+      }
+    }
+
+    None
   }
 
   /// Analyze all files in the workspace

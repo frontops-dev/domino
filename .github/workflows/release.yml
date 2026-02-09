@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.3.8-fork.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (linux-gnu)
+        if: contains(matrix.target, 'linux-gnu')
+        uses: taiki-e/install-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cross
+
+      - name: Install zig + cargo-zigbuild (musl)
+        if: contains(matrix.target, 'musl')
+        run: |
+          pip3 install ziglang || true
+        # fallback: use setup-zig + taiki-e
+      - uses: mlugg/setup-zig@v2
+        if: contains(matrix.target, 'musl')
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        if: contains(matrix.target, 'musl')
+        uses: taiki-e/install-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build binary
+        run: |
+          if [[ "${{ matrix.target }}" == *"linux-gnu"* ]]; then
+            cross build --release --target=${{ matrix.target }} --bin domino
+          elif [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            cargo zigbuild --release --target=${{ matrix.target }} --bin domino
+          else
+            cargo build --release --target ${{ matrix.target }} --bin domino
+          fi
+          cp "target/${{ matrix.target }}/release/domino" "domino-${{ matrix.target }}"
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: domino-${{ matrix.target }}
+          path: domino-${{ matrix.target }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/domino-*/; do
+            cp "$dir"/* release/
+          done
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          body: |
+            Fork release of Domino with Rush workspace support and JS→TS extension resolution.
+
+            Built from commit ${{ github.sha }} on branch ${{ github.ref_name }}.
+          draft: false
+          prerelease: false
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -897,14 +897,16 @@ impl WorkspaceAnalyzer {
     }
 
     // If we found the symbol at the current node level, return it early
-    if found_export_wrapper && top_level_name.is_some() {
-      // Record profiling time
-      if let Some(start_time) = start {
-        self
-          .profiler
-          .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+    if found_export_wrapper {
+      if let Some(name) = top_level_name.take() {
+        // Record profiling time
+        if let Some(start_time) = start {
+          self
+            .profiler
+            .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+        }
+        return Ok(vec![name]);
       }
-      return Ok(vec![top_level_name.expect("top_level_name should be set")]);
     }
 
     // Walk up the tree to find a top-level exported declaration

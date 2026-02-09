@@ -17,6 +17,18 @@ use tracing::debug;
 /// Default include pattern: matches test/spec files (.spec.ts, .test.tsx, etc.)
 const DEFAULT_INCLUDE_PATTERN: &str = r"\.(spec|test)\.(ts|js)x?$";
 
+fn is_ignored_path(file_path: &Path, ignored_paths: &[String]) -> bool {
+  if ignored_paths.is_empty() {
+    return false;
+  }
+
+  let file_str = file_path.to_string_lossy();
+  ignored_paths
+    .iter()
+    .filter(|ignored| !ignored.trim().is_empty())
+    .any(|ignored| file_str.contains(ignored))
+}
+
 /// Mutable state for tracking affected symbols during analysis
 struct AffectedState<'a> {
   affected_packages: &'a mut FxHashSet<String>,
@@ -76,11 +88,12 @@ fn find_affected_internal(
   // Step 4b: Process included file patterns (e.g., test files)
   // Files matching include patterns directly mark their owning project as affected,
   // matching traf's changedIncludedFilesPackages behavior.
-  let default_include = vec![DEFAULT_INCLUDE_PATTERN.to_string()];
   let include_patterns = if config.include.is_empty() {
-    &default_include
+    vec![DEFAULT_INCLUDE_PATTERN.to_string()]
+  } else if config.include.len() == 1 && config.include[0].trim().is_empty() {
+    vec![]
   } else {
-    &config.include
+    config.include.clone()
   };
 
   let compiled_patterns: Vec<Regex> = include_patterns
@@ -95,6 +108,9 @@ fn find_affected_internal(
     .collect();
 
   for changed_file in &changed_files {
+    if is_ignored_path(&changed_file.file_path, &config.ignored_paths) {
+      continue;
+    }
     let file_str = changed_file.file_path.to_string_lossy();
     if compiled_patterns.iter().any(|re| re.is_match(&file_str)) {
       if let Some(pkg) = utils::get_package_name_by_path(&changed_file.file_path, &config.projects)

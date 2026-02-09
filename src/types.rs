@@ -97,6 +97,7 @@ pub struct TrueAffectedConfig {
   pub projects: Vec<Project>,
   /// Additional file patterns to include (regex patterns).
   /// When empty, defaults to matching test files: `\.(spec|test)\.(ts|js)x?$`
+  /// Use a single empty string to disable default include patterns.
   pub include: Vec<String>,
   /// Paths to ignore
   #[allow(dead_code)]

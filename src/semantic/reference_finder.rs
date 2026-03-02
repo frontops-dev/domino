@@ -279,7 +279,7 @@ impl<'a> ReferenceFinder<'a> {
     let cache_key = (from_file.to_path_buf(), specifier.to_string());
 
     // Check cache first
-    let cache_hit = {
+    {
       let cache = self.resolution_cache.borrow();
       if let Some(cached) = cache.get(&cache_key) {
         if let Some(start_time) = start {
@@ -289,8 +289,7 @@ impl<'a> ReferenceFinder<'a> {
         }
         return cached.clone();
       }
-      false
-    };
+    }
 
     // Not in cache, resolve it
     let from_path = self.cwd.join(from_file);
@@ -319,7 +318,7 @@ impl<'a> ReferenceFinder<'a> {
     if let Some(start_time) = start {
       self
         .profiler
-        .record_resolution(cache_hit, start_time.elapsed().as_nanos() as u64);
+        .record_resolution(false, start_time.elapsed().as_nanos() as u64);
     }
 
     resolved

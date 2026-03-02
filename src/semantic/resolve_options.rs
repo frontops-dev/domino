@@ -8,6 +8,16 @@ use std::path::Path;
 /// Accepts the workspace project list so it can build aliases that point bare package
 /// imports (e.g. `@scope/contracts`) directly at their **source** roots instead of
 /// letting the resolver follow `package.json` `exports`/`main` into `dist/`.
+///
+/// # Known limitation: `src/` heuristic
+///
+/// The alias-building logic below prefers `<project>/src/` when it exists. This works
+/// well for the common Rush-style layout but will silently fall back to the project root
+/// for packages that use a non-standard source directory (`lib/`, `source/`, etc.) or
+/// keep sources at the project root without a subdirectory. A more principled approach
+/// would be to resolve the package entry point normally, then check for a `source` field
+/// in `package.json` (a convention used by several monorepo tools like Preconstruct).
+/// This is left as a future improvement.
 pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOptions {
   let tsconfig_path = cwd.join("tsconfig.base.json");
 
@@ -68,6 +78,13 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
     ],
     // Resolve bare package imports to source roots within the monorepo.
     alias,
+    // NOTE: condition_names and main_fields allow the resolver to follow bare specifiers
+    // into package.json entry points, which is necessary for correct monorepo resolution.
+    // However, this also means the resolver will attempt resolution for external
+    // node_modules dependencies. The `strip_prefix(cwd)` guard in `resolve_import`
+    // correctly drops paths outside the workspace root, but the resolution work still
+    // happens. In a large monorepo with hundreds of third-party imports per file, this
+    // could meaningfully impact performance. Worth benchmarking on a realistic workspace.
     condition_names: vec![
       "import".into(),
       "require".into(),

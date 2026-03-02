@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 /// Test fixture path
 fn fixture_path() -> PathBuf {
@@ -1647,6 +1648,148 @@ export function anotherFn() {
   assert!(
     affected.contains(&"proj1".to_string()),
     "proj1 should be affected when a renamed file has changes. Got: {:?}",
+    affected
+  );
+}
+
+/// Helper to run a git command in a given directory
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+  let output = Command::new("git")
+    .args(args)
+    .current_dir(dir)
+    .output()
+    .unwrap_or_else(|e| panic!("git {} failed to execute: {}", args.join(" "), e));
+  if !output.status.success() {
+    panic!(
+      "git {} failed:\n{}",
+      args.join(" "),
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+  String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Integration test: `.js`-extension imports resolve to `.ts`/`.tsx` files.
+///
+/// Creates a self-contained temp monorepo where `app` imports from `lib` using
+/// `.js` extensions (the common ESM-in-TypeScript pattern). Verifies that when
+/// a function in `lib` is changed, `app` is correctly detected as affected.
+#[test]
+fn test_js_to_ts_extension_resolution() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  // Canonicalize to resolve symlinks (e.g. /var -> /private/var on macOS),
+  // ensuring path consistency with the resolver's canonicalized output.
+  let root = tmp.path().canonicalize().expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo ------------------------------------------------
+  // lib/src/utils.ts  — the source file
+  // app/src/index.ts  — imports from lib using .js extensions
+  let lib_src = root.join("lib/src");
+  let app_src = root.join("app/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    lib_src.join("Component.tsx"),
+    r#"export const Component = () => null;
+"#,
+  )
+  .unwrap();
+
+  // app imports with .js extensions (ESM convention)
+  fs::write(
+    app_src.join("index.ts"),
+    r#"import { helper } from '../../lib/src/utils.js';
+import { Component } from '../../lib/src/Component.js';
+
+export function main() {
+  helper();
+  return Component;
+}
+"#,
+  )
+  .unwrap();
+
+  // minimal package.json files so the resolver doesn't complain
+  fs::write(
+    root.join("lib/package.json"),
+    r#"{"name": "@test/lib", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("app/package.json"),
+    r#"{"name": "@test/app", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch with a change in lib ------------------------
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  // -- run find_affected -------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "lib".to_string(),
+        source_root: PathBuf::from("lib"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app".to_string(),
+        source_root: PathBuf::from("app"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected (imports lib/src/utils.ts via .js extension). Got: {:?}",
     affected
   );
 }

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
+use walkdir::WalkDir;
 
 /// Type alias for import index entries: (importing_file, local_name, from_module)
 /// (importing_file, local_name, from_module, is_dynamic)
@@ -32,6 +33,24 @@ pub struct FileSemanticData {
   pub allocator: Allocator,
   pub semantic: oxc_semantic::Semantic<'static>,
 }
+
+/// Wrapper for parallel parsing results that need to be sent across threads.
+///
+/// Safety: `FileSemanticData` is !Send because `Semantic<'static>` holds `&'static`
+/// references to AST nodes containing `Cell` fields (e.g. `RegExpLiteral`).
+/// `&Cell<T>` is !Send because `Cell` is !Sync. However, each `ParseResult`
+/// exclusively owns its allocator and all memory it references — no aliased
+/// references exist across threads. We create on a worker thread and move
+/// ownership to the main thread, which is safe.
+struct ParseResult {
+  relative_path: PathBuf,
+  file_data: FileSemanticData,
+  imports: Vec<Import>,
+  exports: Vec<Export>,
+}
+
+// Safety: see doc comment on ParseResult above.
+unsafe impl Send for ParseResult {}
 
 /// Workspace-wide semantic analysis
 pub struct WorkspaceAnalyzer {
@@ -180,72 +199,94 @@ impl WorkspaceAnalyzer {
     Ok(())
   }
 
-  /// Analyze all files in the workspace
+  /// Analyze all files in the workspace using parallel parsing
   fn analyze_workspace(&mut self, cwd: &Path) -> Result<()> {
-    for project in &self.projects.clone() {
-      let source_root = if project.source_root.is_absolute() {
-        project.source_root.clone()
-      } else {
-        cwd.join(&project.source_root)
-      };
+    use rayon::prelude::*;
 
-      if !source_root.exists() {
-        warn!("Source root does not exist: {:?}", source_root);
-        continue;
-      }
+    let all_paths: Vec<_> = self
+      .projects
+      .iter()
+      .filter_map(|project| {
+        let source_root = if project.source_root.is_absolute() {
+          project.source_root.clone()
+        } else {
+          cwd.join(&project.source_root)
+        };
+        if source_root.exists() {
+          Some(source_root)
+        } else {
+          warn!("Source root does not exist: {:?}", source_root);
+          None
+        }
+      })
+      .flat_map(|root| Self::collect_file_paths(&root, cwd))
+      .collect();
 
-      self.analyze_directory(&source_root, cwd)?;
+    let results: Vec<ParseResult> = all_paths
+      .into_par_iter()
+      .filter_map(|(abs_path, rel_path)| {
+        Self::parse_single_file(&abs_path, rel_path)
+          .map_err(|e| warn!("Failed to parse {}: {}", abs_path.display(), e))
+          .ok()
+      })
+      .collect();
+
+    for result in results {
+      self
+        .files
+        .insert(result.relative_path.clone(), result.file_data);
+      self
+        .imports
+        .insert(result.relative_path.clone(), result.imports);
+      self.exports.insert(result.relative_path, result.exports);
     }
 
     Ok(())
   }
 
-  /// Recursively analyze a directory
-  fn analyze_directory(&mut self, dir: &Path, cwd: &Path) -> Result<()> {
-    if !dir.is_dir() {
-      return Ok(());
-    }
-
-    for entry in fs::read_dir(dir)? {
-      let entry = entry?;
-      let path = entry.path();
-
-      // Skip node_modules, dist, build, etc.
-      if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name == "node_modules" || name == "dist" || name == "build" || name.starts_with('.') {
-          continue;
-        }
-      }
-
-      if path.is_dir() {
-        self.analyze_directory(&path, cwd)?;
-      } else if path.is_file() {
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-          if matches!(ext, "ts" | "tsx" | "js" | "jsx") {
-            let relative_path = path.strip_prefix(cwd).unwrap_or(&path).to_path_buf();
-            if let Err(e) = self.analyze_file(&path, &relative_path) {
-              warn!("Failed to analyze {}: {}", path.display(), e);
-            }
-          }
-        }
-      }
-    }
-
-    Ok(())
+  fn collect_file_paths(dir: &Path, cwd: &Path) -> Vec<(PathBuf, PathBuf)> {
+    WalkDir::new(dir)
+      .into_iter()
+      .filter_entry(|e| {
+        e.file_type().is_file()
+          || e
+            .file_name()
+            .to_str()
+            .is_none_or(|n| !matches!(n, "node_modules" | "dist" | "build") && !n.starts_with('.'))
+      })
+      .filter_map(|e| {
+        e.map_err(|err| warn!("Failed to read directory entry: {}", err))
+          .ok()
+      })
+      .filter(|e| {
+        e.file_type().is_file()
+          && e
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext, "ts" | "tsx" | "js" | "jsx"))
+      })
+      .map(|e| {
+        let abs_path = e.into_path();
+        let rel_path = abs_path
+          .strip_prefix(cwd)
+          .unwrap_or(&abs_path)
+          .to_path_buf();
+        (abs_path, rel_path)
+      })
+      .collect()
   }
 
-  /// Analyze a single file
-  fn analyze_file(&mut self, file_path: &Path, relative_path: &Path) -> Result<()> {
+  /// Parse a single file independently, returning all data needed for the merge phase.
+  /// This is a pure function with no `&self` — safe to call from parallel iterators.
+  fn parse_single_file(file_path: &Path, relative_path: PathBuf) -> Result<ParseResult> {
     let source = fs::read_to_string(file_path)?;
 
-    // Determine source type from file extension
     let source_type = SourceType::from_path(file_path)
       .unwrap_or_else(|_| SourceType::default().with_typescript(true));
 
-    // Create allocator for this file
     let allocator = Allocator::default();
 
-    // Parse the file
     let parser = Parser::new(&allocator, &source, source_type);
     let parse_result = parser.parse();
 
@@ -255,10 +296,8 @@ impl WorkspaceAnalyzer {
         file_path,
         parse_result.errors.len()
       );
-      // Continue anyway - partial AST may still be useful
     }
 
-    // Build semantic data
     let semantic_builder = SemanticBuilder::new()
       .with_cfg(true)
       .with_check_syntax_error(false);
@@ -273,14 +312,9 @@ impl WorkspaceAnalyzer {
       );
     }
 
-    // Extract imports and exports
-    let imports = Self::extract_imports(&parse_result.program, relative_path);
+    let imports = Self::extract_imports(&parse_result.program, &relative_path);
     let exports = Self::extract_exports(&parse_result.program);
 
-    self.imports.insert(relative_path.to_path_buf(), imports);
-    self.exports.insert(relative_path.to_path_buf(), exports);
-
-    // Store semantic data
     // Safety: We're storing the semantic data with its allocator, which is valid
     // as long as the FileSemanticData struct exists
     let semantic = unsafe {
@@ -289,16 +323,16 @@ impl WorkspaceAnalyzer {
       )
     };
 
-    self.files.insert(
-      relative_path.to_path_buf(),
-      FileSemanticData {
+    Ok(ParseResult {
+      relative_path,
+      file_data: FileSemanticData {
         source,
         allocator,
         semantic,
       },
-    );
-
-    Ok(())
+      imports,
+      exports,
+    })
   }
 }
 

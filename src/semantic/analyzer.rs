@@ -732,9 +732,9 @@ impl WorkspaceAnalyzer {
     // This is O(refs) instead of O(exports × refs)
     let mut containers = FxHashSet::default();
     for reference in refs {
-      if let Some(container) =
-        self.find_node_at_line(file_path, reference.line, reference.column)?
-      {
+      let containers_on_line =
+        self.find_node_at_line(file_path, reference.line, reference.column)?;
+      for container in containers_on_line {
         containers.insert(container);
       }
     }
@@ -767,13 +767,13 @@ impl WorkspaceAnalyzer {
     Ok(exported_symbols)
   }
 
-  /// Find node at a specific line in a file
+  /// Find symbols at a specific line in a file
   pub fn find_node_at_line(
     &self,
     file_path: &Path,
     line: usize,
     column: usize,
-  ) -> Result<Option<String>> {
+  ) -> Result<Vec<String>> {
     let start = if self.profiler.is_enabled() {
       Some(Instant::now())
     } else {
@@ -789,6 +789,26 @@ impl WorkspaceAnalyzer {
     let line_start = crate::utils::line_to_offset(&file_data.source, line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
     let exact_offset = line_start + column;
+    let line_end =
+      crate::utils::line_to_offset(&file_data.source, line + 1).unwrap_or(file_data.source.len());
+    let line_end_inclusive = line_end.saturating_sub(1);
+
+    let specifier_names_on_line = |export_decl: &ExportNamedDeclaration| -> Vec<String> {
+      export_decl
+        .specifiers
+        .iter()
+        .filter_map(|specifier| {
+          let span = specifier.span();
+          let spec_start = span.start as usize;
+          let spec_end = span.end as usize;
+          if spec_start <= line_end_inclusive && spec_end >= line_start {
+            Some(specifier.exported.name().to_string())
+          } else {
+            None
+          }
+        })
+        .collect()
+    };
 
     // Find nodes at this position
     let nodes = file_data.semantic.nodes();
@@ -833,7 +853,7 @@ impl WorkspaceAnalyzer {
     }
 
     if node_on_line_id.is_none() {
-      return Ok(None);
+      return Ok(vec![]);
     }
 
     // Find the containing top-level declaration (exported symbol)
@@ -856,6 +876,18 @@ impl WorkspaceAnalyzer {
         if let Some(decl) = &export_decl.declaration {
           top_level_name = Self::extract_symbol_from_export_decl(decl);
         }
+        if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
+          let specifier_names = specifier_names_on_line(export_decl);
+          if !specifier_names.is_empty() {
+            // Record profiling time
+            if let Some(start_time) = start {
+              self
+                .profiler
+                .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+            }
+            return Ok(specifier_names);
+          }
+        }
       }
       AstKind::ExportDefaultDeclaration(_) => {
         found_export_wrapper = true;
@@ -865,14 +897,16 @@ impl WorkspaceAnalyzer {
     }
 
     // If we found the symbol at the current node level, return it early
-    if found_export_wrapper && top_level_name.is_some() {
-      // Record profiling time
-      if let Some(start_time) = start {
-        self
-          .profiler
-          .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+    if found_export_wrapper {
+      if let Some(name) = top_level_name.take() {
+        // Record profiling time
+        if let Some(start_time) = start {
+          self
+            .profiler
+            .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+        }
+        return Ok(vec![name]);
       }
-      return Ok(top_level_name);
     }
 
     // Walk up the tree to find a top-level exported declaration
@@ -891,6 +925,18 @@ impl WorkspaceAnalyzer {
           // Check if there's an inline declaration (export const x = ...)
           if let Some(decl) = &export_decl.declaration {
             top_level_name = Self::extract_symbol_from_export_decl(decl);
+          }
+          if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
+            let specifier_names = specifier_names_on_line(export_decl);
+            if !specifier_names.is_empty() {
+              // Record profiling time
+              if let Some(start_time) = start {
+                self
+                  .profiler
+                  .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+              }
+              return Ok(specifier_names);
+            }
           }
         }
         AstKind::ExportDefaultDeclaration(_) => {
@@ -953,10 +999,10 @@ impl WorkspaceAnalyzer {
         .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
     }
 
-    // Return the top-level declaration if found, otherwise None
-    // When None is returned, it means the line doesn't contain a trackable symbol
+    // Return the top-level declaration if found, otherwise empty
+    // When empty is returned, it means the line doesn't contain a trackable symbol
     // (e.g., object literal properties, comments, or code not in a top-level declaration)
-    Ok(top_level_name)
+    Ok(top_level_name.map(|name| vec![name]).unwrap_or_default())
   }
 }
 
@@ -1016,7 +1062,7 @@ export { MemoizedComponent };"#;
     let result = analyzer.find_node_at_line(file_path, 3, 42);
     assert!(result.is_ok());
     let symbol = result.unwrap();
-    assert_eq!(symbol, Some("MemoizedComponent".to_string()));
+    assert_eq!(symbol, vec!["MemoizedComponent".to_string()]);
 
     // Test with column 0 (line start) - should still find a containing symbol
     let result = analyzer.find_node_at_line(file_path, 3, 0);
@@ -1026,7 +1072,7 @@ export { MemoizedComponent };"#;
     let result = analyzer.find_node_at_line(file_path, 4, 10);
     assert!(result.is_ok());
     let symbol = result.unwrap();
-    assert_eq!(symbol, Some("AnotherVar".to_string()));
+    assert_eq!(symbol, vec!["AnotherVar".to_string()]);
   }
 
   #[test]
@@ -1080,7 +1126,7 @@ export { MemoizedComponent };"#;
     // Note: The exact result depends on how the AST is structured
     // The important thing is that we get a result and don't panic
     let symbol = result.unwrap();
-    assert!(symbol.is_some());
+    assert!(!symbol.is_empty());
   }
 
   #[test]
@@ -1335,7 +1381,7 @@ const DynamicImport = await import('./dynamic');
     let symbol = result.unwrap();
     assert_eq!(
       symbol,
-      Some("default".to_string()),
+      vec!["default".to_string()],
       "Should find 'default' for export default"
     );
   }
@@ -1381,7 +1427,7 @@ const DynamicImport = await import('./dynamic');
     let symbol = result.unwrap();
     assert_eq!(
       symbol,
-      Some("default".to_string()),
+      vec!["default".to_string()],
       "Should find 'default' for anonymous export default"
     );
   }
@@ -1469,17 +1515,17 @@ export function third() {
     // Test first export
     let result1 = analyzer.find_node_at_line(file_path, 1, 0);
     assert!(result1.is_ok());
-    assert_eq!(result1.unwrap(), Some("FIRST".to_string()));
+    assert_eq!(result1.unwrap(), vec!["FIRST".to_string()]);
 
     // Test second export
     let result2 = analyzer.find_node_at_line(file_path, 2, 0);
     assert!(result2.is_ok());
-    assert_eq!(result2.unwrap(), Some("SECOND".to_string()));
+    assert_eq!(result2.unwrap(), vec!["SECOND".to_string()]);
 
     // Test third export
     let result3 = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result3.is_ok());
-    assert_eq!(result3.unwrap(), Some("third".to_string()));
+    assert_eq!(result3.unwrap(), vec!["third".to_string()]);
   }
 
   #[test]
@@ -1589,5 +1635,102 @@ type Props = ui.ButtonProps;
       1,
       "Should find 1 reference to ui.ButtonProps (type)"
     );
+  }
+
+  /// Helper to create an analyzer with a single parsed file
+  fn create_analyzer_with_file(source: &str, file_name: &str) -> (WorkspaceAnalyzer, PathBuf) {
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new(file_name);
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    (analyzer, file_path.to_path_buf())
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_specifier() {
+    let source = "export { Foo } from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Line 1 is the re-export. Should return "Foo".
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, vec!["Foo".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_aliased() {
+    let source = "export { Foo as Bar } from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Should return the exported name "Bar", not the local name "Foo".
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, vec!["Bar".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_multiple_specifiers() {
+    let source = "export { Alpha, Beta, Gamma } from './module';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Should return all specifiers on the line.
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(
+      result,
+      vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()]
+    );
+  }
+
+  #[test]
+  fn test_find_node_at_line_reexport_wildcard() {
+    let source = "export * from './foo';\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "barrel.ts");
+
+    // Wildcard re-exports have no specifiers and no declaration.
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert!(result.is_empty());
+  }
+
+  #[test]
+  fn test_find_node_at_line_inline_export_still_works() {
+    // Ensure the fix didn't break inline exports like `export const X = ...`
+    let source = "export const MyConst = 42;\n";
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    let result = analyzer
+      .find_node_at_line(&file_path, 1, 0)
+      .expect("Should not error");
+    assert_eq!(result, vec!["MyConst".to_string()]);
   }
 }

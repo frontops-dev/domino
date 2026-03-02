@@ -21,7 +21,8 @@ pub struct Project {
 pub struct ChangedFile {
   /// Path to the file (relative to workspace root)
   pub file_path: PathBuf,
-  /// Line numbers that changed (1-indexed)
+  /// Line numbers that changed (1-indexed).
+  /// Empty for binary files (entire file considered changed).
   pub changed_lines: Vec<usize>,
 }
 

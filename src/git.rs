@@ -123,22 +123,45 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
     .split("diff --git")
     .skip(1) // Skip the first empty split
     .filter_map(|file_diff| {
-      // Extract file path
+      // Extract file path (from the "a/" side of the diff header)
       let file_path = file_regex
         .captures(file_diff)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().replace('"', "").trim().to_string())?;
 
+      // For renamed/copied files, use the new path instead of the old path.
+      let new_path = file_diff
+        .lines()
+        .find(|line| line.starts_with("rename to ") || line.starts_with("copy to "))
+        .map(|line| {
+          line
+            .trim_start_matches("rename to ")
+            .trim_start_matches("copy to ")
+            .trim()
+            .to_string()
+        });
+      let is_rename_or_copy = new_path.is_some();
+      let file_path = new_path.unwrap_or(file_path);
+
       // Extract changed line numbers
-      let changed_lines: Vec<usize> = line_regex
+      let mut changed_lines: Vec<usize> = line_regex
         .captures_iter(file_diff)
         .filter_map(|caps| caps.get(1))
         .filter_map(|m| m.as_str().parse::<usize>().ok())
         .collect();
 
       if changed_lines.is_empty() {
-        debug!("No changed lines found for file: {}", file_path);
-        return None;
+        if is_rename_or_copy {
+          changed_lines.push(1);
+        } else if file_diff
+          .lines()
+          .any(|line| line.starts_with("Binary files"))
+        {
+          debug!("Binary file detected: {}", file_path);
+        } else {
+          debug!("No changed lines found for file: {}", file_path);
+          return None;
+        }
       }
 
       Some(ChangedFile {
@@ -199,5 +222,183 @@ index 9876543..fedcba9 100644
     let diff = "";
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 0);
+  }
+
+  #[test]
+  fn test_parse_diff_renamed_file() {
+    let diff = r#"diff --git a/libs/old-dir/provider.ts b/libs/new-dir/provider.ts
+similarity index 95%
+rename from libs/old-dir/provider.ts
+rename to libs/new-dir/provider.ts
+index 1234567..abcdefg 100644
+--- a/libs/old-dir/provider.ts
++++ b/libs/new-dir/provider.ts
+@@ -10,1 +10,1 @@ export class Provider {
+-  return 'old';
++  return 'new';
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+
+    // Should use the NEW path, not the old path
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "libs/new-dir/provider.ts"
+    );
+    assert_eq!(result[0].changed_lines, vec![10]);
+  }
+
+  #[test]
+  fn test_parse_diff_renamed_file_with_changes() {
+    // A rename that also has content changes in multiple hunks
+    let diff = r#"diff --git a/src/quotes/helper.ts b/src/quote-page/helper.ts
+similarity index 80%
+rename from src/quotes/helper.ts
+rename to src/quote-page/helper.ts
+index 1234567..abcdefg 100644
+--- a/src/quotes/helper.ts
++++ b/src/quote-page/helper.ts
+@@ -5,1 +5,1 @@ export function getQuote() {
+-  return fetchQuote();
++  return fetchPlatformicQuote();
+@@ -20,0 +20,3 @@ export function formatQuote() {
++  // New validation logic
++  validateQuote();
++  return formatted;
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+
+    // Should use the NEW path
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "src/quote-page/helper.ts"
+    );
+    // Should have both hunks' line numbers
+    assert_eq!(result[0].changed_lines, vec![5, 20]);
+  }
+
+  #[test]
+  fn test_parse_diff_mixed_renamed_and_normal() {
+    // A diff with one renamed file and one normal file
+    let diff = r#"diff --git a/src/old/component.ts b/src/new/component.ts
+similarity index 90%
+rename from src/old/component.ts
+rename to src/new/component.ts
+index 1234567..abcdefg 100644
+--- a/src/old/component.ts
++++ b/src/new/component.ts
+@@ -3,1 +3,1 @@
+-  old code
++  new code
+diff --git a/src/index.ts b/src/index.ts
+index 9876543..fedcba9 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,1 +1,1 @@
+-export { Component } from './old/component';
++export { Component } from './new/component';
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 2);
+
+    // First file: renamed, should use new path
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "src/new/component.ts"
+    );
+
+    // Second file: normal, should use the regular path
+    assert_eq!(result[1].file_path.to_str().unwrap(), "src/index.ts");
+  }
+
+  #[test]
+  fn test_parse_diff_rename_only() {
+    let diff = r#"diff --git a/src/old/name.ts b/src/new/name.ts
+similarity index 100%
+rename from src/old/name.ts
+rename to src/new/name.ts
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/new/name.ts");
+    assert_eq!(result[0].changed_lines, vec![1]);
+  }
+
+  #[test]
+  fn test_parse_diff_binary_file() {
+    let diff = r#"diff --git a/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png b/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png
+index 1234567..abcdefg 100644
+Binary files a/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png and b/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png differ
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png"
+    );
+    assert!(result[0].changed_lines.is_empty());
+  }
+
+  #[test]
+  fn test_parse_diff_new_binary_file() {
+    let diff = r#"diff --git "a/image.png" "b/image.png"
+new file mode 100644
+index 000000000..26b848d67
+Binary files /dev/null and "b/image.png" differ
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "image.png");
+    assert!(result[0].changed_lines.is_empty());
+  }
+
+  #[test]
+  fn test_parse_diff_binary_mixed_with_source() {
+    let diff = r#"diff --git a/apps/e2e/screenshot.png b/apps/e2e/screenshot.png
+index 1234567..abcdefg 100644
+Binary files a/apps/e2e/screenshot.png and b/apps/e2e/screenshot.png differ
+diff --git a/libs/core/src/utils.ts b/libs/core/src/utils.ts
+index 1234567..abcdefg 100644
+--- a/libs/core/src/utils.ts
++++ b/libs/core/src/utils.ts
+@@ -15,0 +16,1 @@ export function findRootNode() {
++  return node.getParent();
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 2);
+
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "apps/e2e/screenshot.png"
+    );
+    assert!(result[0].changed_lines.is_empty());
+
+    assert_eq!(
+      result[1].file_path.to_str().unwrap(),
+      "libs/core/src/utils.ts"
+    );
+    assert_eq!(result[1].changed_lines, vec![16]);
+  }
+
+  #[test]
+  fn test_parse_diff_copy_only() {
+    let diff = r#"diff --git a/src/original.ts b/src/copied.ts
+similarity index 100%
+copy from src/original.ts
+copy to src/copied.ts
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/copied.ts");
+    assert_eq!(result[0].changed_lines, vec![1]);
   }
 }

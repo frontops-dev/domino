@@ -1,10 +1,16 @@
 use crate::error::{DominoError, Result};
 use crate::types::Project;
-use glob::glob;
+use glob::{MatchOptions, Pattern};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use tracing::{debug, warn};
+
+const GLOB_MATCH_OPTIONS: MatchOptions = MatchOptions {
+  case_sensitive: true,
+  require_literal_separator: true,
+  require_literal_leading_dot: false,
+};
 
 #[derive(Debug, Deserialize)]
 struct PnpmWorkspace {
@@ -41,35 +47,46 @@ fn has_npm_workspaces(cwd: &Path) -> bool {
 pub fn get_projects(cwd: &Path) -> Result<Vec<Project>> {
   let workspace_patterns = get_workspace_patterns(cwd)?;
 
-  let mut projects = Vec::new();
+  let glob_patterns: Vec<Pattern> = workspace_patterns
+    .iter()
+    .filter(|p| !p.starts_with('!'))
+    .filter_map(|p| Pattern::new(&format!("{}/package.json", p)).ok())
+    .collect();
 
-  for pattern in &workspace_patterns {
-    // Skip negated patterns (starting with !)
-    if pattern.starts_with('!') {
+  if glob_patterns.is_empty() {
+    return Ok(vec![]);
+  }
+
+  let walker = super::build_walker(cwd, &[], &[])?;
+
+  let mut projects = Vec::new();
+  for entry in walker {
+    let entry = match entry {
+      Ok(e) => e,
+      Err(e) => {
+        warn!("Walk error during workspace discovery: {}", e);
+        continue;
+      }
+    };
+    if entry.file_type().is_none_or(|ft| !ft.is_file()) || entry.file_name() != "package.json" {
       continue;
     }
 
-    let glob_pattern = cwd.join(pattern).join("package.json");
-    let pattern_str = glob_pattern.to_string_lossy().to_string();
+    let relative = match entry.path().strip_prefix(cwd) {
+      Ok(rel) => rel,
+      Err(_) => continue,
+    };
 
-    for entry in glob(&pattern_str).map_err(|e| DominoError::Other(format!("Glob error: {}", e)))? {
-      match entry {
-        Ok(package_json_path) => {
-          // Skip node_modules
-          if package_json_path.to_string_lossy().contains("node_modules") {
-            continue;
-          }
+    if !glob_patterns
+      .iter()
+      .any(|p| p.matches_path_with(relative, GLOB_MATCH_OPTIONS))
+    {
+      continue;
+    }
 
-          match parse_package_json(&package_json_path, cwd) {
-            Ok(project) => projects.push(project),
-            Err(e) => warn!(
-              "Failed to parse package.json at {:?}: {}",
-              package_json_path, e
-            ),
-          }
-        }
-        Err(e) => warn!("Error reading glob entry: {}", e),
-      }
+    match parse_package_json(entry.path(), cwd) {
+      Ok(project) => projects.push(project),
+      Err(e) => warn!("Failed to parse package.json at {:?}: {}", entry.path(), e),
     }
   }
 
@@ -127,4 +144,186 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
     implicit_dependencies: vec![],
     targets: vec![],
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::fs;
+  use std::process::Command;
+  use tempfile::TempDir;
+
+  fn create_workspace_fixture(patterns: &[&str]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    Command::new("git")
+      .args(["init", "-q"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    let workspaces_json: Vec<String> = patterns.iter().map(|p| format!(r#""{}""#, p)).collect();
+    fs::write(
+      root.join("package.json"),
+      format!(
+        r#"{{ "name": "root", "workspaces": [{}] }}"#,
+        workspaces_json.join(", ")
+      ),
+    )
+    .unwrap();
+
+    dir
+  }
+
+  fn write_package_json(root: &std::path::Path, dir_name: &str, pkg_name: &str) {
+    let dir = root.join(dir_name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+      dir.join("package.json"),
+      format!(r#"{{ "name": "{}" }}"#, pkg_name),
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn test_valid_workspace_projects_discovered() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "packages/core", "@myorg/core");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 2);
+    assert!(names.contains(&"@myorg/utils"));
+    assert!(names.contains(&"@myorg/core"));
+  }
+
+  #[test]
+  fn test_gitignore_excludes_workspace_project() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "packages/ignored-pkg", "@myorg/ignored-pkg");
+
+    fs::write(root.join(".gitignore"), "packages/ignored-pkg\n").unwrap();
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"@myorg/utils"));
+    assert!(!names.contains(&"@myorg/ignored-pkg"));
+  }
+
+  #[test]
+  fn test_dist_excluded_by_default() {
+    let dir = create_workspace_fixture(&["packages/*", "dist/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "dist/utils", "@myorg/utils-dist");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"@myorg/utils"));
+    assert!(!names.contains(&"@myorg/utils-dist"));
+  }
+
+  #[test]
+  fn test_pnpm_workspace_discovery() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    Command::new("git")
+      .args(["init", "-q"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    fs::write(
+      root.join("pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n  - 'libs/*'\n",
+    )
+    .unwrap();
+
+    write_package_json(root, "apps/web", "@myorg/web");
+    write_package_json(root, "libs/shared", "@myorg/shared");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 2);
+    assert!(names.contains(&"@myorg/web"));
+    assert!(names.contains(&"@myorg/shared"));
+  }
+
+  #[test]
+  fn test_non_matching_packages_excluded() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "other/stray", "@myorg/stray");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"@myorg/utils"));
+  }
+
+  #[test]
+  fn test_node_modules_excluded_by_default() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "node_modules/some-dep", "@some/dep");
+    write_package_json(
+      root,
+      "packages/utils/node_modules/nested-dep",
+      "@nested/dep",
+    );
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"@myorg/utils"));
+  }
+
+  #[test]
+  fn test_star_does_not_match_across_separators() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+    write_package_json(root, "packages/utils/nested/deep", "@myorg/deep");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"@myorg/utils"));
+  }
+
+  #[test]
+  fn test_source_root_with_absolute_cwd() {
+    let dir = create_workspace_fixture(&["packages/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "packages/utils", "@myorg/utils");
+
+    let projects = get_projects(root).unwrap();
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].source_root, root.join("packages/utils"));
+  }
 }

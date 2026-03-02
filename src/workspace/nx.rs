@@ -1,6 +1,5 @@
 use crate::error::{DominoError, Result};
 use crate::types::Project;
-use glob::glob;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -85,25 +84,25 @@ pub fn get_projects(cwd: &Path) -> Result<Vec<Project>> {
 }
 
 fn get_project_json_projects(cwd: &Path) -> Result<Vec<Project>> {
+  let walker = super::build_walker(cwd, &[], &[".nxignore"])?;
+
   let mut projects = Vec::new();
-
-  let pattern = cwd.join("**/project.json").to_string_lossy().to_string();
-
-  for entry in glob(&pattern).map_err(|e| DominoError::Other(format!("Glob error: {}", e)))? {
-    match entry {
-      Ok(path) => {
-        // Skip node_modules and __fixtures__
-        let path_str = path.to_string_lossy();
-        if path_str.contains("node_modules") || path_str.contains("__fixtures__") {
-          continue;
-        }
-
-        match parse_project_json(&path, cwd) {
-          Ok(project) => projects.push(project),
-          Err(e) => warn!("Failed to parse project.json at {:?}: {}", path, e),
-        }
+  for entry in walker {
+    let entry = match entry {
+      Ok(e) => e,
+      Err(e) => {
+        warn!("Walk error during project discovery: {}", e);
+        continue;
       }
-      Err(e) => warn!("Error reading glob entry: {}", e),
+    };
+    if entry.file_type().is_none_or(|ft| !ft.is_file()) || entry.file_name() != "project.json" {
+      continue;
+    }
+
+    let path = entry.path();
+    match parse_project_json(path, cwd) {
+      Ok(project) => projects.push(project),
+      Err(e) => warn!("Failed to parse project.json at {:?}: {}", path, e),
     }
   }
 
@@ -242,4 +241,157 @@ fn get_workspace_json_projects(cwd: &Path) -> Result<Vec<Project>> {
   }
 
   Ok(projects)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::fs;
+  use std::process::Command;
+  use tempfile::TempDir;
+
+  fn create_nx_fixture() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    Command::new("git")
+      .args(["init", "-q"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    fs::write(root.join("nx.json"), r#"{"npmScope": "myorg"}"#).unwrap();
+
+    dir
+  }
+
+  fn write_project_json(root: &Path, dir_name: &str, project_name: &str) {
+    let dir = root.join(dir_name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+      dir.join("project.json"),
+      format!(r#"{{ "name": "{}" }}"#, project_name),
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn test_valid_projects_discovered() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "apps/web", "web");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 2);
+    assert!(names.contains(&"shared"));
+    assert!(names.contains(&"web"));
+  }
+
+  #[test]
+  fn test_gitignore_excludes_project() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "libs/ignored-lib", "ignored-lib");
+
+    fs::write(root.join(".gitignore"), "libs/ignored-lib\n").unwrap();
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+    assert!(!names.contains(&"ignored-lib"));
+  }
+
+  #[test]
+  fn test_nxignore_excludes_project() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "libs/nx-ignored", "nx-ignored");
+
+    fs::write(root.join(".nxignore"), "libs/nx-ignored\n").unwrap();
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+    assert!(!names.contains(&"nx-ignored"));
+  }
+
+  #[test]
+  fn test_dist_excluded_by_default() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "dist/libs/shared", "shared-dist");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+    assert!(!names.contains(&"shared-dist"));
+  }
+
+  #[test]
+  fn test_fixtures_excluded_by_default() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "__fixtures__/mock-project", "mock");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+    assert!(!names.contains(&"mock"));
+  }
+
+  #[test]
+  fn test_node_modules_excluded_by_default() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "node_modules/some-dep", "some-dep");
+    write_project_json(root, "libs/shared/node_modules/nested-dep", "nested-dep");
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+  }
+
+  #[test]
+  fn test_nested_gitignore_respected() {
+    let dir = create_nx_fixture();
+    let root = dir.path();
+
+    write_project_json(root, "libs/shared", "shared");
+    write_project_json(root, "libs/generated/auto-gen", "auto-gen");
+
+    let libs_dir = root.join("libs/generated");
+    fs::create_dir_all(&libs_dir).unwrap();
+    fs::write(libs_dir.join(".gitignore"), "auto-gen\n").unwrap();
+
+    let projects = get_projects(root).unwrap();
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+
+    assert_eq!(projects.len(), 1);
+    assert!(names.contains(&"shared"));
+    assert!(!names.contains(&"auto-gen"));
+  }
 }

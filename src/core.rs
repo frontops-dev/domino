@@ -163,15 +163,26 @@ fn find_affected_internal(
 
         // Record direct change cause if generating report
         if generate_report {
-          for &line in &asset_file.changed_lines {
+          if asset_file.changed_lines.is_empty() {
             project_causes
               .entry(pkg.clone())
               .or_default()
               .push(AffectCause::DirectChange {
                 file: asset_path.clone(),
                 symbol: None,
-                line,
+                line: 0,
               });
+          } else {
+            for &line in &asset_file.changed_lines {
+              project_causes
+                .entry(pkg.clone())
+                .or_default()
+                .push(AffectCause::DirectChange {
+                  file: asset_path.clone(),
+                  symbol: None,
+                  line,
+                });
+            }
           }
         }
       }

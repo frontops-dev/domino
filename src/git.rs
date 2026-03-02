@@ -153,6 +153,11 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       if changed_lines.is_empty() {
         if is_rename_or_copy {
           changed_lines.push(1);
+        } else if file_diff
+          .lines()
+          .any(|line| line.starts_with("Binary files"))
+        {
+          debug!("Binary file detected: {}", file_path);
         } else {
           debug!("No changed lines found for file: {}", file_path);
           return None;
@@ -322,6 +327,65 @@ rename to src/new/name.ts
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/new/name.ts");
     assert_eq!(result[0].changed_lines, vec![1]);
+  }
+
+  #[test]
+  fn test_parse_diff_binary_file() {
+    let diff = r#"diff --git a/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png b/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png
+index 1234567..abcdefg 100644
+Binary files a/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png and b/apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png differ
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "apps/e2e/src/__screenshots__/tests/visual.spec.ts/screenshot.png"
+    );
+    assert!(result[0].changed_lines.is_empty());
+  }
+
+  #[test]
+  fn test_parse_diff_new_binary_file() {
+    let diff = r#"diff --git "a/image.png" "b/image.png"
+new file mode 100644
+index 000000000..26b848d67
+Binary files /dev/null and "b/image.png" differ
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "image.png");
+    assert!(result[0].changed_lines.is_empty());
+  }
+
+  #[test]
+  fn test_parse_diff_binary_mixed_with_source() {
+    let diff = r#"diff --git a/apps/e2e/screenshot.png b/apps/e2e/screenshot.png
+index 1234567..abcdefg 100644
+Binary files a/apps/e2e/screenshot.png and b/apps/e2e/screenshot.png differ
+diff --git a/libs/core/src/utils.ts b/libs/core/src/utils.ts
+index 1234567..abcdefg 100644
+--- a/libs/core/src/utils.ts
++++ b/libs/core/src/utils.ts
+@@ -15,0 +16,1 @@ export function findRootNode() {
++  return node.getParent();
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 2);
+
+    assert_eq!(
+      result[0].file_path.to_str().unwrap(),
+      "apps/e2e/screenshot.png"
+    );
+    assert!(result[0].changed_lines.is_empty());
+
+    assert_eq!(
+      result[1].file_path.to_str().unwrap(),
+      "libs/core/src/utils.ts"
+    );
+    assert_eq!(result[1].changed_lines, vec![16]);
   }
 
   #[test]

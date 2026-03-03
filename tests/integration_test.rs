@@ -1902,3 +1902,128 @@ export function main() {
     affected
   );
 }
+
+/// Integration test: bare package specifiers with `.js` extensions exercise
+/// the `extension_alias` config in `oxc_resolver` (not just `simple_resolve_relative`).
+///
+/// Creates a temp monorepo where `app` imports from `@test/lib` (a bare specifier)
+/// using `.js` extensions. The resolver alias maps `@test/lib` → `lib/src`, and
+/// `extension_alias` remaps `.js` → `.ts`/`.tsx`/`.js`.
+#[test]
+fn test_bare_specifier_js_extension_alias() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo ------------------------------------------------
+  let lib_src = root.join("lib/src");
+  let app_src = root.join("app/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    lib_src.join("Component.tsx"),
+    r#"export const Component = () => null;
+"#,
+  )
+  .unwrap();
+
+  // app imports via bare specifier with .js extensions (exercises extension_alias)
+  fs::write(
+    app_src.join("index.ts"),
+    r#"import { helper } from '@test/lib/utils.js';
+import { Component } from '@test/lib/Component.js';
+
+export function main() {
+  helper();
+  return Component;
+}
+"#,
+  )
+  .unwrap();
+
+  // package.json files
+  fs::write(
+    root.join("lib/package.json"),
+    r#"{"name": "@test/lib", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("app/package.json"),
+    r#"{"name": "@test/app", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch with a change in lib ------------------------
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  // -- run find_affected -------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "@test/lib".to_string(),
+        source_root: PathBuf::from("lib"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "@test/app".to_string(),
+        source_root: PathBuf::from("app"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"@test/lib".to_string()),
+    "lib should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"@test/app".to_string()),
+    "app should be affected (imports via bare specifier @test/lib/utils.js with extension_alias). Got: {:?}",
+    affected
+  );
+}

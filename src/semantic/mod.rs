@@ -33,16 +33,20 @@ pub(crate) fn simple_resolve_relative(
   if let Some(stem) = specifier.strip_suffix(".js") {
     let stem_path = context.join(stem);
     let stem_str = stem_path.to_string_lossy();
-    for ext in &[".ts", ".tsx"] {
+    for ext in &[".ts", ".tsx", ".js"] {
       let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
       if let Some(p) = try_candidate(&candidate) {
         return Some(p);
       }
     }
   } else if let Some(stem) = specifier.strip_suffix(".jsx") {
-    let candidate = PathBuf::from(format!("{}.tsx", context.join(stem).to_string_lossy()));
-    if let Some(p) = try_candidate(&candidate) {
-      return Some(p);
+    let stem_path = context.join(stem);
+    let stem_str = stem_path.to_string_lossy();
+    for ext in &[".tsx", ".jsx"] {
+      let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
+      if let Some(p) = try_candidate(&candidate) {
+        return Some(p);
+      }
     }
   }
 

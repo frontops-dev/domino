@@ -11,6 +11,7 @@ use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +28,12 @@ type ImportIndexEntry = Vec<(PathBuf, String, String, bool)>;
 type ImportIndexMap = FxHashMap<(PathBuf, String), ImportIndexEntry>;
 
 /// Semantic data for a single file
+///
+/// SAFETY INVARIANT: each instance exclusively owns its `allocator` and all
+/// memory referenced by `semantic`. The `Semantic<'static>` lifetime is
+/// produced via transmute and is only valid as long as the co-located
+/// `allocator` is alive. Do not introduce shared allocators, string interners,
+/// or any cross-file aliasing of the data held here.
 pub struct FileSemanticData {
   pub source: String,
   #[allow(dead_code)]
@@ -201,9 +208,7 @@ impl WorkspaceAnalyzer {
 
   /// Analyze all files in the workspace using parallel parsing
   fn analyze_workspace(&mut self, cwd: &Path) -> Result<()> {
-    use rayon::prelude::*;
-
-    let all_paths: Vec<_> = self
+    let mut all_paths: Vec<_> = self
       .projects
       .iter()
       .filter_map(|project| {
@@ -221,6 +226,9 @@ impl WorkspaceAnalyzer {
       })
       .flat_map(|root| Self::collect_file_paths(&root, cwd))
       .collect();
+
+    all_paths.sort_by(|a, b| a.1.cmp(&b.1));
+    all_paths.dedup_by(|a, b| a.1 == b.1);
 
     let results: Vec<ParseResult> = all_paths
       .into_par_iter()
@@ -247,6 +255,7 @@ impl WorkspaceAnalyzer {
   fn collect_file_paths(dir: &Path, cwd: &Path) -> Vec<(PathBuf, PathBuf)> {
     WalkDir::new(dir)
       .into_iter()
+      // Don't prune files; only prune directories matching the skip-list
       .filter_entry(|e| {
         e.file_type().is_file()
           || e
@@ -296,6 +305,7 @@ impl WorkspaceAnalyzer {
         file_path,
         parse_result.errors.len()
       );
+      // Continue anyway — partial AST may still be useful
     }
 
     let semantic_builder = SemanticBuilder::new()

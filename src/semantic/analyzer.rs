@@ -100,31 +100,9 @@ impl WorkspaceAnalyzer {
   /// Build reverse import index: (source_file, symbol) -> [(importing_file, local_name, from_module)]
   /// This must be called after analyze_workspace and needs a resolver
   fn build_import_index(&mut self, cwd: &Path) -> Result<()> {
-    use oxc_resolver::{ResolveOptions, Resolver};
+    use oxc_resolver::Resolver;
 
-    // Create resolver for building the index
-    let tsconfig_path = cwd.join("tsconfig.base.json");
-    let options = ResolveOptions {
-      extensions: vec![
-        ".ts".into(),
-        ".tsx".into(),
-        ".js".into(),
-        ".jsx".into(),
-        ".d.ts".into(),
-      ],
-      tsconfig: if tsconfig_path.exists() {
-        Some(oxc_resolver::TsconfigDiscovery::Manual(
-          oxc_resolver::TsconfigOptions {
-            config_file: tsconfig_path.clone(),
-            references: oxc_resolver::TsconfigReferences::Auto,
-          },
-        ))
-      } else {
-        None
-      },
-      ..Default::default()
-    };
-    let resolver = Resolver::new(options);
+    let resolver = Resolver::new(super::create_resolve_options(cwd, &self.projects));
     use tracing::debug;
 
     let mut index: ImportIndexMap = FxHashMap::default();
@@ -143,6 +121,13 @@ impl WorkspaceAnalyzer {
           None => continue,
         };
 
+        // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
+        // `lodash`). These would trigger expensive node_modules/package.json lookups
+        // only to be discarded by strip_prefix(cwd) later.
+        if !super::is_workspace_specifier(&import.from_module, &self.projects) {
+          continue;
+        }
+
         let resolved = match resolver.resolve(context, &import.from_module) {
           Ok(resolution) => {
             let resolved = resolution.path();
@@ -151,33 +136,10 @@ impl WorkspaceAnalyzer {
               Err(_) => continue,
             }
           }
-          Err(_) => {
-            // Try simple relative resolution as fallback
-            if !import.from_module.starts_with('.') {
-              continue;
-            }
-            let base = context.join(&import.from_module);
-            let mut resolved_path = None;
-            for ext in &[".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"] {
-              let candidate = if ext.starts_with('/') {
-                base.join(ext.trim_start_matches('/'))
-              } else {
-                // Append extension instead of replacing it
-                // This handles cases like colors.css -> colors.css.ts (vanilla-extract)
-                PathBuf::from(format!("{}{}", base.display(), ext))
-              };
-              if cwd.join(&candidate).exists() {
-                if let Ok(p) = candidate.strip_prefix(cwd) {
-                  resolved_path = Some(p.to_path_buf());
-                  break;
-                }
-              }
-            }
-            match resolved_path {
-              Some(p) => p,
-              None => continue,
-            }
-          }
+          Err(_) => match super::simple_resolve_relative(cwd, context, &import.from_module) {
+            Some(p) => p,
+            None => continue,
+          },
         };
 
         // Add to index: (resolved_file, imported_symbol) -> (importing_file, local_name, from_module, is_dynamic)

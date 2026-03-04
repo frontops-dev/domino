@@ -1,6 +1,13 @@
-# domino
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/012a005f-04e4-480e-8d50-5314bdd04a6d" alt="domino logo" width="120" />
+</p>
 
-A high-performance Rust implementation of **True Affected** - semantic change detection for monorepos using the Oxc parser.
+<h1 align="center">domino</h1>
+
+<p align="center">
+  A high-performance Rust implementation of <b>True Affected</b> — semantic change detection for monorepos using the Oxc parser.
+</p>
+<br />
 
 ## Overview
 

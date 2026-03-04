@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::profiler::Profiler;
 use crate::semantic::WorkspaceAnalyzer;
 use crate::types::Reference;
-use oxc_resolver::{ResolveOptions, Resolver};
+use oxc_resolver::Resolver;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -25,33 +25,9 @@ pub struct ReferenceFinder<'a> {
 
 impl<'a> ReferenceFinder<'a> {
   pub fn new(analyzer: &'a WorkspaceAnalyzer, cwd: &Path, profiler: Arc<Profiler>) -> Self {
-    // Try to find tsconfig.base.json for path mappings
-    let tsconfig_path = cwd.join("tsconfig.base.json");
-
-    let options = ResolveOptions {
-      extensions: vec![
-        ".ts".into(),
-        ".tsx".into(),
-        ".js".into(),
-        ".jsx".into(),
-        ".d.ts".into(),
-      ],
-      tsconfig: if tsconfig_path.exists() {
-        Some(oxc_resolver::TsconfigDiscovery::Manual(
-          oxc_resolver::TsconfigOptions {
-            config_file: tsconfig_path.clone(),
-            references: oxc_resolver::TsconfigReferences::Auto,
-          },
-        ))
-      } else {
-        None
-      },
-      ..Default::default()
-    };
-
     Self {
       analyzer,
-      resolver: Resolver::new(options),
+      resolver: Resolver::new(super::create_resolve_options(cwd, &analyzer.projects)),
       cwd: cwd.to_path_buf(),
       resolution_cache: RefCell::new(FxHashMap::default()),
       profiler,
@@ -303,7 +279,7 @@ impl<'a> ReferenceFinder<'a> {
     let cache_key = (from_file.to_path_buf(), specifier.to_string());
 
     // Check cache first
-    let cache_hit = {
+    {
       let cache = self.resolution_cache.borrow();
       if let Some(cached) = cache.get(&cache_key) {
         if let Some(start_time) = start {
@@ -313,8 +289,20 @@ impl<'a> ReferenceFinder<'a> {
         }
         return cached.clone();
       }
-      false
-    };
+    }
+
+    // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
+    // `lodash`). These would trigger expensive node_modules/package.json lookups
+    // only to be discarded by strip_prefix(cwd) later.
+    if !super::is_workspace_specifier(specifier, &self.analyzer.projects) {
+      self.resolution_cache.borrow_mut().insert(cache_key, None);
+      if let Some(start_time) = start {
+        self
+          .profiler
+          .record_resolution(false, start_time.elapsed().as_nanos() as u64);
+      }
+      return None;
+    }
 
     // Not in cache, resolve it
     let from_path = self.cwd.join(from_file);
@@ -323,7 +311,6 @@ impl<'a> ReferenceFinder<'a> {
     let resolved = match self.resolver.resolve(context, specifier) {
       Ok(resolution) => {
         let resolved = resolution.path();
-        // Make it relative to cwd
         resolved
           .strip_prefix(&self.cwd)
           .ok()
@@ -344,39 +331,16 @@ impl<'a> ReferenceFinder<'a> {
     if let Some(start_time) = start {
       self
         .profiler
-        .record_resolution(cache_hit, start_time.elapsed().as_nanos() as u64);
+        .record_resolution(false, start_time.elapsed().as_nanos() as u64);
     }
 
     resolved
   }
 
-  /// Simple fallback resolution for relative imports
+  /// Simple fallback resolution for relative imports.
+  /// Delegates to the shared free function in `semantic::simple_resolve_relative`.
   fn simple_resolve(&self, context: &Path, specifier: &str) -> Option<PathBuf> {
-    if !specifier.starts_with('.') {
-      return None;
-    }
-
-    let base = context.join(specifier);
-
-    // Try with different extensions
-    for ext in &[".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"] {
-      let candidate = if ext.starts_with('/') {
-        base.join(ext.trim_start_matches('/'))
-      } else {
-        // Append extension instead of replacing it
-        // This handles cases like colors.css -> colors.css.ts (vanilla-extract)
-        PathBuf::from(format!("{}{}", base.display(), ext))
-      };
-
-      if self.cwd.join(&candidate).exists() {
-        return candidate
-          .strip_prefix(&self.cwd)
-          .ok()
-          .map(|p| p.to_path_buf());
-      }
-    }
-
-    None
+    super::simple_resolve_relative(&self.cwd, context, specifier)
   }
 
   /// Check if a symbol is re-exported from a file
@@ -527,6 +491,112 @@ mod tests {
       resolved_path,
       PathBuf::from("src/components/index.ts"),
       "Expected to resolve to components/index.ts"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_js_to_ts_remapping() {
+    // Test that imports with .js extensions resolve to .ts files
+    // This is common in ESM projects where TS files import with .js extensions
+    // e.g., import { foo } from './bar.js' where the actual file is bar.ts
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: src/utils.ts (but NOT src/utils.js)
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    let utils_file = src_dir.join("utils.ts");
+    fs::write(&utils_file, "export function helper() {}").expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./utils.js" from src directory
+    // Should find utils.ts by stripping .js and trying .ts
+    let context = src_dir.as_path();
+    let specifier = "./utils.js";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve utils.js to utils.ts"
+    );
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/utils.ts"),
+      "Expected to resolve ./utils.js to utils.ts"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_js_to_tsx_remapping() {
+    // Test that .js imports can resolve to .tsx files
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    let component_file = src_dir.join("Button.tsx");
+    fs::write(&component_file, "export const Button = () => <button/>;")
+      .expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    let context = src_dir.as_path();
+    let specifier = "./Button.js";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve Button.js to Button.tsx"
+    );
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/Button.tsx"),
+      "Expected to resolve ./Button.js to Button.tsx"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_index_js_to_index_ts() {
+    // Test that ./foo/index.js resolves to ./foo/index.ts
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    let src_dir = cwd.join("src");
+    let models_dir = src_dir.join("models");
+    fs::create_dir_all(&models_dir).expect("Failed to create models dir");
+    let index_file = models_dir.join("index.ts");
+    fs::write(&index_file, "export * from './User';").expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    let context = src_dir.as_path();
+    let specifier = "./models/index.js";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve models/index.js to models/index.ts"
+    );
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/models/index.ts"),
+      "Expected to resolve ./models/index.js to models/index.ts"
     );
   }
 }

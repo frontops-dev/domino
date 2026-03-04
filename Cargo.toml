@@ -68,6 +68,9 @@ serde_yaml = "0.9"
 indexmap   = "2.6"
 rustc-hash = "2.0"
 
+# Parallelism
+rayon = "1.10"
+
 # Path handling
 pathdiff = "0.2"
 

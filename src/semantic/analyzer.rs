@@ -95,6 +95,13 @@ impl WorkspaceAnalyzer {
           None => continue,
         };
 
+        // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
+        // `lodash`). These would trigger expensive node_modules/package.json lookups
+        // only to be discarded by strip_prefix(cwd) later.
+        if !super::is_workspace_specifier(&import.from_module, &self.projects) {
+          continue;
+        }
+
         let resolved = match resolver.resolve(context, &import.from_module) {
           Ok(resolution) => {
             let resolved = resolution.path();

@@ -9,6 +9,7 @@ pub use analyzer::WorkspaceAnalyzer;
 pub use assets::AssetReferenceFinder;
 pub use reference_finder::ReferenceFinder;
 pub(crate) use resolve_options::create_resolve_options;
+pub(crate) use resolve_options::is_workspace_specifier;
 
 /// Shared fallback resolution for relative imports when oxc_resolver fails.
 /// Handles .js/.jsx → .ts/.tsx remapping and standard extension probing.

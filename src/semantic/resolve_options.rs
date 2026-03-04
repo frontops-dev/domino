@@ -78,13 +78,10 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
     ],
     // Resolve bare package imports to source roots within the monorepo.
     alias,
-    // NOTE: condition_names and main_fields allow the resolver to follow bare specifiers
-    // into package.json entry points, which is necessary for correct monorepo resolution.
-    // However, this also means the resolver will attempt resolution for external
-    // node_modules dependencies. The `strip_prefix(cwd)` guard in `resolve_import`
-    // correctly drops paths outside the workspace root, but the resolution work still
-    // happens. In a large monorepo with hundreds of third-party imports per file, this
-    // could meaningfully impact performance. Worth benchmarking on a realistic workspace.
+    // condition_names and main_fields allow the resolver to follow bare specifiers
+    // into package.json entry points for workspace-internal packages.
+    // External node_modules specifiers are filtered out before reaching the resolver
+    // via `is_workspace_specifier`, so only workspace packages incur this cost.
     condition_names: vec![
       "import".into(),
       "require".into(),
@@ -105,6 +102,25 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
     },
     ..Default::default()
   }
+}
+
+/// Returns `true` if the specifier is potentially workspace-internal and should be
+/// passed to `oxc_resolver`. Relative and absolute specifiers always qualify.
+/// Bare specifiers qualify only if they match a known project name (possibly as a
+/// deep-import prefix like `@scope/pkg/sub/path`).
+///
+/// This avoids expensive filesystem I/O for external `node_modules` dependencies
+/// (e.g. `react`, `lodash`) that the resolver would attempt to resolve via
+/// `package.json` lookups before the `strip_prefix(cwd)` guard discards the result.
+pub(crate) fn is_workspace_specifier(specifier: &str, projects: &[Project]) -> bool {
+  // Relative and absolute imports are always workspace-internal
+  if specifier.starts_with('.') || specifier.starts_with('/') {
+    return true;
+  }
+  // Bare specifier — check if it matches any project name (exact or prefix + '/')
+  projects.iter().any(|p| {
+    specifier == p.name || specifier.starts_with(&format!("{}/", p.name))
+  })
 }
 
 /// Extract the alias target path for a given package name from resolve options.
@@ -245,5 +261,49 @@ mod tests {
       "Expected alias to fall back to (non-existent) project root, got: {}",
       target
     );
+  }
+
+  fn make_projects(names: &[&str]) -> Vec<Project> {
+    names
+      .iter()
+      .map(|n| Project {
+        name: n.to_string(),
+        source_root: PathBuf::from("packages/placeholder"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      })
+      .collect()
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_relative() {
+    let projects = make_projects(&["@scope/lib"]);
+    assert!(is_workspace_specifier("./utils", &projects));
+    assert!(is_workspace_specifier("../shared/index", &projects));
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_absolute() {
+    let projects = make_projects(&["@scope/lib"]);
+    assert!(is_workspace_specifier("/absolute/path", &projects));
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_matching_project() {
+    let projects = make_projects(&["@scope/lib", "shared-utils"]);
+    assert!(is_workspace_specifier("@scope/lib", &projects));
+    assert!(is_workspace_specifier("@scope/lib/deep/path", &projects));
+    assert!(is_workspace_specifier("shared-utils", &projects));
+    assert!(is_workspace_specifier("shared-utils/helpers", &projects));
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_external() {
+    let projects = make_projects(&["@scope/lib", "shared-utils"]);
+    assert!(!is_workspace_specifier("react", &projects));
+    assert!(!is_workspace_specifier("lodash/fp", &projects));
+    assert!(!is_workspace_specifier("@angular/core", &projects));
+    assert!(!is_workspace_specifier("@scope/other-lib", &projects));
   }
 }

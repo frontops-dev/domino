@@ -291,6 +291,22 @@ impl<'a> ReferenceFinder<'a> {
       }
     }
 
+    // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
+    // `lodash`). These would trigger expensive node_modules/package.json lookups
+    // only to be discarded by strip_prefix(cwd) later.
+    if !super::is_workspace_specifier(specifier, &self.analyzer.projects) {
+      self
+        .resolution_cache
+        .borrow_mut()
+        .insert(cache_key, None);
+      if let Some(start_time) = start {
+        self
+          .profiler
+          .record_resolution(false, start_time.elapsed().as_nanos() as u64);
+      }
+      return None;
+    }
+
     // Not in cache, resolve it
     let from_path = self.cwd.join(from_file);
     let context = from_path.parent()?;

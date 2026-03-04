@@ -295,10 +295,7 @@ impl<'a> ReferenceFinder<'a> {
     // `lodash`). These would trigger expensive node_modules/package.json lookups
     // only to be discarded by strip_prefix(cwd) later.
     if !super::is_workspace_specifier(specifier, &self.analyzer.projects) {
-      self
-        .resolution_cache
-        .borrow_mut()
-        .insert(cache_key, None);
+      self.resolution_cache.borrow_mut().insert(cache_key, None);
       if let Some(start_time) = start {
         self
           .profiler

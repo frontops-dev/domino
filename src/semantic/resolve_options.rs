@@ -118,9 +118,9 @@ pub(crate) fn is_workspace_specifier(specifier: &str, projects: &[Project]) -> b
     return true;
   }
   // Bare specifier — check if it matches any project name (exact or prefix + '/')
-  projects.iter().any(|p| {
-    specifier == p.name || specifier.starts_with(&format!("{}/", p.name))
-  })
+  projects
+    .iter()
+    .any(|p| specifier == p.name || specifier.starts_with(&format!("{}/", p.name)))
 }
 
 /// Extract the alias target path for a given package name from resolve options.

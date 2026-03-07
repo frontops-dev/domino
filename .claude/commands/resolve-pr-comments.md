@@ -125,8 +125,8 @@ For each thread classified as **actionable** or fixable **nitpick**:
 2. Understand what the reviewer is requesting from the comment body
 3. Apply the fix using the Edit tool
 4. If the file is a Rust file (`.rs`):
-   - Run `cargo clippy --all-targets --all-features` to verify no new warnings
-   - Run `cargo fmt --all` to ensure formatting
+   - Run `cargo fmt --all` to auto-format
+   - Run `cargo clippy --all-targets --all-features -- -D warnings` to verify no new warnings. If clippy fails, fix the issue before proceeding
 5. For non-Rust files (`.toml`, `.md`, `.yml`, `.yaml`, `.json`): apply fixes directly
 6. Track every change made (file, line, description) for the commit message
 
@@ -220,8 +220,8 @@ Suggested message: "fix: address PR review comments (#N)"
 If user approves:
 1. Stage the changed files by name (do NOT use `git add -A`)
 2. Commit with the agreed message
-3. Ask: "Push to origin/{headRefName}? (y/n)"
-4. If yes: `git push origin {headRefName}`
+3. Ask: "Push to the PR branch? (y/n)"
+4. If yes: `git push`
 
 Cleanup: if we switched branches in Step 2, switch back:
 ```bash

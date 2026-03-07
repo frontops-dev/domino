@@ -30,10 +30,14 @@ You are a specialist selector/router. You receive a baseSha or branch context, a
 | `tests/**/*.rs` | test-specialist, rust-specialist |
 | `__test__/**/*.ts` | test-specialist |
 | `.claude/**`, `CLAUDE.md` | ai-specialist |
-| `Cargo.toml`, `Cargo.lock` | rust-specialist |
+| `Cargo.toml`, `Cargo.lock` | rust-specialist, security-specialist |
 | `.github/**/*.yml` | rust-specialist |
 | `*.md` (non-CLAUDE) | (skip or handle directly) |
 | `*.toml` (non-Cargo) | rust-specialist |
+
+### Implicit test-specialist routing
+
+If any `src/**/*.rs` files changed but no corresponding test files (`tests/**/*.rs`, `__test__/**`) changed, add `test-specialist` to verify test coverage for the new/modified code.
 
 ## Content-Pattern Routing
 

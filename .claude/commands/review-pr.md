@@ -42,8 +42,9 @@ Changed files: {changedFiles} (+{additions}, -{deletions})
 - Save current branch: `git branch --show-current` (store as `{original_branch}`)
 - If not already on the PR branch:
   ```bash
-  git fetch origin {headRefName} && git checkout {headRefName}
+  gh pr checkout {number}
   ```
+  This handles both fork-based and same-repo PRs.
 - Get baseSha:
   ```bash
   gh pr view {number} --json baseRefOid --jq '.baseRefOid'
@@ -133,10 +134,9 @@ If yes:
 
 2. **Build the review body** from the validated findings summary
 
-3. **Create a pending review**:
+3. **Create a pending review** (omit the `event` field to create it in PENDING state):
    ```bash
    gh api repos/{owner}/{repo}/pulls/{number}/reviews --method POST \
-     -f event="PENDING" \
      -f body=""
    ```
    Extract the `review_id` from the response.

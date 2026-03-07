@@ -37,7 +37,7 @@ Strong evidence but the author may have a valid reason:
 - Missing error context (bare `?` without `.context()` or `.map_err()`)
 - Suboptimal lifetime bounds (overly restrictive)
 - Non-idiomatic error types (`String` errors instead of `thiserror` enums)
-- Missing `#[must_use]` on `Result`-returning functions
+- Missing `#[non_exhaustive]` on public enums that may grow variants
 - Redundant allocation (`String::from()` where `&str` works)
 - Missing `Drop` impl for types managing resources
 

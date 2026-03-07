@@ -114,6 +114,11 @@ cargo test --lib 2>&1
 cargo test --test integration_test -- --test-threads=1 2>&1
 ```
 
+```bash
+cargo audit 2>&1
+```
+If `cargo-audit` is not installed, note it as skipped.
+
 Present results alongside the review:
 ```
 Quality checks:

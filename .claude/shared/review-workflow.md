@@ -56,7 +56,7 @@ Use this shell output format with severity groupings:
 
 ▶ LOW ISSUES (count)
 
-#3 Issue Title — `path/to/file.rs:120`
+#3 Issue Title -- `path/to/file.rs:120`
 **Suggestion:** [...]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

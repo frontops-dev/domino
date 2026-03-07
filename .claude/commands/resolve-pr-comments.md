@@ -31,8 +31,9 @@ gh pr view {number} --json headRefName,baseRefName,title,state,isDraft,number,ur
 - Save the current branch: `git branch --show-current` (store as `{original_branch}`)
 - If not already on the PR branch (`headRefName`):
   ```bash
-  git fetch origin {headRefName} && git checkout {headRefName}
+  gh pr checkout {number}
   ```
+  This handles both fork-based and same-repo PRs.
 - Get baseSha:
   ```bash
   gh pr view {number} --json baseRefOid --jq '.baseRefOid'
@@ -44,10 +45,10 @@ gh pr view {number} --json headRefName,baseRefName,title,state,isDraft,number,ur
 
 ```bash
 gh api graphql -f query='
-query($owner: String!, $repo: String!, $pr: Int!) {
+query($owner: String!, $repo: String!, $pr: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
         nodes {
           id
           isResolved
@@ -81,7 +82,7 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 - Filter to threads where `isResolved` is `false` only
 - Group the unresolved threads by file path
 - If zero unresolved threads: inform user "All review threads are resolved!" and stop
-- If `hasNextPage` is true: paginate using `endCursor` by adding `-f after='{endCursor}'` and `reviewThreads(first: 100, after: $after)` to the query
+- If `hasNextPage` is true: paginate by adding `-f after='{endCursor}'` to the `gh api graphql` call (the `$after` variable is already declared in the query)
 - If more than 50 unresolved threads: warn the user about the large count and ask whether to proceed
 
 ## Step 4: Classify Each Comment Thread

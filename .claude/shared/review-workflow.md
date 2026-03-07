@@ -32,7 +32,7 @@ For each issue reported by a specialist, the orchestrating command must validate
 
 Use this shell output format with severity groupings:
 
-```
+```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ▶ CRITICAL ISSUES (count)

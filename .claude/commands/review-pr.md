@@ -31,7 +31,7 @@ gh pr view {number} --json headRefName,baseRefName,title,state,isDraft,number,ur
 - If `isDraft` is true: warn "This PR is still a draft. Proceeding with review anyway."
 
 Display PR summary:
-```
+```text
 PR #{number}: {title}
 Branch: {headRefName} -> {baseRefName}
 Changed files: {changedFiles} (+{additions}, -{deletions})
@@ -111,7 +111,7 @@ Follow the validation process from `.claude/shared/review-workflow.md`:
 ## Step 9: Present Structured Report
 
 First show the PR header:
-```
+```text
 PR #{number}: {title}
 Branch: {headRefName} -> {baseRefName}
 Changed files: {changedFiles} (+{additions}, -{deletions})
@@ -134,26 +134,26 @@ If yes:
 
 2. **Build the review body** from the validated findings summary
 
-3. **Create a pending review** (omit the `event` field to create it in PENDING state):
+3. **Create a pending review with inline comments** (omit the `event` field to create it in PENDING state). Include all inline comments in the `comments` array of the initial request:
    ```bash
    gh api repos/{owner}/{repo}/pulls/{number}/reviews --method POST \
-     -f body=""
+     --input review.json
+   ```
+   Where `review.json` contains:
+   ```json
+   {
+     "body": "",
+     "comments": [
+       {"path": "{file_path}", "line": {line_number}, "side": "RIGHT", "body": "{comment_body}"}
+     ]
+   }
    ```
    Extract the `review_id` from the response.
 
-4. **Add inline comments** for each issue, using the review ID:
-   ```bash
-   gh api repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments --method POST \
-     -f path="{file_path}" \
-     -F line={line_number} \
-     -f side="RIGHT" \
-     -f body="{comment_body}"
-   ```
-
-5. **Ask for explicit permission** before submitting:
+4. **Ask for explicit permission** before submitting:
    "Submit review as COMMENT or REQUEST_CHANGES? (or cancel)"
 
-6. **Submit the review**:
+5. **Submit the review**:
    ```bash
    gh api repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events --method POST \
      -f event="{COMMENT|REQUEST_CHANGES}" \

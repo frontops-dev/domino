@@ -103,7 +103,7 @@ For each unresolved thread:
 
 Present the classification summary to the user:
 
-```
+```text
 Found X unresolved comment threads on PR #N:
 
   Y actionable (code changes needed)
@@ -149,7 +149,7 @@ Follow the writing style rules from `.claude/shared/review-workflow.md`:
 
 Present ALL drafted replies to the user:
 
-```
+```text
 Draft replies:
 
 #1 [actionable] src/core.rs:42 -- @reviewer_name
@@ -197,7 +197,7 @@ mutation($threadId: ID!) {
 Do NOT auto-resolve **question** or **outdated** threads -- those should be resolved by the reviewer.
 
 After all mutations complete, report results:
-```
+```text
 Posted N replies successfully, M failed.
 Resolved K threads.
 Failed: [list of thread paths and error messages, if any]
@@ -208,7 +208,7 @@ Failed: [list of thread paths and error messages, if any]
 If any code fixes were applied in Step 5:
 
 Present a summary:
-```
+```text
 Changes applied:
   - src/core.rs: Replaced unwrap() with error propagation
   - src/git.rs: Added input validation

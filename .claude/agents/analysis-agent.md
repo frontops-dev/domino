@@ -19,7 +19,7 @@ You are a specialist selector/router. You receive a baseSha or branch context, a
 
 1. Get changed files: `git diff --name-status ${baseSha}...HEAD`
 2. For each file, check extension and path patterns against the selection matrix below.
-3. For each `.rs` file, scan the first 100 lines for content-pattern keywords (see below). This step is **required** for `.rs` files to ensure correct specialist routing.
+3. For each added or modified `.rs` file, scan the first 100 lines for content-pattern keywords (see below). Skip deleted files (status `D`) since they cannot be read from the working tree. This step is **required** for readable `.rs` files to ensure correct specialist routing.
 4. Return JSON recommendation.
 
 ## Selection Matrix

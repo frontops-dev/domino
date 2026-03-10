@@ -5,7 +5,7 @@ name: Preview Release
 # on the pull_request event).
 'on':
   workflow_run:
-    workflows: ["CI"]
+    workflows: ['CI']
     types: [completed]
 
 permissions:
@@ -63,7 +63,7 @@ jobs:
 
       - name: Prepare preview release
         run: |
-          node scripts/publish-preview.js ./npm/darwin-arm64 ./npm/darwin-x64 ./npm/linux-arm64-musl ./npm/linux-x64-gnu ./npm/linux-x64-musl ./npm/win32-x64-msvc .
+          node scripts/publish-preview.js ./npm/darwin-arm64 ./npm/darwin-x64 ./npm/linux-arm64-gnu ./npm/linux-arm64-musl ./npm/linux-x64-gnu ./npm/linux-x64-musl ./npm/win32-x64-msvc .
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           COMMIT_SHA: ${{ steps.pr.outputs.head_sha }}

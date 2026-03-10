@@ -1,4 +1,5 @@
 use crate::types::Project;
+use json_strip_comments::StripComments;
 use oxc_resolver::{AliasValue, ResolveOptions};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -113,7 +114,7 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
 /// path alias (possibly as a deep-import prefix like `@scope/pkg/sub/path`).
 ///
 /// Both project names and tsconfig paths must be checked because they can differ:
-/// an Nx project named `chat-client` may be imported as `@lemonade-hq/uniclient-chat-client`
+/// an Nx project named `ui-widgets` may be imported as `@acme/shared-ui-widgets`
 /// via a tsconfig path alias. Checking only project names would misclassify
 /// such imports as external and silently break cross-project reference tracking.
 ///
@@ -150,8 +151,8 @@ struct TsconfigCompilerOptions {
 ///
 /// These keys are the import specifiers that the TypeScript compiler (and oxc_resolver)
 /// will resolve to workspace-internal paths. They often differ from the Nx project
-/// names — e.g. a project named `chat-client` may be mapped as
-/// `@lemonade-hq/uniclient-chat-client` in tsconfig paths.
+/// names — e.g. a project named `ui-widgets` may be mapped as
+/// `@acme/shared-ui-widgets` in tsconfig paths.
 ///
 /// Wildcard suffixes (`/*`) are stripped so the returned strings can be used as
 /// prefix-match candidates in `is_workspace_specifier`.
@@ -169,7 +170,9 @@ pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
     }
   };
 
-  let tsconfig: TsconfigJson = match serde_json::from_str(&content) {
+  // tsconfig files are JSONC (JSON with comments) — strip comments before parsing
+  let stripped = StripComments::new(content.as_bytes());
+  let tsconfig: TsconfigJson = match serde_json::from_reader(stripped) {
     Ok(t) => t,
     Err(e) => {
       warn!("Failed to parse tsconfig.base.json: {}", e);
@@ -382,24 +385,20 @@ mod tests {
 
   #[test]
   fn test_is_workspace_specifier_tsconfig_path_alias() {
-    let projects = make_projects(&["chat-client"]);
-    let tsconfig_paths = vec!["@lemonade-hq/uniclient-chat-client".to_string()];
+    let projects = make_projects(&["ui-widgets"]);
+    let tsconfig_paths = vec!["@acme/shared-ui-widgets".to_string()];
 
     assert!(
-      !is_workspace_specifier("@lemonade-hq/uniclient-chat-client", &projects, &[]),
+      !is_workspace_specifier("@acme/shared-ui-widgets", &projects, &[]),
       "should NOT match without tsconfig paths"
     );
     assert!(
-      is_workspace_specifier(
-        "@lemonade-hq/uniclient-chat-client",
-        &projects,
-        &tsconfig_paths
-      ),
+      is_workspace_specifier("@acme/shared-ui-widgets", &projects, &tsconfig_paths),
       "should match with tsconfig path alias"
     );
     assert!(
       is_workspace_specifier(
-        "@lemonade-hq/uniclient-chat-client/deep/path",
+        "@acme/shared-ui-widgets/deep/path",
         &projects,
         &tsconfig_paths
       ),
@@ -443,5 +442,39 @@ mod tests {
     let tmp = TempDir::new().unwrap();
     let prefixes = parse_tsconfig_path_prefixes(tmp.path());
     assert!(prefixes.is_empty());
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_with_comments() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        // This is a line comment
+        "compilerOptions": {
+          /* block comment */
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts"],
+            "@scope/other-lib/*": ["libs/other-lib/src/*"] // trailing comment
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/my-lib".to_string()),
+      "should parse paths from JSONC with comments. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/other-lib".to_string()),
+      "should parse wildcard path from JSONC with comments. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 2);
   }
 }

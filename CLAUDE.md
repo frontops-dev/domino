@@ -160,8 +160,8 @@ the npm package name or the tsconfig path alias used in import statements. For e
 
 | Nx project name | tsconfig path alias / import specifier |
 |---|---|
-| `chat-client` | `@lemonade-hq/uniclient-chat-client` |
-| `my-lib` | `@scope/my-lib` |
+| `ui-widgets` | `@acme/shared-ui-widgets` |
+| `my-lib` | `@acme/my-lib` |
 
 The `is_workspace_specifier` function (in `resolve_options.rs`) is a performance guard
 that short-circuits the resolver for external packages. It MUST check **both** project

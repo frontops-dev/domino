@@ -1,6 +1,9 @@
 use crate::types::Project;
 use oxc_resolver::{AliasValue, ResolveOptions};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
+use tracing::warn;
 
 /// Shared resolver configuration for both the import index builder and the reference finder.
 /// Kept in one place to prevent drift between the two resolution paths.
@@ -106,21 +109,83 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
 
 /// Returns `true` if the specifier is potentially workspace-internal and should be
 /// passed to `oxc_resolver`. Relative and absolute specifiers always qualify.
-/// Bare specifiers qualify only if they match a known project name (possibly as a
-/// deep-import prefix like `@scope/pkg/sub/path`).
+/// Bare specifiers qualify if they match a known project name **or** a tsconfig
+/// path alias (possibly as a deep-import prefix like `@scope/pkg/sub/path`).
+///
+/// Both project names and tsconfig paths must be checked because they can differ:
+/// an Nx project named `chat-client` may be imported as `@lemonade-hq/uniclient-chat-client`
+/// via a tsconfig path alias. Checking only project names would misclassify
+/// such imports as external and silently break cross-project reference tracking.
 ///
 /// This avoids expensive filesystem I/O for external `node_modules` dependencies
 /// (e.g. `react`, `lodash`) that the resolver would attempt to resolve via
 /// `package.json` lookups before the `strip_prefix(cwd)` guard discards the result.
-pub(crate) fn is_workspace_specifier(specifier: &str, projects: &[Project]) -> bool {
-  // Relative and absolute imports are always workspace-internal
+pub(crate) fn is_workspace_specifier(
+  specifier: &str,
+  projects: &[Project],
+  tsconfig_paths: &[String],
+) -> bool {
   if specifier.starts_with('.') || specifier.starts_with('/') {
     return true;
   }
-  // Bare specifier — check if it matches any project name (exact or prefix + '/')
-  projects
-    .iter()
-    .any(|p| specifier == p.name || specifier.starts_with(&format!("{}/", p.name)))
+  let matches_prefix =
+    |prefix: &str| specifier == prefix || specifier.starts_with(&format!("{}/", prefix));
+
+  projects.iter().any(|p| matches_prefix(&p.name))
+    || tsconfig_paths.iter().any(|p| matches_prefix(p))
+}
+
+#[derive(Deserialize)]
+struct TsconfigJson {
+  #[serde(rename = "compilerOptions")]
+  compiler_options: Option<TsconfigCompilerOptions>,
+}
+
+#[derive(Deserialize)]
+struct TsconfigCompilerOptions {
+  paths: Option<HashMap<String, Vec<String>>>,
+}
+
+/// Parse `tsconfig.base.json` and return the keys from `compilerOptions.paths`.
+///
+/// These keys are the import specifiers that the TypeScript compiler (and oxc_resolver)
+/// will resolve to workspace-internal paths. They often differ from the Nx project
+/// names — e.g. a project named `chat-client` may be mapped as
+/// `@lemonade-hq/uniclient-chat-client` in tsconfig paths.
+///
+/// Wildcard suffixes (`/*`) are stripped so the returned strings can be used as
+/// prefix-match candidates in `is_workspace_specifier`.
+pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
+  let tsconfig_path = cwd.join("tsconfig.base.json");
+  if !tsconfig_path.exists() {
+    return vec![];
+  }
+
+  let content = match std::fs::read_to_string(&tsconfig_path) {
+    Ok(c) => c,
+    Err(e) => {
+      warn!("Failed to read tsconfig.base.json: {}", e);
+      return vec![];
+    }
+  };
+
+  let tsconfig: TsconfigJson = match serde_json::from_str(&content) {
+    Ok(t) => t,
+    Err(e) => {
+      warn!("Failed to parse tsconfig.base.json: {}", e);
+      return vec![];
+    }
+  };
+
+  let paths = match tsconfig.compiler_options.and_then(|co| co.paths) {
+    Some(p) => p,
+    None => return vec![],
+  };
+
+  paths
+    .keys()
+    .map(|key| key.strip_suffix("/*").unwrap_or(key).to_string())
+    .collect()
 }
 
 /// Extract the alias target path for a given package name from resolve options.
@@ -279,31 +344,104 @@ mod tests {
   #[test]
   fn test_is_workspace_specifier_relative() {
     let projects = make_projects(&["@scope/lib"]);
-    assert!(is_workspace_specifier("./utils", &projects));
-    assert!(is_workspace_specifier("../shared/index", &projects));
+    assert!(is_workspace_specifier("./utils", &projects, &[]));
+    assert!(is_workspace_specifier("../shared/index", &projects, &[]));
   }
 
   #[test]
   fn test_is_workspace_specifier_absolute() {
     let projects = make_projects(&["@scope/lib"]);
-    assert!(is_workspace_specifier("/absolute/path", &projects));
+    assert!(is_workspace_specifier("/absolute/path", &projects, &[]));
   }
 
   #[test]
   fn test_is_workspace_specifier_matching_project() {
     let projects = make_projects(&["@scope/lib", "shared-utils"]);
-    assert!(is_workspace_specifier("@scope/lib", &projects));
-    assert!(is_workspace_specifier("@scope/lib/deep/path", &projects));
-    assert!(is_workspace_specifier("shared-utils", &projects));
-    assert!(is_workspace_specifier("shared-utils/helpers", &projects));
+    assert!(is_workspace_specifier("@scope/lib", &projects, &[]));
+    assert!(is_workspace_specifier(
+      "@scope/lib/deep/path",
+      &projects,
+      &[]
+    ));
+    assert!(is_workspace_specifier("shared-utils", &projects, &[]));
+    assert!(is_workspace_specifier(
+      "shared-utils/helpers",
+      &projects,
+      &[]
+    ));
   }
 
   #[test]
   fn test_is_workspace_specifier_external() {
     let projects = make_projects(&["@scope/lib", "shared-utils"]);
-    assert!(!is_workspace_specifier("react", &projects));
-    assert!(!is_workspace_specifier("lodash/fp", &projects));
-    assert!(!is_workspace_specifier("@angular/core", &projects));
-    assert!(!is_workspace_specifier("@scope/other-lib", &projects));
+    assert!(!is_workspace_specifier("react", &projects, &[]));
+    assert!(!is_workspace_specifier("lodash/fp", &projects, &[]));
+    assert!(!is_workspace_specifier("@angular/core", &projects, &[]));
+    assert!(!is_workspace_specifier("@scope/other-lib", &projects, &[]));
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_tsconfig_path_alias() {
+    let projects = make_projects(&["chat-client"]);
+    let tsconfig_paths = vec!["@lemonade-hq/uniclient-chat-client".to_string()];
+
+    assert!(
+      !is_workspace_specifier("@lemonade-hq/uniclient-chat-client", &projects, &[]),
+      "should NOT match without tsconfig paths"
+    );
+    assert!(
+      is_workspace_specifier(
+        "@lemonade-hq/uniclient-chat-client",
+        &projects,
+        &tsconfig_paths
+      ),
+      "should match with tsconfig path alias"
+    );
+    assert!(
+      is_workspace_specifier(
+        "@lemonade-hq/uniclient-chat-client/deep/path",
+        &projects,
+        &tsconfig_paths
+      ),
+      "should match deep import under tsconfig path alias"
+    );
+    assert!(
+      !is_workspace_specifier("react", &projects, &tsconfig_paths),
+      "external packages should still be rejected"
+    );
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts"],
+            "@scope/other-lib/*": ["libs/other-lib/src/*"]
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(prefixes.contains(&"@scope/my-lib".to_string()));
+    assert!(
+      prefixes.contains(&"@scope/other-lib".to_string()),
+      "wildcard suffix /* should be stripped"
+    );
+    assert_eq!(prefixes.len(), 2);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_missing_file() {
+    let tmp = TempDir::new().unwrap();
+    let prefixes = parse_tsconfig_path_prefixes(tmp.path());
+    assert!(prefixes.is_empty());
   }
 }

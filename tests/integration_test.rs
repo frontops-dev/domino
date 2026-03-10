@@ -2027,3 +2027,132 @@ export function main() {
     affected
   );
 }
+
+/// Regression test: Nx project names that differ from npm package names / tsconfig
+/// path aliases must still be resolved as workspace-internal imports.
+///
+/// Reproduces the scenario where:
+///   - Nx project name = `my-lib`  (from project.json)
+///   - tsconfig path alias = `@scope/my-lib`  (from tsconfig.base.json)
+///   - Consumer imports via `@scope/my-lib`
+///
+/// Before the fix, `is_workspace_specifier` only checked project names, so
+/// `@scope/my-lib` was classified as external and silently dropped from the
+/// import index — breaking cross-project affected detection.
+#[test]
+fn test_tsconfig_path_alias_differs_from_project_name() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo ------------------------------------------------
+  let lib_src = root.join("libs/my-lib/src");
+  let app_src = root.join("apps/my-app/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+
+  fs::write(
+    lib_src.join("index.ts"),
+    r#"export { helper } from './utils';
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    app_src.join("main.ts"),
+    r#"import { helper } from '@scope/my-lib';
+
+export function run() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  // tsconfig.base.json with path alias that differs from project name
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch with a change in lib ------------------------
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    lib_src.join("utils.ts"),
+    r#"export function helper() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  // -- run find_affected -------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        // Nx project name does NOT match the tsconfig path alias
+        name: "my-lib".to_string(),
+        source_root: PathBuf::from("libs/my-lib/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "my-app".to_string(),
+        source_root: PathBuf::from("apps/my-app/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"my-lib".to_string()),
+    "my-lib should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "my-app should be affected (imports via tsconfig path alias @scope/my-lib that differs from project name my-lib). Got: {:?}",
+    affected
+  );
+}

@@ -131,3 +131,6 @@ Cargo.lock
 
 # Test fixture git repo (initialized during tests)
 tests/fixtures/monorepo/.git
+
+# Local Claude Code hooks (user-specific)
+/.claude/hooks.local/

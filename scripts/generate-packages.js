@@ -40,6 +40,11 @@ const TARGET_TO_PACKAGE = {
     binary: 'domino',
     ext: '',
   },
+  'aarch64-unknown-linux-gnu': {
+    name: 'linux-arm64-gnu',
+    binary: 'domino',
+    ext: '',
+  },
 }
 
 function readRootPackageJson() {

@@ -129,8 +129,12 @@ pub(crate) fn is_workspace_specifier(
   if specifier.starts_with('.') || specifier.starts_with('/') {
     return true;
   }
-  let matches_prefix =
-    |prefix: &str| specifier == prefix || specifier.starts_with(&format!("{}/", prefix));
+  let matches_prefix = |prefix: &str| {
+    specifier == prefix
+      || (specifier.len() > prefix.len()
+        && specifier.starts_with(prefix)
+        && specifier.as_bytes()[prefix.len()] == b'/')
+  };
 
   projects.iter().any(|p| matches_prefix(&p.name))
     || tsconfig_paths.iter().any(|p| matches_prefix(p))
@@ -176,9 +180,9 @@ struct TsconfigCompilerOptions {
 /// Wildcard suffixes (`/*`) are stripped so the returned strings can be used as
 /// prefix-match candidates in `is_workspace_specifier`.
 ///
-/// When the tsconfig uses `extends`, the chain is followed (up to 10 levels)
-/// and paths are inherited from ancestor configs — matching TypeScript semantics
-/// where the leaf config's `paths` take precedence.
+/// When the tsconfig uses `extends`, the chain is followed and paths are
+/// inherited from ancestor configs — matching TypeScript semantics where the
+/// leaf config's `paths` take precedence.
 pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
   let tsconfig_path = cwd.join("tsconfig.base.json");
   if !tsconfig_path.exists() {

@@ -223,10 +223,16 @@ fn collect_tsconfig_paths(start_path: &Path) -> HashMap<String, Vec<String>> {
   let mut visited = std::collections::HashSet::new();
   let mut merged = HashMap::new();
 
-  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged);
+  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged, 0);
 
   merged
 }
+
+/// Safety net depth limit. The `visited` set is the primary cycle guard, but
+/// `canonicalize()` can fail (returning the raw path), so two different textual
+/// representations of the same file could bypass it. This cap prevents stack
+/// overflow in that edge case.
+const MAX_EXTENDS_DEPTH: usize = 64;
 
 fn resolve_extends_specifier(parent_dir: &Path, specifier: &str) -> Option<PathBuf> {
   if !specifier.starts_with('.') && !specifier.starts_with('/') {
@@ -247,7 +253,17 @@ fn collect_tsconfig_paths_recursive(
   config_path: &Path,
   visited: &mut std::collections::HashSet<PathBuf>,
   merged: &mut HashMap<String, Vec<String>>,
+  depth: usize,
 ) {
+  if depth >= MAX_EXTENDS_DEPTH {
+    warn!(
+      "tsconfig extends chain exceeded {} levels at {} — possible cycle with non-canonical paths",
+      MAX_EXTENDS_DEPTH,
+      config_path.display()
+    );
+    return;
+  }
+
   let canonical = config_path
     .canonicalize()
     .unwrap_or_else(|_| config_path.to_path_buf());
@@ -266,7 +282,7 @@ fn collect_tsconfig_paths_recursive(
     let parent_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     for specifier in extends.into_vec() {
       if let Some(parent_path) = resolve_extends_specifier(parent_dir, &specifier) {
-        collect_tsconfig_paths_recursive(&parent_path, visited, merged);
+        collect_tsconfig_paths_recursive(&parent_path, visited, merged, depth + 1);
       }
     }
   }

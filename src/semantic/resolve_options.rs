@@ -3,7 +3,7 @@ use json_strip_comments::StripComments;
 use oxc_resolver::{AliasValue, ResolveOptions};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Shared resolver configuration for both the import index builder and the reference finder.
@@ -138,9 +138,26 @@ pub(crate) fn is_workspace_specifier(
 
 #[derive(Deserialize)]
 struct TsconfigJson {
-  extends: Option<String>,
+  extends: Option<TsconfigExtends>,
   #[serde(rename = "compilerOptions")]
   compiler_options: Option<TsconfigCompilerOptions>,
+}
+
+/// TypeScript 5.0+ allows `extends` to be either a single string or an array of strings.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TsconfigExtends {
+  Single(String),
+  Multiple(Vec<String>),
+}
+
+impl TsconfigExtends {
+  fn into_vec(self) -> Vec<String> {
+    match self {
+      TsconfigExtends::Single(s) => vec![s],
+      TsconfigExtends::Multiple(v) => v,
+    }
+  }
 }
 
 #[derive(Deserialize)]
@@ -199,45 +216,72 @@ fn read_tsconfig(path: &Path) -> Option<TsconfigJson> {
 /// Walk the `extends` chain starting from `start_path`, collecting all
 /// `compilerOptions.paths` entries. Child paths take precedence over parent
 /// paths (matching TypeScript semantics).
+///
+/// Supports both single-string and array `extends` (TypeScript 5.0+).
+/// Bare package specifiers (e.g. `@my-team/tsconfig-base`) are skipped because
+/// resolving them would require full Node module resolution; only relative/absolute
+/// paths are followed.
 fn collect_tsconfig_paths(start_path: &Path) -> HashMap<String, Vec<String>> {
   let mut visited = std::collections::HashSet::new();
-  let mut current_path = start_path.to_path_buf();
-  let mut chain: Vec<Option<HashMap<String, Vec<String>>>> = Vec::new();
+  let mut merged = HashMap::new();
 
-  for _ in 0..MAX_EXTENDS_DEPTH {
-    let canonical = current_path
-      .canonicalize()
-      .unwrap_or_else(|_| current_path.clone());
-    if !visited.insert(canonical.clone()) {
-      warn!("Circular extends detected at {}", current_path.display());
-      break;
-    }
+  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged, 0);
 
-    let tsconfig = match read_tsconfig(&current_path) {
-      Some(t) => t,
-      None => break,
-    };
+  merged
+}
 
-    chain.push(tsconfig.compiler_options.and_then(|co| co.paths));
+fn resolve_extends_specifier(parent_dir: &Path, specifier: &str) -> Option<PathBuf> {
+  if !specifier.starts_with('.') && !specifier.starts_with('/') {
+    warn!(
+      "Skipping bare package extends specifier '{}' — only relative paths are supported",
+      specifier
+    );
+    return None;
+  }
+  let mut path = parent_dir.join(specifier);
+  if path.extension().is_none() {
+    path.set_extension("json");
+  }
+  Some(path)
+}
 
-    match tsconfig.extends {
-      Some(ref extends_specifier) => {
-        let parent_dir = current_path.parent().unwrap_or_else(|| Path::new("."));
-        current_path = parent_dir.join(extends_specifier);
-        if current_path.extension().is_none() {
-          current_path.set_extension("json");
-        }
+fn collect_tsconfig_paths_recursive(
+  config_path: &Path,
+  visited: &mut std::collections::HashSet<PathBuf>,
+  merged: &mut HashMap<String, Vec<String>>,
+  depth: usize,
+) {
+  if depth >= MAX_EXTENDS_DEPTH {
+    return;
+  }
+
+  let canonical = config_path
+    .canonicalize()
+    .unwrap_or_else(|_| config_path.to_path_buf());
+  if !visited.insert(canonical) {
+    warn!("Circular extends detected at {}", config_path.display());
+    return;
+  }
+
+  let tsconfig = match read_tsconfig(config_path) {
+    Some(t) => t,
+    None => return,
+  };
+
+  // Process parents first so child paths take precedence
+  if let Some(extends) = tsconfig.extends {
+    let parent_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    for specifier in extends.into_vec() {
+      if let Some(parent_path) = resolve_extends_specifier(parent_dir, &specifier) {
+        collect_tsconfig_paths_recursive(&parent_path, visited, merged, depth + 1);
       }
-      None => break,
     }
   }
 
-  // Merge paths: ancestors first, children override
-  let mut merged = HashMap::new();
-  for paths in chain.into_iter().rev().flatten() {
+  // Child paths override parent paths
+  if let Some(paths) = tsconfig.compiler_options.and_then(|co| co.paths) {
     merged.extend(paths);
   }
-  merged
 }
 
 /// Extract the alias target path for a given package name from resolve options.
@@ -616,5 +660,85 @@ mod tests {
       "should still return paths despite circular extends. Got: {:?}",
       prefixes
     );
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_array_extends() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.paths-a.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": { "@scope/lib-a": ["libs/a/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.paths-b.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": { "@scope/lib-b": ["libs/b/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": ["./tsconfig.paths-a.json", "./tsconfig.paths-b.json"],
+        "compilerOptions": {
+          "paths": { "@scope/root": ["libs/root/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/lib-a".to_string()),
+      "should inherit from first array extends entry. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/lib-b".to_string()),
+      "should inherit from second array extends entry. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/root".to_string()),
+      "should include paths from leaf config. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 3);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_bare_package_extends_skipped() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": "@my-team/tsconfig-base",
+        "compilerOptions": {
+          "paths": { "@scope/my-lib": ["libs/my-lib/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/my-lib".to_string()),
+      "should still return own paths when bare package extends is skipped. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 1);
   }
 }

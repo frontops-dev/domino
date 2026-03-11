@@ -193,8 +193,6 @@ pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
     .collect()
 }
 
-const MAX_EXTENDS_DEPTH: usize = 10;
-
 fn read_tsconfig(path: &Path) -> Option<TsconfigJson> {
   let content = match std::fs::read_to_string(path) {
     Ok(c) => c,
@@ -225,7 +223,7 @@ fn collect_tsconfig_paths(start_path: &Path) -> HashMap<String, Vec<String>> {
   let mut visited = std::collections::HashSet::new();
   let mut merged = HashMap::new();
 
-  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged, 0);
+  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged);
 
   merged
 }
@@ -249,12 +247,7 @@ fn collect_tsconfig_paths_recursive(
   config_path: &Path,
   visited: &mut std::collections::HashSet<PathBuf>,
   merged: &mut HashMap<String, Vec<String>>,
-  depth: usize,
 ) {
-  if depth >= MAX_EXTENDS_DEPTH {
-    return;
-  }
-
   let canonical = config_path
     .canonicalize()
     .unwrap_or_else(|_| config_path.to_path_buf());
@@ -273,7 +266,7 @@ fn collect_tsconfig_paths_recursive(
     let parent_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     for specifier in extends.into_vec() {
       if let Some(parent_path) = resolve_extends_specifier(parent_dir, &specifier) {
-        collect_tsconfig_paths_recursive(&parent_path, visited, merged, depth + 1);
+        collect_tsconfig_paths_recursive(&parent_path, visited, merged);
       }
     }
   }

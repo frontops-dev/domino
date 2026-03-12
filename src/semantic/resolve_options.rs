@@ -1,6 +1,10 @@
 use crate::types::Project;
+use json_strip_comments::StripComments;
 use oxc_resolver::{AliasValue, ResolveOptions};
-use std::path::Path;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Shared resolver configuration for both the import index builder and the reference finder.
 /// Kept in one place to prevent drift between the two resolution paths.
@@ -106,21 +110,191 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
 
 /// Returns `true` if the specifier is potentially workspace-internal and should be
 /// passed to `oxc_resolver`. Relative and absolute specifiers always qualify.
-/// Bare specifiers qualify only if they match a known project name (possibly as a
-/// deep-import prefix like `@scope/pkg/sub/path`).
+/// Bare specifiers qualify if they match a known project name **or** a tsconfig
+/// path alias (possibly as a deep-import prefix like `@scope/pkg/sub/path`).
+///
+/// Both project names and tsconfig paths must be checked because they can differ:
+/// an Nx project named `ui-widgets` may be imported as `@acme/shared-ui-widgets`
+/// via a tsconfig path alias. Checking only project names would misclassify
+/// such imports as external and silently break cross-project reference tracking.
 ///
 /// This avoids expensive filesystem I/O for external `node_modules` dependencies
 /// (e.g. `react`, `lodash`) that the resolver would attempt to resolve via
 /// `package.json` lookups before the `strip_prefix(cwd)` guard discards the result.
-pub(crate) fn is_workspace_specifier(specifier: &str, projects: &[Project]) -> bool {
-  // Relative and absolute imports are always workspace-internal
+pub(crate) fn is_workspace_specifier(
+  specifier: &str,
+  projects: &[Project],
+  tsconfig_paths: &[String],
+) -> bool {
   if specifier.starts_with('.') || specifier.starts_with('/') {
     return true;
   }
-  // Bare specifier — check if it matches any project name (exact or prefix + '/')
-  projects
-    .iter()
-    .any(|p| specifier == p.name || specifier.starts_with(&format!("{}/", p.name)))
+  let matches_prefix = |prefix: &str| {
+    specifier == prefix
+      || (specifier.len() > prefix.len()
+        && specifier.starts_with(prefix)
+        && specifier.as_bytes()[prefix.len()] == b'/')
+  };
+
+  projects.iter().any(|p| matches_prefix(&p.name))
+    || tsconfig_paths.iter().any(|p| matches_prefix(p))
+}
+
+#[derive(Deserialize)]
+struct TsconfigJson {
+  extends: Option<TsconfigExtends>,
+  #[serde(rename = "compilerOptions")]
+  compiler_options: Option<TsconfigCompilerOptions>,
+}
+
+/// TypeScript 5.0+ allows `extends` to be either a single string or an array of strings.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TsconfigExtends {
+  Single(String),
+  Multiple(Vec<String>),
+}
+
+impl TsconfigExtends {
+  fn into_vec(self) -> Vec<String> {
+    match self {
+      TsconfigExtends::Single(s) => vec![s],
+      TsconfigExtends::Multiple(v) => v,
+    }
+  }
+}
+
+#[derive(Deserialize)]
+struct TsconfigCompilerOptions {
+  paths: Option<HashMap<String, Vec<String>>>,
+}
+
+/// Parse `tsconfig.base.json` (and its `extends` chain) and return the keys
+/// from `compilerOptions.paths`.
+///
+/// These keys are the import specifiers that the TypeScript compiler (and oxc_resolver)
+/// will resolve to workspace-internal paths. They often differ from the Nx project
+/// names — e.g. a project named `ui-widgets` may be mapped as
+/// `@acme/shared-ui-widgets` in tsconfig paths.
+///
+/// Wildcard suffixes (`/*`) are stripped so the returned strings can be used as
+/// prefix-match candidates in `is_workspace_specifier`.
+///
+/// When the tsconfig uses `extends`, the chain is followed and paths are
+/// inherited from ancestor configs — matching TypeScript semantics where the
+/// leaf config's `paths` take precedence.
+pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
+  let tsconfig_path = cwd.join("tsconfig.base.json");
+  if !tsconfig_path.exists() {
+    return vec![];
+  }
+
+  let paths = collect_tsconfig_paths(&tsconfig_path);
+
+  paths
+    .keys()
+    .map(|key| key.strip_suffix("/*").unwrap_or(key).to_string())
+    .collect()
+}
+
+fn read_tsconfig(path: &Path) -> Option<TsconfigJson> {
+  let content = match std::fs::read_to_string(path) {
+    Ok(c) => c,
+    Err(e) => {
+      warn!("Failed to read {}: {}", path.display(), e);
+      return None;
+    }
+  };
+  let stripped = StripComments::new(content.as_bytes());
+  match serde_json::from_reader(stripped) {
+    Ok(t) => Some(t),
+    Err(e) => {
+      warn!("Failed to parse {}: {}", path.display(), e);
+      None
+    }
+  }
+}
+
+/// Walk the `extends` chain starting from `start_path`, collecting all
+/// `compilerOptions.paths` entries. Child paths take precedence over parent
+/// paths (matching TypeScript semantics).
+///
+/// Supports both single-string and array `extends` (TypeScript 5.0+).
+/// Bare package specifiers (e.g. `@my-team/tsconfig-base`) are skipped because
+/// resolving them would require full Node module resolution; only relative/absolute
+/// paths are followed.
+fn collect_tsconfig_paths(start_path: &Path) -> HashMap<String, Vec<String>> {
+  let mut visited = std::collections::HashSet::new();
+  let mut merged = HashMap::new();
+
+  collect_tsconfig_paths_recursive(start_path, &mut visited, &mut merged, 0);
+
+  merged
+}
+
+/// Safety net depth limit. The `visited` set is the primary cycle guard, but
+/// `canonicalize()` can fail (returning the raw path), so two different textual
+/// representations of the same file could bypass it. This cap prevents stack
+/// overflow in that edge case.
+const MAX_EXTENDS_DEPTH: usize = 64;
+
+fn resolve_extends_specifier(parent_dir: &Path, specifier: &str) -> Option<PathBuf> {
+  if !specifier.starts_with('.') && !specifier.starts_with('/') {
+    warn!(
+      "Skipping bare package extends specifier '{}' — only relative paths are supported",
+      specifier
+    );
+    return None;
+  }
+  let mut path = parent_dir.join(specifier);
+  if path.extension().is_none() {
+    path.set_extension("json");
+  }
+  Some(path)
+}
+
+fn collect_tsconfig_paths_recursive(
+  config_path: &Path,
+  visited: &mut std::collections::HashSet<PathBuf>,
+  merged: &mut HashMap<String, Vec<String>>,
+  depth: usize,
+) {
+  if depth >= MAX_EXTENDS_DEPTH {
+    warn!(
+      "tsconfig extends chain exceeded {} levels at {} — possible cycle with non-canonical paths",
+      MAX_EXTENDS_DEPTH,
+      config_path.display()
+    );
+    return;
+  }
+
+  let canonical = config_path
+    .canonicalize()
+    .unwrap_or_else(|_| config_path.to_path_buf());
+  if !visited.insert(canonical) {
+    warn!("Circular extends detected at {}", config_path.display());
+    return;
+  }
+
+  let tsconfig = match read_tsconfig(config_path) {
+    Some(t) => t,
+    None => return,
+  };
+
+  // Process parents first so child paths take precedence
+  if let Some(extends) = tsconfig.extends {
+    let parent_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    for specifier in extends.into_vec() {
+      if let Some(parent_path) = resolve_extends_specifier(parent_dir, &specifier) {
+        collect_tsconfig_paths_recursive(&parent_path, visited, merged, depth + 1);
+      }
+    }
+  }
+
+  // Child paths override parent paths
+  if let Some(paths) = tsconfig.compiler_options.and_then(|co| co.paths) {
+    merged.extend(paths);
+  }
 }
 
 /// Extract the alias target path for a given package name from resolve options.
@@ -279,31 +453,305 @@ mod tests {
   #[test]
   fn test_is_workspace_specifier_relative() {
     let projects = make_projects(&["@scope/lib"]);
-    assert!(is_workspace_specifier("./utils", &projects));
-    assert!(is_workspace_specifier("../shared/index", &projects));
+    assert!(is_workspace_specifier("./utils", &projects, &[]));
+    assert!(is_workspace_specifier("../shared/index", &projects, &[]));
   }
 
   #[test]
   fn test_is_workspace_specifier_absolute() {
     let projects = make_projects(&["@scope/lib"]);
-    assert!(is_workspace_specifier("/absolute/path", &projects));
+    assert!(is_workspace_specifier("/absolute/path", &projects, &[]));
   }
 
   #[test]
   fn test_is_workspace_specifier_matching_project() {
     let projects = make_projects(&["@scope/lib", "shared-utils"]);
-    assert!(is_workspace_specifier("@scope/lib", &projects));
-    assert!(is_workspace_specifier("@scope/lib/deep/path", &projects));
-    assert!(is_workspace_specifier("shared-utils", &projects));
-    assert!(is_workspace_specifier("shared-utils/helpers", &projects));
+    assert!(is_workspace_specifier("@scope/lib", &projects, &[]));
+    assert!(is_workspace_specifier(
+      "@scope/lib/deep/path",
+      &projects,
+      &[]
+    ));
+    assert!(is_workspace_specifier("shared-utils", &projects, &[]));
+    assert!(is_workspace_specifier(
+      "shared-utils/helpers",
+      &projects,
+      &[]
+    ));
   }
 
   #[test]
   fn test_is_workspace_specifier_external() {
     let projects = make_projects(&["@scope/lib", "shared-utils"]);
-    assert!(!is_workspace_specifier("react", &projects));
-    assert!(!is_workspace_specifier("lodash/fp", &projects));
-    assert!(!is_workspace_specifier("@angular/core", &projects));
-    assert!(!is_workspace_specifier("@scope/other-lib", &projects));
+    assert!(!is_workspace_specifier("react", &projects, &[]));
+    assert!(!is_workspace_specifier("lodash/fp", &projects, &[]));
+    assert!(!is_workspace_specifier("@angular/core", &projects, &[]));
+    assert!(!is_workspace_specifier("@scope/other-lib", &projects, &[]));
+  }
+
+  #[test]
+  fn test_is_workspace_specifier_tsconfig_path_alias() {
+    let projects = make_projects(&["ui-widgets"]);
+    let tsconfig_paths = vec!["@acme/shared-ui-widgets".to_string()];
+
+    assert!(
+      !is_workspace_specifier("@acme/shared-ui-widgets", &projects, &[]),
+      "should NOT match without tsconfig paths"
+    );
+    assert!(
+      is_workspace_specifier("@acme/shared-ui-widgets", &projects, &tsconfig_paths),
+      "should match with tsconfig path alias"
+    );
+    assert!(
+      is_workspace_specifier(
+        "@acme/shared-ui-widgets/deep/path",
+        &projects,
+        &tsconfig_paths
+      ),
+      "should match deep import under tsconfig path alias"
+    );
+    assert!(
+      !is_workspace_specifier("react", &projects, &tsconfig_paths),
+      "external packages should still be rejected"
+    );
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts"],
+            "@scope/other-lib/*": ["libs/other-lib/src/*"]
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(prefixes.contains(&"@scope/my-lib".to_string()));
+    assert!(
+      prefixes.contains(&"@scope/other-lib".to_string()),
+      "wildcard suffix /* should be stripped"
+    );
+    assert_eq!(prefixes.len(), 2);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_missing_file() {
+    let tmp = TempDir::new().unwrap();
+    let prefixes = parse_tsconfig_path_prefixes(tmp.path());
+    assert!(prefixes.is_empty());
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_with_comments() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        // This is a line comment
+        "compilerOptions": {
+          /* block comment */
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts"],
+            "@scope/other-lib/*": ["libs/other-lib/src/*"] // trailing comment
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/my-lib".to_string()),
+      "should parse paths from JSONC with comments. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/other-lib".to_string()),
+      "should parse wildcard path from JSONC with comments. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 2);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_with_extends() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.shared.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": {
+            "@scope/shared-lib": ["libs/shared-lib/src/index.ts"],
+            "@scope/overridden/*": ["libs/old-path/src/*"]
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": "./tsconfig.shared.json",
+        "compilerOptions": {
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts"],
+            "@scope/overridden/*": ["libs/new-path/src/*"]
+          }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/shared-lib".to_string()),
+      "should inherit paths from extended config. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/my-lib".to_string()),
+      "should include paths from leaf config. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/overridden".to_string()),
+      "child should override parent path keys. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 3);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_circular_extends() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.a.json"),
+      r#"{
+        "extends": "./tsconfig.b.json",
+        "compilerOptions": { "paths": { "@scope/a": ["a/src"] } }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.b.json"),
+      r#"{
+        "extends": "./tsconfig.a.json",
+        "compilerOptions": { "paths": { "@scope/b": ["b/src"] } }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": "./tsconfig.a.json",
+        "compilerOptions": { "paths": { "@scope/root": ["root/src"] } }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/root".to_string()),
+      "should still return paths despite circular extends. Got: {:?}",
+      prefixes
+    );
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_array_extends() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.paths-a.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": { "@scope/lib-a": ["libs/a/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.paths-b.json"),
+      r#"{
+        "compilerOptions": {
+          "paths": { "@scope/lib-b": ["libs/b/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": ["./tsconfig.paths-a.json", "./tsconfig.paths-b.json"],
+        "compilerOptions": {
+          "paths": { "@scope/root": ["libs/root/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/lib-a".to_string()),
+      "should inherit from first array extends entry. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/lib-b".to_string()),
+      "should inherit from second array extends entry. Got: {:?}",
+      prefixes
+    );
+    assert!(
+      prefixes.contains(&"@scope/root".to_string()),
+      "should include paths from leaf config. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 3);
+  }
+
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_bare_package_extends_skipped() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        "extends": "@my-team/tsconfig-base",
+        "compilerOptions": {
+          "paths": { "@scope/my-lib": ["libs/my-lib/src/index.ts"] }
+        }
+      }"#,
+    )
+    .unwrap();
+
+    let prefixes = parse_tsconfig_path_prefixes(cwd);
+    assert!(
+      prefixes.contains(&"@scope/my-lib".to_string()),
+      "should still return own paths when bare package extends is skipped. Got: {:?}",
+      prefixes
+    );
+    assert_eq!(prefixes.len(), 1);
   }
 }

@@ -291,10 +291,11 @@ impl<'a> ReferenceFinder<'a> {
       }
     }
 
-    // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
-    // `lodash`). These would trigger expensive node_modules/package.json lookups
-    // only to be discarded by strip_prefix(cwd) later.
-    if !super::is_workspace_specifier(specifier, &self.analyzer.projects) {
+    if !super::is_workspace_specifier(
+      specifier,
+      &self.analyzer.projects,
+      &self.analyzer.tsconfig_path_prefixes,
+    ) {
       self.resolution_cache.borrow_mut().insert(cache_key, None);
       if let Some(start_time) = start {
         self

@@ -153,6 +153,26 @@ Uses `oxc_resolver` with TypeScript-aware configuration:
 - Supports extensions: `.ts`, `.tsx`, `.js`, `.jsx`, `.d.ts`
 - Handles both relative imports and workspace path aliases
 
+### Workspace Specifier Matching (Known Pitfall)
+
+**IMPORTANT**: In many Nx monorepos the project name (from `project.json`) does NOT match
+the npm package name or the tsconfig path alias used in import statements. For example:
+
+| Nx project name | tsconfig path alias / import specifier |
+|---|---|
+| `ui-widgets` | `@acme/shared-ui-widgets` |
+| `my-lib` | `@acme/my-lib` |
+
+The `is_workspace_specifier` function (in `resolve_options.rs`) is a performance guard
+that short-circuits the resolver for external packages. It MUST check **both** project
+names **and** tsconfig path alias keys. If it only checks project names, imports using
+tsconfig aliases will be silently classified as external and dropped from the import
+index — completely breaking cross-project affected detection.
+
+Any performance optimization that filters import specifiers must account for this
+name mismatch. Always add an integration test covering the "project name != import
+specifier" scenario when touching resolution or specifier filtering logic.
+
 ### Testing Strategy
 
 - **Unit tests** (`cargo test --lib`): Test individual components in isolation

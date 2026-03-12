@@ -73,6 +73,11 @@ pub struct WorkspaceAnalyzer {
   /// This index maps from a file+symbol to all the places that import it
   /// The from_module is kept for re-export checking
   pub import_index: ImportIndexMap,
+  /// tsconfig.base.json path alias keys (e.g. `@scope/my-lib`).
+  /// Used alongside project names for the `is_workspace_specifier` check because
+  /// Nx project names can differ from the npm package names / tsconfig aliases
+  /// that code actually imports.
+  pub tsconfig_path_prefixes: Vec<String>,
   /// Profiler for performance measurement
   pub profiler: Arc<Profiler>,
 }
@@ -80,12 +85,15 @@ pub struct WorkspaceAnalyzer {
 impl WorkspaceAnalyzer {
   /// Create a new workspace analyzer
   pub fn new(projects: Vec<Project>, cwd: &Path, profiler: Arc<Profiler>) -> Result<Self> {
+    let tsconfig_path_prefixes = super::parse_tsconfig_path_prefixes(cwd);
+
     let mut analyzer = Self {
       files: HashMap::new(),
       imports: HashMap::new(),
       exports: HashMap::new(),
       projects,
       import_index: FxHashMap::default(),
+      tsconfig_path_prefixes,
       profiler,
     };
 
@@ -121,10 +129,11 @@ impl WorkspaceAnalyzer {
           None => continue,
         };
 
-        // Skip oxc_resolver for specifiers that are clearly external (e.g. `react`,
-        // `lodash`). These would trigger expensive node_modules/package.json lookups
-        // only to be discarded by strip_prefix(cwd) later.
-        if !super::is_workspace_specifier(&import.from_module, &self.projects) {
+        if !super::is_workspace_specifier(
+          &import.from_module,
+          &self.projects,
+          &self.tsconfig_path_prefixes,
+        ) {
           continue;
         }
 

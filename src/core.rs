@@ -46,8 +46,8 @@ fn find_affected_internal(
   debug!("Base: {}", config.base);
   debug!("Projects: {}", config.projects.len());
 
-  // Step 1: Get changed files from git
-  let changed_files = git::get_changed_files(&config.cwd, &config.base)?;
+  // Step 1: Get changed files from git (also returns the merge-base SHA)
+  let (changed_files, merge_base) = git::get_changed_files(&config.cwd, &config.base)?;
   debug!("Found {} changed files", changed_files.len());
 
   if changed_files.is_empty() {
@@ -367,16 +367,20 @@ fn find_affected_internal(
     if let Some(ref pm) = detected_pm {
       if lockfile::has_lockfile_changed(&changed_files, pm) {
         debug!("Lockfile changed, strategy: {:?}", config.lockfile_strategy);
-        match lockfile::find_affected_dependencies(&config.cwd, &config.base, pm) {
+        match lockfile::find_affected_dependencies(&config.cwd, &merge_base, pm) {
           Ok(affected_deps) if !affected_deps.is_empty() => {
             debug!("Found {} affected direct dependencies", affected_deps.len());
 
             let mut lockfile_visited = FxHashSet::default();
 
             for (file_path, file_imports) in &analyzer.imports {
+              // Collect (import, matched canonical dep name) pairs
               let matching_imports: Vec<_> = file_imports
                 .iter()
-                .filter(|imp| lockfile::is_affected_import(&imp.from_module, &affected_deps))
+                .filter_map(|imp| {
+                  lockfile::match_affected_dependency(&imp.from_module, &affected_deps)
+                    .map(|dep| (imp, dep))
+                })
                 .collect();
 
               if matching_imports.is_empty() {
@@ -386,10 +390,10 @@ fn find_affected_internal(
               if let Some(pkg) = utils::get_package_name_by_path(file_path, &config.projects) {
                 affected_packages.insert(pkg.clone());
                 if generate_report {
-                  for imp in &matching_imports {
+                  for &(_, dep_name) in &matching_imports {
                     project_causes.entry(pkg.clone()).or_default().push(
                       AffectCause::LockfileChange {
-                        dependency: imp.from_module.clone(),
+                        dependency: dep_name.to_string(),
                         importing_file: file_path.clone(),
                       },
                     );
@@ -398,54 +402,36 @@ fn find_affected_internal(
               }
 
               if matches!(config.lockfile_strategy, LockfileStrategy::Full) {
-                for imp in &matching_imports {
-                  match analyzer.find_exported_symbols_using(file_path, &imp.local_name) {
-                    Ok(exports) if !exports.is_empty() => {
-                      for export_sym in exports {
-                        let mut state = AffectedState {
-                          affected_packages: &mut affected_packages,
-                          project_causes: if generate_report {
-                            Some(&mut project_causes)
-                          } else {
-                            None
-                          },
-                          visited: &mut lockfile_visited,
-                        };
-                        if let Err(e) = process_changed_symbol(
-                          &analyzer,
-                          &reference_finder,
-                          file_path,
-                          &export_sym,
-                          &config.projects,
-                          &mut state,
-                        ) {
-                          debug!("Error tracing lockfile export '{}': {}", export_sym, e);
-                        }
+                for &(imp, _) in &matching_imports {
+                  let symbols_to_trace =
+                    match analyzer.find_exported_symbols_using(file_path, &imp.local_name) {
+                      Ok(exports) if !exports.is_empty() => exports,
+                      Ok(_) => vec![imp.local_name.clone()],
+                      Err(e) => {
+                        debug!("Error finding exports using '{}': {}", imp.local_name, e);
+                        continue;
                       }
-                    }
-                    Ok(_) => {
-                      let mut state = AffectedState {
-                        affected_packages: &mut affected_packages,
-                        project_causes: if generate_report {
-                          Some(&mut project_causes)
-                        } else {
-                          None
-                        },
-                        visited: &mut lockfile_visited,
-                      };
-                      if let Err(e) = process_changed_symbol(
-                        &analyzer,
-                        &reference_finder,
-                        file_path,
-                        &imp.local_name,
-                        &config.projects,
-                        &mut state,
-                      ) {
-                        debug!("Error tracing lockfile import '{}': {}", imp.local_name, e);
-                      }
-                    }
-                    Err(e) => {
-                      debug!("Error finding exports using '{}': {}", imp.local_name, e);
+                    };
+
+                  for sym in symbols_to_trace {
+                    let mut state = AffectedState {
+                      affected_packages: &mut affected_packages,
+                      project_causes: if generate_report {
+                        Some(&mut project_causes)
+                      } else {
+                        None
+                      },
+                      visited: &mut lockfile_visited,
+                    };
+                    if let Err(e) = process_changed_symbol(
+                      &analyzer,
+                      &reference_finder,
+                      file_path,
+                      &sym,
+                      &config.projects,
+                      &mut state,
+                    ) {
+                      debug!("Error tracing lockfile symbol '{}': {}", sym, e);
                     }
                   }
                 }

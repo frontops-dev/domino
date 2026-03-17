@@ -235,3 +235,65 @@ pub enum AffectCause {
     importing_file: PathBuf,
   },
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_lockfile_strategy_from_str_valid() {
+    assert_eq!(
+      "none".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::None
+    );
+    assert_eq!(
+      "direct".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Direct
+    );
+    assert_eq!(
+      "full".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Full
+    );
+  }
+
+  #[test]
+  fn test_lockfile_strategy_from_str_case_insensitive() {
+    assert_eq!(
+      "Direct".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Direct
+    );
+    assert_eq!(
+      "FULL".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Full
+    );
+    assert_eq!(
+      "None".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::None
+    );
+  }
+
+  #[test]
+  fn test_lockfile_strategy_from_str_invalid() {
+    assert!("invalid".parse::<LockfileStrategy>().is_err());
+    assert!("".parse::<LockfileStrategy>().is_err());
+    assert!("direkt".parse::<LockfileStrategy>().is_err());
+  }
+
+  #[test]
+  fn test_lockfile_strategy_display_roundtrip() {
+    for strategy in [
+      LockfileStrategy::None,
+      LockfileStrategy::Direct,
+      LockfileStrategy::Full,
+    ] {
+      let s = strategy.to_string();
+      let parsed: LockfileStrategy = s.parse().unwrap();
+      assert_eq!(parsed, strategy);
+    }
+  }
+
+  #[test]
+  fn test_lockfile_strategy_default() {
+    assert_eq!(LockfileStrategy::default(), LockfileStrategy::Direct);
+  }
+}

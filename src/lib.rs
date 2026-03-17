@@ -87,7 +87,8 @@ mod napi_bindings {
     let lockfile_strategy = options
       .lockfile_strategy
       .as_deref()
-      .map(|s| s.parse().unwrap_or_default())
+      .map(|s| s.parse::<LockfileStrategy>().map_err(Error::from_reason))
+      .transpose()?
       .unwrap_or_default();
 
     let config = TrueAffectedConfig {

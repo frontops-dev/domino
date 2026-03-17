@@ -17,6 +17,7 @@ domino is a drop-in replacement for the TypeScript version of [traf](https://git
 
 - **Semantic Change Detection**: Analyzes actual code changes at the AST level, not just file changes
 - **Cross-File Reference Tracking**: Follows symbol references across your entire workspace
+- **Lockfile Change Detection**: Detects dependency version changes in npm, yarn, pnpm, and bun lockfiles and traces affected projects
 - **Fast Oxc Parser**: 3-5x faster than TypeScript's compiler API
 - **Workspace Support**: Works with Nx, Turborepo, and generic npm/yarn/pnpm/bun workspaces
 - **Module Resolution**: Uses oxc_resolver (same as Rolldown and Nova) for accurate module resolution
@@ -112,6 +113,37 @@ domino affected --report report.html
 - `--report <PATH>`: Generate a detailed analysis report
 - `--debug`: Enable debug logging
 - `--cwd <PATH>`: Set the current working directory
+- `--lockfile-strategy <STRATEGY>`: Lockfile change detection strategy (default: `direct`)
+
+### Lockfile Change Detection
+
+domino automatically detects when your lockfile changes and identifies which projects are affected by dependency version updates. This works with all major package managers:
+
+| Package Manager | Lockfile            |
+| --------------- | ------------------- |
+| npm             | `package-lock.json` |
+| yarn            | `yarn.lock`         |
+| pnpm            | `pnpm-lock.yaml`    |
+| bun             | `bun.lock`          |
+
+Three strategies are available via `--lockfile-strategy`:
+
+- **`none`** — Ignore lockfile changes entirely
+- **`direct`** (default) — Mark projects that directly import an affected dependency
+- **`full`** — Like `direct`, but also traces the full reference chain (e.g. if `lib-a` changed and `ProjectA` imports it, `full` follows all re-exports of `lib-a` symbols to find additional affected projects)
+
+The detection is transitive: if a deeply nested dependency changes, domino walks the reverse dependency graph to find which direct dependency was affected, then finds all projects importing that dependency.
+
+```bash
+# Default: detect lockfile changes with "direct" strategy
+domino affected
+
+# Disable lockfile detection
+domino affected --lockfile-strategy none
+
+# Full reference chain tracing
+domino affected --lockfile-strategy full
+```
 
 ## How It Works
 
@@ -119,7 +151,8 @@ domino affected --report report.html
 2. **Semantic Parsing**: Parses all TypeScript/JavaScript files using Oxc
 3. **Symbol Resolution**: Identifies which symbols (functions, classes, constants) were modified
 4. **Reference Finding**: Recursively finds all cross-file references to those symbols
-5. **Project Mapping**: Maps affected files to their owning projects
+5. **Lockfile Analysis**: Detects dependency version changes and traces affected imports
+6. **Project Mapping**: Maps affected files to their owning projects
 
 ## Performance
 
@@ -147,6 +180,7 @@ Thanks to Rust and Oxc, domino is significantly faster than the TypeScript versi
 - **Workspace Discovery** (`src/workspace/`): Discovers projects in Nx, Turbo, and generic npm/yarn/pnpm/bun workspaces
 - **Semantic Analyzer** (`src/semantic/analyzer.rs`): Uses Oxc to parse and analyze TypeScript/JavaScript
 - **Reference Finder** (`src/semantic/reference_finder.rs`): Tracks cross-file symbol references
+- **Lockfile Analyzer** (`src/lockfile.rs`): Parses lockfiles, builds reverse dependency graphs, and detects affected packages
 - **Core Algorithm** (`src/core.rs`): Orchestrates the affected detection logic
 
 ### Key Technologies

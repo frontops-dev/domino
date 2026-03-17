@@ -1,5 +1,46 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Lockfile change detection strategy
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LockfileStrategy {
+  /// Lockfile changes are ignored entirely
+  None,
+  /// Mark projects that import affected deps (no reference chain tracing)
+  #[default]
+  Direct,
+  /// Mark importing projects AND trace full reference chains
+  Full,
+}
+
+impl fmt::Display for LockfileStrategy {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      LockfileStrategy::None => write!(f, "none"),
+      LockfileStrategy::Direct => write!(f, "direct"),
+      LockfileStrategy::Full => write!(f, "full"),
+    }
+  }
+}
+
+impl FromStr for LockfileStrategy {
+  type Err = String;
+
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    match s.to_lowercase().as_str() {
+      "none" => Ok(LockfileStrategy::None),
+      "direct" => Ok(LockfileStrategy::Direct),
+      "full" => Ok(LockfileStrategy::Full),
+      _ => Err(format!(
+        "Invalid lockfile strategy '{}'. Expected: none, direct, full",
+        s
+      )),
+    }
+  }
+}
 
 /// A project in the workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +143,8 @@ pub struct TrueAffectedConfig {
   /// Paths to ignore
   #[allow(dead_code)]
   pub ignored_paths: Vec<String>,
+  /// Lockfile change detection strategy
+  pub lockfile_strategy: LockfileStrategy,
 }
 
 /// Result of the true affected analysis
@@ -182,5 +225,13 @@ pub enum AffectCause {
     referenced_in: PathBuf,
     /// Line where the reference appears
     line: usize,
+  },
+  /// Lockfile dependency changed
+  #[serde(rename = "lockfile_change")]
+  LockfileChange {
+    /// The affected dependency name
+    dependency: String,
+    /// Source file that imports the dependency
+    importing_file: PathBuf,
   },
 }

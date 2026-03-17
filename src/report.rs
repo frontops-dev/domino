@@ -851,8 +851,15 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
             .push("implicit".to_string());
         }
         AffectCause::AssetChange { .. } => {
-          // Asset changes are direct changes to the owning project
           direct_changes.insert(project.name.clone());
+        }
+        AffectCause::LockfileChange { dependency, .. } => {
+          relationships
+            .entry(dependency.clone())
+            .or_default()
+            .entry(project.name.clone())
+            .or_default()
+            .push("lockfile".to_string());
         }
       }
     }
@@ -1063,6 +1070,22 @@ fn generate_details_html(report: &AffectedReport) -> String {
             "Referenced in: <span class=\"code-path\">{}</span> (line {})",
             referenced_in.display(),
             line
+          ));
+          html.push_str("</div>");
+        }
+        AffectCause::LockfileChange {
+          dependency,
+          importing_file,
+        } => {
+          html.push_str("<span class=\"cause-type imported\">Lockfile Change</span>");
+          html.push_str("<div class=\"cause-details\">");
+          html.push_str(&format!(
+            "Dependency: <span class=\"symbol\">{}</span><br/>",
+            dependency
+          ));
+          html.push_str(&format!(
+            "Imported in: <span class=\"code-path\">{}</span>",
+            importing_file.display()
           ));
           html.push_str("</div>");
         }

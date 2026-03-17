@@ -1,10 +1,11 @@
 use crate::error::Result;
 use crate::git;
+use crate::lockfile;
 use crate::profiler::Profiler;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
-  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, Project,
-  TrueAffectedConfig,
+  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, LockfileStrategy,
+  Project, TrueAffectedConfig,
 };
 use crate::utils;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -69,9 +70,17 @@ fn find_affected_internal(
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
-  // Step 5: Partition changed files into source and non-source
+  // Step 5: Partition changed files into source and non-source (excluding lockfiles)
+  let detected_pm = lockfile::detect_package_manager(&config.cwd);
+  let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
+
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
     .iter()
+    .filter(|f| {
+      lockfile_filename
+        .as_ref()
+        .is_none_or(|name| f.file_path.to_str() != Some(*name))
+    })
     .partition(|f| utils::is_source_file(&f.file_path));
 
   debug!(
@@ -348,6 +357,103 @@ fn find_affected_internal(
         }
         Err(e) => {
           debug!("Error finding references to asset {:?}: {}", asset_path, e);
+        }
+      }
+    }
+  }
+
+  // Step 5c: Process lockfile changes
+  if !matches!(config.lockfile_strategy, LockfileStrategy::None) {
+    if let Some(ref pm) = detected_pm {
+      if lockfile::has_lockfile_changed(&changed_files, pm) {
+        debug!("Lockfile changed, strategy: {:?}", config.lockfile_strategy);
+        match lockfile::find_affected_dependencies(&config.cwd, &config.base, pm) {
+          Ok(affected_deps) if !affected_deps.is_empty() => {
+            debug!("Found {} affected direct dependencies", affected_deps.len());
+
+            let mut lockfile_visited = FxHashSet::default();
+
+            for (file_path, file_imports) in &analyzer.imports {
+              let matching_imports: Vec<_> = file_imports
+                .iter()
+                .filter(|imp| lockfile::is_affected_import(&imp.from_module, &affected_deps))
+                .collect();
+
+              if matching_imports.is_empty() {
+                continue;
+              }
+
+              if let Some(pkg) = utils::get_package_name_by_path(file_path, &config.projects) {
+                affected_packages.insert(pkg.clone());
+                if generate_report {
+                  for imp in &matching_imports {
+                    project_causes.entry(pkg.clone()).or_default().push(
+                      AffectCause::LockfileChange {
+                        dependency: imp.from_module.clone(),
+                        importing_file: file_path.clone(),
+                      },
+                    );
+                  }
+                }
+              }
+
+              if matches!(config.lockfile_strategy, LockfileStrategy::Full) {
+                for imp in &matching_imports {
+                  match analyzer.find_exported_symbols_using(file_path, &imp.local_name) {
+                    Ok(exports) if !exports.is_empty() => {
+                      for export_sym in exports {
+                        let mut state = AffectedState {
+                          affected_packages: &mut affected_packages,
+                          project_causes: if generate_report {
+                            Some(&mut project_causes)
+                          } else {
+                            None
+                          },
+                          visited: &mut lockfile_visited,
+                        };
+                        if let Err(e) = process_changed_symbol(
+                          &analyzer,
+                          &reference_finder,
+                          file_path,
+                          &export_sym,
+                          &config.projects,
+                          &mut state,
+                        ) {
+                          debug!("Error tracing lockfile export '{}': {}", export_sym, e);
+                        }
+                      }
+                    }
+                    Ok(_) => {
+                      let mut state = AffectedState {
+                        affected_packages: &mut affected_packages,
+                        project_causes: if generate_report {
+                          Some(&mut project_causes)
+                        } else {
+                          None
+                        },
+                        visited: &mut lockfile_visited,
+                      };
+                      if let Err(e) = process_changed_symbol(
+                        &analyzer,
+                        &reference_finder,
+                        file_path,
+                        &imp.local_name,
+                        &config.projects,
+                        &mut state,
+                      ) {
+                        debug!("Error tracing lockfile import '{}': {}", imp.local_name, e);
+                      }
+                    }
+                    Err(e) => {
+                      debug!("Error finding exports using '{}': {}", imp.local_name, e);
+                    }
+                  }
+                }
+              }
+            }
+          }
+          Ok(_) => debug!("Lockfile changed but no dependency versions differ"),
+          Err(e) => debug!("Lockfile analysis failed, skipping: {}", e),
         }
       }
     }

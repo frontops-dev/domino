@@ -1,6 +1,6 @@
 use domino::core::find_affected;
 use domino::profiler::Profiler;
-use domino::types::{Project, TrueAffectedConfig};
+use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -162,6 +162,7 @@ impl TestBranch {
       ],
       include: vec![],
       ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
     };
 
     // Create a profiler (disabled for tests)
@@ -367,6 +368,7 @@ export function anotherFn() {
     ],
     include: vec![],
     ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1779,6 +1781,7 @@ export function main() {
     ],
     include: vec![],
     ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1885,6 +1888,7 @@ export function main() {
     ],
     include: vec![],
     ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2010,6 +2014,7 @@ export function main() {
     ],
     include: vec![],
     ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2139,6 +2144,7 @@ export function run() {
     ],
     include: vec![],
     ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2153,6 +2159,390 @@ export function run() {
   assert!(
     affected.contains(&"my-app".to_string()),
     "my-app should be affected (imports via tsconfig path alias @scope/my-lib that differs from project name my-lib). Got: {:?}",
+    affected
+  );
+}
+
+// ===========================================================================
+// Lockfile change detection integration tests
+// ===========================================================================
+
+fn setup_lockfile_test_repo() -> (TempDir, PathBuf) {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // Create project structure:
+  //   proj-a/src/index.ts  - imports from "lib-a"
+  //   proj-b/src/index.ts  - imports from proj-a (re-export of lib-a usage)
+  //   proj-c/src/index.ts  - no lib-a dependency
+  let proj_a_src = root.join("proj-a/src");
+  let proj_b_src = root.join("proj-b/src");
+  let proj_c_src = root.join("proj-c/src");
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  // proj-a: imports from the external package "lib-a"
+  fs::write(
+    proj_a_src.join("index.ts"),
+    r#"import { helper } from 'lib-a';
+
+export function useHelper() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-b: imports from proj-a (re-exports helper usage)
+  fs::write(
+    proj_b_src.join("index.ts"),
+    r#"import { useHelper } from '../../proj-a/src/index';
+
+export function main() {
+  return useHelper();
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-c: standalone, no lib-a dependency
+  fs::write(
+    proj_c_src.join("index.ts"),
+    r#"export function standalone() {
+  return 'no deps';
+}
+"#,
+  )
+  .unwrap();
+
+  // Root package.json
+  fs::write(
+    root.join("package.json"),
+    r#"{"dependencies": {"lib-a": "^1.0.0"}}"#,
+  )
+  .unwrap();
+
+  // Initial package-lock.json with lib-a@1.0.0
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "dependencies": { "lib-a": "^1.0.0" }
+    },
+    "node_modules/lib-a": {
+      "version": "1.0.0",
+      "dependencies": { "lib-nested": "^1.0.0" }
+    },
+    "node_modules/lib-nested": {
+      "version": "1.0.0"
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  // Init git repo
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  (tmp, root)
+}
+
+fn lockfile_projects() -> Vec<Project> {
+  vec![
+    Project {
+      name: "proj-a".to_string(),
+      source_root: PathBuf::from("proj-a"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    },
+    Project {
+      name: "proj-b".to_string(),
+      source_root: PathBuf::from("proj-b"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    },
+    Project {
+      name: "proj-c".to_string(),
+      source_root: PathBuf::from("proj-c"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    },
+  ]
+}
+
+#[test]
+fn test_lockfile_direct_strategy_detects_importing_project() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  // Create feature branch and bump lib-a version in lockfile
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "dependencies": { "lib-a": "^1.0.0" }
+    },
+    "node_modules/lib-a": {
+      "version": "2.0.0",
+      "dependencies": { "lib-nested": "^1.0.0" }
+    },
+    "node_modules/lib-nested": {
+      "version": "1.0.0"
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (imports lib-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c should NOT be affected (no lib-a dependency). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_lockfile_full_strategy_traces_reference_chain() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "dependencies": { "lib-a": "^1.0.0" }
+    },
+    "node_modules/lib-a": {
+      "version": "2.0.0",
+      "dependencies": { "lib-nested": "^1.0.0" }
+    },
+    "node_modules/lib-nested": {
+      "version": "1.0.0"
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Full,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (imports lib-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj-b".to_string()),
+    "proj-b should be affected (imports from proj-a which uses lib-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c should NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_lockfile_none_strategy_ignores_lockfile_changes() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "dependencies": { "lib-a": "^1.0.0" }
+    },
+    "node_modules/lib-a": {
+      "version": "2.0.0",
+      "dependencies": { "lib-nested": "^1.0.0" }
+    },
+    "node_modules/lib-nested": {
+      "version": "1.0.0"
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.is_empty(),
+    "No projects should be affected with LockfileStrategy::None. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_lockfile_transitive_dep_change_resolves_to_direct() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  // Only bump the nested dep (lib-nested), not lib-a itself
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "dependencies": { "lib-a": "^1.0.0" }
+    },
+    "node_modules/lib-a": {
+      "version": "1.0.0",
+      "dependencies": { "lib-nested": "^1.0.0" }
+    },
+    "node_modules/lib-nested": {
+      "version": "2.0.0"
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-nested"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (transitive dep lib-nested changed -> resolves to lib-a). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_lockfile_no_change_zero_impact() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  // Only change a source file, not the lockfile
+  fs::write(
+    root.join("proj-c/src/index.ts"),
+    r#"export function standalone() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify proj-c"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-c".to_string()),
+    "proj-c should be affected (source changed). Got: {:?}",
+    affected
+  );
+  assert_eq!(
+    affected.len(),
+    1,
+    "Only proj-c should be affected. Got: {:?}",
     affected
   );
 }

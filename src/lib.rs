@@ -4,6 +4,7 @@ pub mod cli;
 pub mod core;
 pub mod error;
 pub mod git;
+pub mod lockfile;
 pub mod profiler;
 pub mod report;
 pub mod semantic;
@@ -66,6 +67,8 @@ mod napi_bindings {
     pub include: Option<Vec<String>>,
     pub ignored_paths: Option<Vec<String>>,
     pub enable_profiling: Option<bool>,
+    /// Lockfile change detection strategy: "none", "direct", "full" (default: "direct")
+    pub lockfile_strategy: Option<String>,
   }
 
   #[napi(object)]
@@ -81,6 +84,12 @@ mod napi_bindings {
 
     let profiler = Arc::new(Profiler::new(options.enable_profiling.unwrap_or(false)));
 
+    let lockfile_strategy = options
+      .lockfile_strategy
+      .as_deref()
+      .map(|s| s.parse().unwrap_or_default())
+      .unwrap_or_default();
+
     let config = TrueAffectedConfig {
       cwd,
       base: options.base,
@@ -88,6 +97,7 @@ mod napi_bindings {
       projects,
       include: options.include.unwrap_or_default(),
       ignored_paths: options.ignored_paths.unwrap_or_default(),
+      lockfile_strategy,
     };
 
     let result =

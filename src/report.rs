@@ -853,13 +853,8 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
         AffectCause::AssetChange { .. } => {
           direct_changes.insert(project.name.clone());
         }
-        AffectCause::LockfileChange { dependency, .. } => {
-          relationships
-            .entry(dependency.clone())
-            .or_default()
-            .entry(project.name.clone())
-            .or_default()
-            .push("lockfile".to_string());
+        AffectCause::LockfileChange { .. } => {
+          direct_changes.insert(project.name.clone());
         }
       }
     }

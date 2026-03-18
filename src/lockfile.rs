@@ -222,6 +222,9 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
 /// Maximum nesting depth for npm v1 lockfile recursive `dependencies` objects.
 const NPM_V1_MAX_DEPTH: usize = 64;
 
+/// npm v1 uses bare package names as keys, so nested instances of the same
+/// package at different versions are last-write-wins. This is acceptable for
+/// the legacy format; per-path tracking would require a different data model.
 fn parse_npm_v1_deps(
   deps: &serde_json::Map<String, serde_json::Value>,
   packages: &mut FxHashMap<String, PackageInfo>,
@@ -343,12 +346,21 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
 fn parse_pnpm_package_key(key: &str) -> (String, String) {
   let key = key.strip_prefix('/').unwrap_or(key);
 
-  if let Some(at_pos) = key.rfind('@') {
+  // Strip pnpm v6+ parenthesized peer-dep suffix: "foo@1.0.0(bar@2.0.0)" → "foo@1.0.0"
+  let key = key.split('(').next().unwrap_or(key);
+
+  // For scoped packages "@scope/pkg@1.0.0", skip past the leading '@'.
+  let search_start = if key.starts_with('@') { 1 } else { 0 };
+
+  if let Some(rel_pos) = key[search_start..].find('@') {
+    let at_pos = search_start + rel_pos;
     if at_pos == 0 {
       return (key.to_string(), String::new());
     }
     let name = &key[..at_pos];
-    let version = &key[at_pos + 1..];
+    // Strip pnpm v5 underscore peer-dep suffix: "1.0.0_react@16.0.0" → "1.0.0"
+    let version_raw = &key[at_pos + 1..];
+    let version = version_raw.split('_').next().unwrap_or(version_raw);
     (name.to_string(), version.to_string())
   } else {
     (key.to_string(), String::new())
@@ -471,19 +483,11 @@ fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageI
   Ok(packages)
 }
 
-/// Convert a serde_yaml::Value to a trimmed string, handling numeric coercion.
+/// Convert a serde_yaml::Value to a trimmed string, preserving the original
+/// representation (e.g. `version: 1.0` stays `"1.0"`, not `"1"`).
 fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
   match v {
     serde_yaml::Value::String(s) => s.clone(),
-    serde_yaml::Value::Number(n) => {
-      if let Some(i) = n.as_i64() {
-        i.to_string()
-      } else if let Some(f) = n.as_f64() {
-        format!("{f}")
-      } else {
-        String::new()
-      }
-    }
     serde_yaml::Value::Bool(b) => b.to_string(),
     _ => serde_yaml::to_string(v)
       .unwrap_or_default()
@@ -719,7 +723,7 @@ pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, Vec<&str>
   reverse
 }
 
-/// Starting from `changed_packages`, walk the `reverse_graph` upward via BFS
+/// Starting from `changed_packages`, walk the `reverse_graph` upward
 /// until every changed transitive dependency is resolved to a `direct_dep`.
 /// Returns only the direct dependency names that are reachable.
 pub fn resolve_to_direct_deps(
@@ -1236,6 +1240,27 @@ packages:
     assert_eq!(version, "1.0.0");
   }
 
+  #[test]
+  fn test_parse_pnpm_peer_dep_suffix_parens() {
+    let (name, version) = parse_pnpm_package_key("foo@1.0.0(bar@2.0.0)");
+    assert_eq!(name, "foo");
+    assert_eq!(version, "1.0.0");
+  }
+
+  #[test]
+  fn test_parse_pnpm_peer_dep_suffix_underscore() {
+    let (name, version) = parse_pnpm_package_key("foo@1.0.0_react@16.0.0");
+    assert_eq!(name, "foo");
+    assert_eq!(version, "1.0.0");
+  }
+
+  #[test]
+  fn test_parse_pnpm_scoped_with_peer_suffix() {
+    let (name, version) = parse_pnpm_package_key("@scope/pkg@3.2.1(peer@1.0.0)");
+    assert_eq!(name, "@scope/pkg");
+    assert_eq!(version, "3.2.1");
+  }
+
   // --- pnpm error cases ---
 
   #[test]
@@ -1426,6 +1451,13 @@ lib-a@^1.0.0:
     let data = parse_yarn_lockfile(content, None).unwrap();
     assert_eq!(data.packages["simple-pkg"].version, "1.0.0");
     assert!(data.packages["simple-pkg"].dependencies.is_empty());
+  }
+
+  #[test]
+  fn test_yaml_value_float_preserved() {
+    let val: serde_yaml::Value = serde_yaml::from_str("1.0").unwrap();
+    let s = yaml_value_to_string(&val);
+    assert_eq!(s, "1.0");
   }
 
   #[test]

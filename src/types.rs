@@ -6,6 +6,7 @@ use std::str::FromStr;
 /// Lockfile change detection strategy
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LockfileStrategy {
   /// Lockfile changes are ignored entirely
   None,

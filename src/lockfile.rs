@@ -102,8 +102,8 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
 /// lockfile).  Real failures (git execution errors, size limit exceeded) are
 /// returned as `Err` so callers can distinguish "missing" from "broken".
 ///
-/// Uses a single `git cat-file -p` invocation and enforces `MAX_LOCKFILE_BYTES`
-/// on the output size to prevent OOM.
+/// Uses `cat-file -s` to enforce `MAX_LOCKFILE_BYTES` *before* materializing
+/// the content, then `cat-file -p` to read it.
 pub(crate) fn get_file_from_revision(
   repo_path: &Path,
   revision: &str,
@@ -111,23 +111,50 @@ pub(crate) fn get_file_from_revision(
 ) -> Result<Option<String>> {
   let revision_path = format!("{}:{}", revision, file_path);
 
+  // Phase 1: check size without buffering content.
+  let size_output = Command::new("git")
+    .args(["cat-file", "-s", &revision_path])
+    .current_dir(repo_path)
+    .output()
+    .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file -s: {}", e)))?;
+
+  if !size_output.status.success() {
+    let stderr = String::from_utf8_lossy(&size_output.stderr);
+    if stderr.contains("Not a valid object name")
+      || stderr.contains("does not exist")
+      || stderr.contains("bad file")
+    {
+      return Ok(None);
+    }
+    return Err(DominoError::Other(format!(
+      "git cat-file -s failed for '{}': {}",
+      revision_path,
+      stderr.trim()
+    )));
+  }
+
+  if let Ok(size_str) = std::str::from_utf8(&size_output.stdout) {
+    if let Ok(size) = size_str.trim().parse::<u64>() {
+      if size > MAX_LOCKFILE_BYTES {
+        return Err(DominoError::Other(format!(
+          "Git object '{}' exceeds {} MB size limit ({} bytes)",
+          revision_path,
+          MAX_LOCKFILE_BYTES / (1024 * 1024),
+          size,
+        )));
+      }
+    }
+  }
+
+  // Phase 2: read content (size already validated).
   let output = Command::new("git")
     .args(["cat-file", "-p", &revision_path])
     .current_dir(repo_path)
     .output()
-    .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file: {}", e)))?;
+    .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file -p: {}", e)))?;
 
   if !output.status.success() {
     return Ok(None);
-  }
-
-  if output.stdout.len() as u64 > MAX_LOCKFILE_BYTES {
-    return Err(DominoError::Other(format!(
-      "Git object '{}' exceeds {} MB size limit ({} bytes)",
-      revision_path,
-      MAX_LOCKFILE_BYTES / (1024 * 1024),
-      output.stdout.len(),
-    )));
   }
 
   String::from_utf8(output.stdout)
@@ -889,7 +916,7 @@ pub fn find_affected_dependencies(
   };
 
   let base_pkg_jsons = if *pm == PackageManager::Yarn {
-    collect_base_workspace_pkg_jsons(cwd, merge_base)
+    collect_base_workspace_pkg_jsons(cwd, merge_base)?
   } else {
     vec![]
   };
@@ -974,22 +1001,22 @@ fn collect_workspace_pkg_jsons(cwd: &Path) -> Vec<String> {
 ///
 /// Uses `git ls-tree` to enumerate files at the base revision so that workspaces
 /// deleted in the current branch are still discovered from the base tree.
-fn collect_base_workspace_pkg_jsons(cwd: &Path, merge_base: &str) -> Vec<String> {
+fn collect_base_workspace_pkg_jsons(cwd: &Path, merge_base: &str) -> Result<Vec<String>> {
   let mut result = Vec::new();
 
-  let root_pkg = match get_file_from_revision(cwd, merge_base, "package.json") {
-    Ok(Some(content)) => content,
-    _ => return result,
+  let root_pkg = match get_file_from_revision(cwd, merge_base, "package.json")? {
+    Some(content) => content,
+    None => return Ok(result),
   };
 
   let workspace_patterns = extract_workspace_patterns(&root_pkg);
   result.push(root_pkg);
 
   if workspace_patterns.is_empty() {
-    return result;
+    return Ok(result);
   }
 
-  let base_pkg_jsons = list_package_jsons_at_revision(cwd, merge_base);
+  let base_pkg_jsons = list_package_jsons_at_revision(cwd, merge_base)?;
 
   for pkg_path in &base_pkg_jsons {
     if let Some(parent) = std::path::Path::new(pkg_path).parent() {
@@ -1005,31 +1032,34 @@ fn collect_base_workspace_pkg_jsons(cwd: &Path, merge_base: &str) -> Vec<String>
     }
   }
 
-  result
+  Ok(result)
 }
 
 /// List all `**/package.json` paths at a git revision via `git ls-tree`.
-fn list_package_jsons_at_revision(cwd: &Path, revision: &str) -> Vec<String> {
+///
+/// Git pathspecs don't support shell-style globbing, so we list all files
+/// and filter for `package.json` in Rust.
+fn list_package_jsons_at_revision(cwd: &Path, revision: &str) -> Result<Vec<String>> {
   let output = Command::new("git")
-    .args([
-      "ls-tree",
-      "-r",
-      "--name-only",
-      revision,
-      "--",
-      "*/package.json",
-    ])
+    .args(["ls-tree", "-r", "--name-only", revision])
     .current_dir(cwd)
-    .output();
+    .output()
+    .map_err(|e| DominoError::Other(format!("Failed to execute git ls-tree: {}", e)))?;
 
-  match output {
-    Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+  if !output.status.success() {
+    return Err(DominoError::Other(format!(
+      "git ls-tree failed for '{}'",
+      revision
+    )));
+  }
+
+  Ok(
+    String::from_utf8_lossy(&output.stdout)
       .lines()
-      .filter(|line| !line.contains("node_modules/"))
+      .filter(|line| line.ends_with("/package.json") && !line.contains("node_modules/"))
       .map(|s| s.to_string())
       .collect(),
-    _ => vec![],
-  }
+  )
 }
 
 /// Simple glob matching for workspace patterns against directory paths.

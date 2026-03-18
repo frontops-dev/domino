@@ -98,51 +98,41 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
 
 /// Read a file at `file_path` from the given git revision.
 ///
-/// Enforces `MAX_LOCKFILE_BYTES` on the git object size before materializing
-/// the content, preventing OOM when a base-revision lockfile is very large.
+/// Returns `Ok(None)` when the object does not exist at the revision (e.g. new
+/// lockfile).  Real failures (git execution errors, size limit exceeded) are
+/// returned as `Err` so callers can distinguish "missing" from "broken".
+///
+/// Uses a single `git cat-file -p` invocation and enforces `MAX_LOCKFILE_BYTES`
+/// on the output size to prevent OOM.
 pub(crate) fn get_file_from_revision(
   repo_path: &Path,
   revision: &str,
   file_path: &str,
-) -> Result<String> {
+) -> Result<Option<String>> {
   let revision_path = format!("{}:{}", revision, file_path);
 
-  // Check object size before buffering the full content.
-  let size_output = Command::new("git")
-    .args(["cat-file", "-s", &revision_path])
-    .current_dir(repo_path)
-    .output()
-    .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file -s: {}", e)))?;
-
-  if size_output.status.success() {
-    if let Ok(size_str) = std::str::from_utf8(&size_output.stdout) {
-      if let Ok(size) = size_str.trim().parse::<u64>() {
-        if size > MAX_LOCKFILE_BYTES {
-          return Err(DominoError::Other(format!(
-            "Git object '{}' exceeds {} MB size limit ({} bytes)",
-            revision_path,
-            MAX_LOCKFILE_BYTES / (1024 * 1024),
-            size,
-          )));
-        }
-      }
-    }
-  }
-
   let output = Command::new("git")
-    .args(["show", &revision_path])
+    .args(["cat-file", "-p", &revision_path])
     .current_dir(repo_path)
     .output()
-    .map_err(|e| DominoError::Other(format!("Failed to execute git show: {}", e)))?;
+    .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file: {}", e)))?;
 
   if !output.status.success() {
+    return Ok(None);
+  }
+
+  if output.stdout.len() as u64 > MAX_LOCKFILE_BYTES {
     return Err(DominoError::Other(format!(
-      "git show failed for '{}'",
+      "Git object '{}' exceeds {} MB size limit ({} bytes)",
       revision_path,
+      MAX_LOCKFILE_BYTES / (1024 * 1024),
+      output.stdout.len(),
     )));
   }
 
-  Ok(String::from_utf8_lossy(&output.stdout).to_string())
+  String::from_utf8(output.stdout)
+    .map(Some)
+    .map_err(|e| DominoError::Other(format!("Invalid UTF-8 in '{}': {}", revision_path, e)))
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +178,8 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
 
   if lockfile_version >= 2 {
     if let Some(pkgs) = parsed.get("packages").and_then(|v| v.as_object()) {
+      packages.reserve(pkgs.len());
+
       if let Some(root) = pkgs.get("") {
         for key in ["dependencies", "devDependencies", "optionalDependencies"] {
           if let Some(deps) = root.get(key).and_then(|v| v.as_object()) {
@@ -205,7 +197,7 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
         // Use full path as key (e.g. "node_modules/debug/node_modules/ms")
         // to avoid different instances of the same package overwriting each other.
         // Package names are extracted from keys downstream when needed.
-        if extract_npm_package_name(key).is_empty() {
+        if package_name_from_key(key).is_empty() {
           continue;
         }
 
@@ -289,10 +281,6 @@ fn parse_npm_v1_deps(
   }
 }
 
-fn extract_npm_package_name(key: &str) -> String {
-  package_name_from_key(key).to_string()
-}
-
 /// Extract the bare package name from a packages-map key.
 /// For npm v3 keys like `"node_modules/debug/node_modules/ms"` returns `"ms"`.
 /// For other formats where the key IS the name, returns it unchanged.
@@ -340,15 +328,22 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
   let mut direct_dependencies = FxHashSet::default();
   let mut packages = FxHashMap::default();
 
+  let yaml_dep_keys: Vec<serde_yaml::Value> =
+    ["dependencies", "devDependencies", "optionalDependencies"]
+      .iter()
+      .map(|k| serde_yaml::Value::String((*k).to_string()))
+      .collect();
+  let yaml_pkg_dep_keys: Vec<serde_yaml::Value> = ["dependencies", "optionalDependencies"]
+    .iter()
+    .map(|k| serde_yaml::Value::String((*k).to_string()))
+    .collect();
+
   // Collect direct deps from ALL importers (root + workspace packages)
   if let Some(importers) = parsed.get("importers").and_then(|v| v.as_mapping()) {
     for (_importer_key, importer_val) in importers {
       if let Some(importer_map) = importer_val.as_mapping() {
-        for key in ["dependencies", "devDependencies", "optionalDependencies"] {
-          if let Some(deps) = importer_map
-            .get(serde_yaml::Value::String(key.to_string()))
-            .and_then(|v| v.as_mapping())
-          {
+        for dep_key in &yaml_dep_keys {
+          if let Some(deps) = importer_map.get(dep_key).and_then(|v| v.as_mapping()) {
             for (dep_name, _) in deps {
               if let Some(name) = dep_name.as_str() {
                 direct_dependencies.insert(name.to_string());
@@ -361,6 +356,7 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
   }
 
   if let Some(pkgs) = parsed.get("packages").and_then(|v| v.as_mapping()) {
+    packages.reserve(pkgs.len());
     for (key, val) in pkgs {
       if let Some(key_str) = key.as_str() {
         let (pkg_name, version) = parse_pnpm_package_key(key_str);
@@ -369,11 +365,8 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
         }
 
         let mut deps = FxHashMap::default();
-        for dep_key in ["dependencies", "optionalDependencies"] {
-          if let Some(d) = val
-            .get(serde_yaml::Value::String(dep_key.to_string()))
-            .and_then(|v| v.as_mapping())
-          {
+        for dep_key in &yaml_pkg_dep_keys {
+          if let Some(d) = val.get(dep_key).and_then(|v| v.as_mapping()) {
             for (name, ver) in d {
               if let (Some(n), Some(v)) = (name.as_str(), ver.as_str()) {
                 deps.insert(n.to_string(), v.to_string());
@@ -481,6 +474,13 @@ fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageI
     None => return Ok(packages),
   };
 
+  let yaml_version_key = serde_yaml::Value::String("version".to_string());
+  let yaml_berry_dep_keys: Vec<serde_yaml::Value> =
+    ["dependencies", "optionalDependencies", "peerDependencies"]
+      .iter()
+      .map(|k| serde_yaml::Value::String((*k).to_string()))
+      .collect();
+
   for (key, val) in mapping {
     let key_str = match key.as_str() {
       Some(s) => s,
@@ -502,19 +502,14 @@ fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageI
       None => continue,
     };
 
-    // serde_yaml may parse "3.3.1" as a string, but "1.0" as a float — stringify all forms.
-    let version_key = serde_yaml::Value::String("version".to_string());
     let version_str = entry
-      .get(&version_key)
+      .get(&yaml_version_key)
       .map(yaml_value_to_string)
       .unwrap_or_default();
 
     let mut deps = FxHashMap::default();
-    for dep_key in ["dependencies", "optionalDependencies", "peerDependencies"] {
-      if let Some(d) = entry
-        .get(serde_yaml::Value::String(dep_key.to_string()))
-        .and_then(|v| v.as_mapping())
-      {
+    for dep_key in &yaml_berry_dep_keys {
+      if let Some(d) = entry.get(dep_key).and_then(|v| v.as_mapping()) {
         for (name, ver) in d {
           if let Some(n) = name.as_str() {
             let v = yaml_value_to_string(ver);
@@ -556,13 +551,9 @@ fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
 /// Extract the package name from a Yarn Berry entry key.
 /// Keys look like `"image-lib@npm:^2.6.0"` or `"@scope/pkg@npm:^1.0.0"`
 /// or multi-specifier `"pkg@npm:^1.0.0, pkg@npm:^2.0.0"`.
-fn extract_yarn_berry_name(key: &str) -> String {
-  // Take the first specifier (before any comma)
+fn extract_yarn_berry_name(key: &str) -> &str {
   let first = key.split(',').next().unwrap_or(key).trim();
 
-  // Find the `@npm:` or `@workspace:` protocol separator
-  // For scoped packages like "@scope/pkg@npm:^1.0.0", we need the LAST `@`
-  // that's followed by a protocol (npm:, workspace:, patch:, etc.)
   if let Some(pos) = first
     .rfind("@npm:")
     .or_else(|| first.rfind("@workspace:"))
@@ -571,17 +562,16 @@ fn extract_yarn_berry_name(key: &str) -> String {
     .or_else(|| first.rfind("@link:"))
     .or_else(|| first.rfind("@portal:"))
   {
-    return first[..pos].to_string();
+    return &first[..pos];
   }
 
-  // Fallback: find the last '@' that isn't at position 0 (scoped package prefix)
   if let Some(at_pos) = first.rfind('@') {
     if at_pos > 0 {
-      return first[..at_pos].to_string();
+      return &first[..at_pos];
     }
   }
 
-  first.to_string()
+  first
 }
 
 /// Parse Yarn Classic (v1) lockfile using the text-based state machine.
@@ -690,14 +680,13 @@ fn parse_yarn_classic_dep_line(line: &str) -> Option<(String, String)> {
     return Some((name.to_string(), version.to_string()));
   }
 
-  let parts: Vec<&str> = line.splitn(2, ' ').collect();
-  if parts.len() == 2 {
-    Some((
-      parts[0].trim_matches('"').to_string(),
-      parts[1].trim_matches('"').to_string(),
-    ))
-  } else {
-    None
+  let mut parts = line.splitn(2, ' ');
+  match (parts.next(), parts.next()) {
+    (Some(name), Some(version)) => Some((
+      name.trim_matches('"').to_string(),
+      version.trim_matches('"').to_string(),
+    )),
+    _ => None,
   }
 }
 
@@ -723,6 +712,7 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
   }
 
   if let Some(pkgs) = parsed.get("packages").and_then(|v| v.as_object()) {
+    packages.reserve(pkgs.len());
     for (key, val) in pkgs {
       if let Some(arr) = val.as_array() {
         let version = arr
@@ -766,8 +756,9 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
 /// Build a reverse dependency graph: for each package `P`, stores all packages
 /// that list `P` as a dependency.  Uses bare package names (not full paths) so
 /// the graph is consistent regardless of lockfile format.
-pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, Vec<&str>> {
-  let mut reverse: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, FxHashSet<&str>> {
+  let mut reverse: FxHashMap<&str, FxHashSet<&str>> =
+    FxHashMap::with_capacity_and_hasher(data.packages.len(), Default::default());
 
   for (pkg_key, info) in &data.packages {
     let parent_name = package_name_from_key(pkg_key);
@@ -775,7 +766,7 @@ pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, Vec<&str>
       reverse
         .entry(dep_name.as_str())
         .or_default()
-        .push(parent_name);
+        .insert(parent_name);
     }
   }
 
@@ -787,7 +778,7 @@ pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, Vec<&str>
 /// Returns only the direct dependency names that are reachable.
 pub fn resolve_to_direct_deps(
   changed_packages: &FxHashSet<String>,
-  reverse_graph: &FxHashMap<&str, Vec<&str>>,
+  reverse_graph: &FxHashMap<&str, FxHashSet<&str>>,
   direct_deps: &FxHashSet<String>,
 ) -> FxHashSet<String> {
   let mut result = FxHashSet::default();
@@ -905,13 +896,10 @@ pub fn find_affected_dependencies(
 
   let current_data = parse_lockfile(&current_content, pm, &current_pkg_jsons)?;
 
-  // When the base lockfile doesn't exist (first commit, new lockfile), use an
-  // empty baseline instead of trying to parse a synthetic placeholder string
-  // that may not be valid for the target format (e.g. pnpm expects YAML).
-  let previous_data = match get_file_from_revision(cwd, merge_base, name) {
-    Ok(content) => parse_lockfile(&content, pm, &base_pkg_jsons)?,
-    Err(_) => {
-      debug!("Could not read base lockfile, treating all packages as new");
+  let previous_data = match get_file_from_revision(cwd, merge_base, name)? {
+    Some(content) => parse_lockfile(&content, pm, &base_pkg_jsons)?,
+    None => {
+      debug!("Base lockfile does not exist at merge-base, treating all packages as new");
       LockfileData::empty()
     }
   };
@@ -923,21 +911,26 @@ pub fn find_affected_dependencies(
     return Ok(FxHashSet::default());
   }
 
-  // Resolve against the union of current and previous data so that removed
-  // deps (absent from current) still map back to their prior importers.
-  let mut merged_direct_deps = current_data.direct_dependencies.clone();
-  merged_direct_deps.extend(previous_data.direct_dependencies.iter().cloned());
-
   let current_reverse = build_reverse_dep_graph(&current_data);
   let previous_reverse = build_reverse_dep_graph(&previous_data);
 
-  // Merge reverse graphs: for each key in either graph, union the parent lists.
-  let mut merged_reverse: FxHashMap<&str, Vec<&str>> = current_reverse;
+  // Merge reverse graphs so removed deps (absent from current) still resolve.
+  let mut merged_reverse: FxHashMap<&str, FxHashSet<&str>> = current_reverse;
   for (pkg, parents) in &previous_reverse {
-    merged_reverse
-      .entry(pkg)
-      .or_default()
-      .extend(parents.iter());
+    merged_reverse.entry(pkg).or_default().extend(parents);
+  }
+
+  // Check membership against both sets without cloning either.
+  let mut merged_direct_deps = FxHashSet::with_capacity_and_hasher(
+    current_data.direct_dependencies.len() + previous_data.direct_dependencies.len(),
+    Default::default(),
+  );
+  for d in current_data
+    .direct_dependencies
+    .iter()
+    .chain(previous_data.direct_dependencies.iter())
+  {
+    merged_direct_deps.insert(d.clone());
   }
 
   let affected_direct =
@@ -948,19 +941,27 @@ pub fn find_affected_dependencies(
   Ok(affected_direct)
 }
 
+/// Maximum package.json size we will load (10 MB).
+const MAX_PKG_JSON_BYTES: u64 = 10 * 1024 * 1024;
+
+fn read_if_small(path: &Path) -> Option<String> {
+  let meta = fs::metadata(path).ok()?;
+  if meta.len() > MAX_PKG_JSON_BYTES {
+    return None;
+  }
+  fs::read_to_string(path).ok()
+}
+
 /// Collect package.json contents from root + workspace packages on disk.
 fn collect_workspace_pkg_jsons(cwd: &Path) -> Vec<String> {
   let mut result = Vec::new();
 
-  // Always read root package.json
-  if let Ok(content) = fs::read_to_string(cwd.join("package.json")) {
-    // Also discover workspace globs from root package.json
+  if let Some(content) = read_if_small(&cwd.join("package.json")) {
     let workspace_dirs = extract_workspace_globs(&content, cwd);
     result.push(content);
 
     for dir in workspace_dirs {
-      let pkg_path = dir.join("package.json");
-      if let Ok(pkg_content) = fs::read_to_string(&pkg_path) {
+      if let Some(pkg_content) = read_if_small(&dir.join("package.json")) {
         result.push(pkg_content);
       }
     }
@@ -970,22 +971,92 @@ fn collect_workspace_pkg_jsons(cwd: &Path) -> Vec<String> {
 }
 
 /// Collect package.json contents from root + workspace packages at a git revision.
+///
+/// Uses `git ls-tree` to enumerate files at the base revision so that workspaces
+/// deleted in the current branch are still discovered from the base tree.
 fn collect_base_workspace_pkg_jsons(cwd: &Path, merge_base: &str) -> Vec<String> {
   let mut result = Vec::new();
 
-  if let Ok(root_pkg) = get_file_from_revision(cwd, merge_base, "package.json") {
-    let workspace_dirs = extract_workspace_globs(&root_pkg, cwd);
-    result.push(root_pkg);
+  let root_pkg = match get_file_from_revision(cwd, merge_base, "package.json") {
+    Ok(Some(content)) => content,
+    _ => return result,
+  };
 
-    for dir in workspace_dirs {
-      let rel = dir.strip_prefix(cwd).unwrap_or(&dir).join("package.json");
-      if let Ok(content) = get_file_from_revision(cwd, merge_base, &rel.to_string_lossy()) {
-        result.push(content);
+  let workspace_patterns = extract_workspace_patterns(&root_pkg);
+  result.push(root_pkg);
+
+  if workspace_patterns.is_empty() {
+    return result;
+  }
+
+  let base_pkg_jsons = list_package_jsons_at_revision(cwd, merge_base);
+
+  for pkg_path in &base_pkg_jsons {
+    if let Some(parent) = std::path::Path::new(pkg_path).parent() {
+      let parent_str = parent.to_string_lossy();
+      if workspace_patterns
+        .iter()
+        .any(|pat| glob_match(pat, &parent_str))
+      {
+        if let Ok(Some(content)) = get_file_from_revision(cwd, merge_base, pkg_path) {
+          result.push(content);
+        }
       }
     }
   }
 
   result
+}
+
+/// List all `**/package.json` paths at a git revision via `git ls-tree`.
+fn list_package_jsons_at_revision(cwd: &Path, revision: &str) -> Vec<String> {
+  let output = Command::new("git")
+    .args([
+      "ls-tree",
+      "-r",
+      "--name-only",
+      revision,
+      "--",
+      "*/package.json",
+    ])
+    .current_dir(cwd)
+    .output();
+
+  match output {
+    Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+      .lines()
+      .filter(|line| !line.contains("node_modules/"))
+      .map(|s| s.to_string())
+      .collect(),
+    _ => vec![],
+  }
+}
+
+/// Simple glob matching for workspace patterns against directory paths.
+fn glob_match(pattern: &str, path: &str) -> bool {
+  glob::Pattern::new(pattern)
+    .map(|p| p.matches(path))
+    .unwrap_or(false)
+}
+
+/// Extract raw workspace glob patterns from package.json (without filesystem expansion).
+fn extract_workspace_patterns(pkg_json: &str) -> Vec<String> {
+  let parsed: serde_json::Value = match serde_json::from_str(pkg_json) {
+    Ok(v) => v,
+    Err(_) => return vec![],
+  };
+
+  parsed
+    .get("workspaces")
+    .and_then(|w| {
+      w.as_array()
+        .cloned()
+        .or_else(|| w.get("packages").and_then(|p| p.as_array()).cloned())
+    })
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+    .collect()
 }
 
 /// Parse workspace globs from package.json and expand them to directories.
@@ -1034,18 +1105,25 @@ pub fn match_affected_dependency<'a>(
   if from_module.starts_with('.') || from_module.starts_with('/') {
     return None;
   }
-  for dep in affected_deps {
-    if from_module == dep.as_str() {
-      return Some(dep);
+  // O(1) lookup: extract the bare package name from the import specifier.
+  let pkg_name = bare_package_from_specifier(from_module);
+  affected_deps.get(pkg_name).map(|s| s.as_str())
+}
+
+/// Extract the bare npm package name from an import specifier.
+/// `@scope/pkg/sub/path` → `@scope/pkg`, `lib/utils` → `lib`.
+fn bare_package_from_specifier(specifier: &str) -> &str {
+  if specifier.starts_with('@') {
+    // Scoped: find second '/' (after @scope/pkg)
+    if let Some(first_slash) = specifier.find('/') {
+      if let Some(second_slash) = specifier[first_slash + 1..].find('/') {
+        return &specifier[..first_slash + 1 + second_slash];
+      }
     }
-    if from_module.len() > dep.len()
-      && from_module.starts_with(dep.as_str())
-      && from_module.as_bytes()[dep.len()] == b'/'
-    {
-      return Some(dep);
-    }
+    specifier
+  } else {
+    specifier.split('/').next().unwrap_or(specifier)
   }
-  None
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,7 +1870,7 @@ lib-a@^1.0.0:
   fn test_resolve_transitive_dep() {
     let changed = FxHashSet::from_iter(["lib-nested-1".to_string()]);
     let direct = FxHashSet::from_iter(["lib-a".to_string()]);
-    let graph = FxHashMap::from_iter([("lib-nested-1", vec!["lib-a"])]);
+    let graph = FxHashMap::from_iter([("lib-nested-1", FxHashSet::from_iter(["lib-a"]))]);
 
     let result = resolve_to_direct_deps(&changed, &graph, &direct);
     assert!(result.contains("lib-a"));
@@ -1803,7 +1881,10 @@ lib-a@^1.0.0:
   fn test_resolve_multi_level_transitive() {
     let changed = FxHashSet::from_iter(["deep-lib".to_string()]);
     let direct = FxHashSet::from_iter(["lib-a".to_string()]);
-    let graph = FxHashMap::from_iter([("deep-lib", vec!["mid-lib"]), ("mid-lib", vec!["lib-a"])]);
+    let graph = FxHashMap::from_iter([
+      ("deep-lib", FxHashSet::from_iter(["mid-lib"])),
+      ("mid-lib", FxHashSet::from_iter(["lib-a"])),
+    ]);
 
     let result = resolve_to_direct_deps(&changed, &graph, &direct);
     assert!(result.contains("lib-a"));
@@ -1814,9 +1895,9 @@ lib-a@^1.0.0:
     let changed = FxHashSet::from_iter(["deep-lib".to_string()]);
     let direct = FxHashSet::from_iter(["lib-a".to_string(), "lib-b".to_string()]);
     let graph = FxHashMap::from_iter([
-      ("deep-lib", vec!["mid-a", "mid-b"]),
-      ("mid-a", vec!["lib-a"]),
-      ("mid-b", vec!["lib-b"]),
+      ("deep-lib", FxHashSet::from_iter(["mid-a", "mid-b"])),
+      ("mid-a", FxHashSet::from_iter(["lib-a"])),
+      ("mid-b", FxHashSet::from_iter(["lib-b"])),
     ]);
 
     let result = resolve_to_direct_deps(&changed, &graph, &direct);
@@ -1937,5 +2018,156 @@ lib-a@^1.0.0:
     assert_eq!(match_affected_dependency("./lib-a", &deps), None);
     assert_eq!(match_affected_dependency("lib-ab", &deps), None);
     assert_eq!(match_affected_dependency("/lib-a", &deps), None);
+  }
+
+  // --- package_name_from_key ---
+
+  #[test]
+  fn test_package_name_from_key_npm_v3() {
+    assert_eq!(
+      package_name_from_key("node_modules/debug/node_modules/ms"),
+      "ms"
+    );
+  }
+
+  #[test]
+  fn test_package_name_from_key_npm_v3_scoped() {
+    assert_eq!(
+      package_name_from_key("node_modules/@scope/pkg"),
+      "@scope/pkg"
+    );
+  }
+
+  #[test]
+  fn test_package_name_from_key_pnpm() {
+    assert_eq!(package_name_from_key("/foo@1.0.0"), "foo");
+  }
+
+  #[test]
+  fn test_package_name_from_key_pnpm_scoped() {
+    assert_eq!(package_name_from_key("/@scope/pkg@1.0.0"), "@scope/pkg");
+  }
+
+  #[test]
+  fn test_package_name_from_key_yarn_berry() {
+    assert_eq!(package_name_from_key("image-lib@npm:^2.6.0"), "image-lib");
+  }
+
+  #[test]
+  fn test_package_name_from_key_yarn_classic_quoted() {
+    assert_eq!(package_name_from_key("\"lib-a@^1.0.0\""), "lib-a");
+  }
+
+  #[test]
+  fn test_package_name_from_key_bare() {
+    assert_eq!(package_name_from_key("foo"), "foo");
+  }
+
+  #[test]
+  fn test_package_name_from_key_empty() {
+    assert_eq!(package_name_from_key(""), "");
+  }
+
+  // --- glob_match ---
+
+  #[test]
+  fn test_glob_match_star() {
+    assert!(glob_match("packages/*", "packages/foo"));
+  }
+
+  #[test]
+  fn test_glob_match_globstar() {
+    assert!(glob_match("packages/**", "packages/foo/bar"));
+    assert!(glob_match("packages/**", "packages/foo"));
+  }
+
+  #[test]
+  fn test_glob_match_star_matches_single_segment() {
+    assert!(glob_match("packages/*", "packages/foo"));
+    assert!(glob_match("packages/*", "packages/bar"));
+  }
+
+  #[test]
+  fn test_glob_match_nested() {
+    assert!(glob_match("libs/*/src", "libs/core/src"));
+    assert!(!glob_match("libs/*/src", "libs/core/dist"));
+  }
+
+  #[test]
+  fn test_glob_match_no_match() {
+    assert!(!glob_match("apps/*", "packages/foo"));
+  }
+
+  // --- resolve_to_direct_deps with cyclic graph ---
+
+  #[test]
+  fn test_resolve_cyclic_no_direct_dep() {
+    let changed = FxHashSet::from_iter(["a".to_string()]);
+    let direct = FxHashSet::from_iter(["lib-x".to_string()]);
+    let graph = FxHashMap::from_iter([
+      ("a", FxHashSet::from_iter(["b"])),
+      ("b", FxHashSet::from_iter(["c"])),
+      ("c", FxHashSet::from_iter(["a"])),
+    ]);
+    let result = resolve_to_direct_deps(&changed, &graph, &direct);
+    assert!(result.is_empty());
+  }
+
+  #[test]
+  fn test_resolve_cyclic_with_exit() {
+    let changed = FxHashSet::from_iter(["deep".to_string()]);
+    let direct = FxHashSet::from_iter(["lib-a".to_string()]);
+    let graph = FxHashMap::from_iter([
+      ("deep", FxHashSet::from_iter(["mid"])),
+      ("mid", FxHashSet::from_iter(["deep", "lib-a"])),
+    ]);
+    let result = resolve_to_direct_deps(&changed, &graph, &direct);
+    assert!(result.contains("lib-a"));
+  }
+
+  // --- Yarn Classic optionalDependencies ---
+
+  #[test]
+  fn test_parse_yarn_classic_optional_deps() {
+    let lockfile = r#"# yarn lockfile v1
+
+lib-a@^1.0.0:
+  version "1.0.0"
+  optionalDependencies:
+    fsevents "^2.0.0"
+"#;
+    let packages = parse_yarn_classic_packages(lockfile).unwrap();
+    let entry = packages.values().next().unwrap();
+    assert!(entry.dependencies.contains_key("fsevents"));
+    assert_eq!(entry.dependencies["fsevents"], "^2.0.0");
+  }
+
+  // --- extract_workspace_patterns ---
+
+  #[test]
+  fn test_extract_workspace_patterns_array() {
+    let pkg = r#"{"workspaces": ["packages/*", "libs/*"]}"#;
+    let patterns = extract_workspace_patterns(pkg);
+    assert_eq!(patterns, vec!["packages/*", "libs/*"]);
+  }
+
+  #[test]
+  fn test_extract_workspace_patterns_object() {
+    let pkg = r#"{"workspaces": {"packages": ["libs/*"]}}"#;
+    let patterns = extract_workspace_patterns(pkg);
+    assert_eq!(patterns, vec!["libs/*"]);
+  }
+
+  #[test]
+  fn test_extract_workspace_patterns_missing() {
+    let pkg = r#"{"name": "foo"}"#;
+    let patterns = extract_workspace_patterns(pkg);
+    assert!(patterns.is_empty());
+  }
+
+  #[test]
+  fn test_extract_workspace_patterns_invalid_json() {
+    let patterns = extract_workspace_patterns("not json");
+    assert!(patterns.is_empty());
   }
 }

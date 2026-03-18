@@ -175,8 +175,10 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
         if key.is_empty() {
           continue;
         }
-        let pkg_name = extract_npm_package_name(key);
-        if pkg_name.is_empty() {
+        // Use full path as key (e.g. "node_modules/debug/node_modules/ms")
+        // to avoid different instances of the same package overwriting each other.
+        // Package names are extracted from keys downstream when needed.
+        if extract_npm_package_name(key).is_empty() {
           continue;
         }
 
@@ -196,7 +198,7 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
         }
 
         packages.insert(
-          pkg_name,
+          key.clone(),
           PackageInfo {
             version,
             dependencies: deps,
@@ -258,11 +260,17 @@ fn parse_npm_v1_deps(
 }
 
 fn extract_npm_package_name(key: &str) -> String {
+  package_name_from_key(key).to_string()
+}
+
+/// Extract the bare package name from a packages-map key.
+/// For npm v3 keys like `"node_modules/debug/node_modules/ms"` returns `"ms"`.
+/// For other formats where the key IS the name, returns it unchanged.
+fn package_name_from_key(key: &str) -> &str {
   if let Some(last_nm) = key.rfind("node_modules/") {
-    let after = &key[last_nm + "node_modules/".len()..];
-    after.to_string()
+    &key[last_nm + "node_modules/".len()..]
   } else {
-    key.to_string()
+    key
   }
 }
 
@@ -348,21 +356,176 @@ fn parse_pnpm_package_key(key: &str) -> (String, String) {
 }
 
 fn parse_yarn_lockfile(content: &str, pkg_json_content: Option<&str>) -> Result<LockfileData> {
-  let mut direct_dependencies = FxHashSet::default();
-  let mut packages = FxHashMap::default();
+  let direct_dependencies = extract_direct_deps_from_pkg_json(pkg_json_content);
 
-  // Yarn.lock doesn't track direct deps — they come from package.json.
+  // Yarn Berry (v2+) uses a YAML-based format with `__metadata:` header.
+  // Yarn Classic (v1) uses a custom text format with `# yarn lockfile v1`.
+  let packages = if content.contains("__metadata:") {
+    parse_yarn_berry_packages(content)?
+  } else {
+    parse_yarn_classic_packages(content)?
+  };
+
+  Ok(LockfileData {
+    direct_dependencies,
+    packages,
+  })
+}
+
+/// Extract direct dependencies from package.json content.
+/// Yarn.lock (both Classic and Berry) doesn't embed this info.
+fn extract_direct_deps_from_pkg_json(pkg_json_content: Option<&str>) -> FxHashSet<String> {
+  let mut deps = FxHashSet::default();
   if let Some(pkg_json) = pkg_json_content {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(pkg_json) {
       for key in ["dependencies", "devDependencies"] {
-        if let Some(deps) = parsed.get(key).and_then(|v| v.as_object()) {
-          for dep_name in deps.keys() {
-            direct_dependencies.insert(dep_name.clone());
+        if let Some(d) = parsed.get(key).and_then(|v| v.as_object()) {
+          for dep_name in d.keys() {
+            deps.insert(dep_name.clone());
           }
         }
       }
     }
   }
+  deps
+}
+
+/// Parse Yarn Berry (v2+/v4) lockfile.  Berry uses YAML with entries like:
+/// ```text
+/// "image-lib@npm:^2.6.0":
+///   version: 3.3.1
+///   resolution: "image-lib@npm:3.3.1"
+///   dependencies:
+///     sharp: "npm:^0.33.0"
+///   checksum: 10c0/abc
+///   languageName: node
+///   linkType: hard
+/// ```
+fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageInfo>> {
+  let parsed: serde_yaml::Value = serde_yaml::from_str(content)
+    .map_err(|e| DominoError::Parse(format!("yarn berry lockfile: {}", e)))?;
+
+  let mut packages = FxHashMap::default();
+
+  let mapping = match parsed.as_mapping() {
+    Some(m) => m,
+    None => return Ok(packages),
+  };
+
+  for (key, val) in mapping {
+    let key_str = match key.as_str() {
+      Some(s) => s,
+      None => continue,
+    };
+
+    // Skip __metadata and other non-package entries
+    if key_str == "__metadata" || !key_str.contains('@') {
+      continue;
+    }
+
+    // Extract package name from key like "image-lib@npm:^2.6.0"
+    // or "image-lib@npm:^2.6.0, image-lib@npm:^3.0.0" (multiple specifiers)
+    let pkg_name = extract_yarn_berry_name(key_str);
+    if pkg_name.is_empty() {
+      continue;
+    }
+
+    let entry = match val.as_mapping() {
+      Some(m) => m,
+      None => continue,
+    };
+
+    // serde_yaml may parse "3.3.1" as a string, but "1.0" as a float — stringify all forms.
+    let version_key = serde_yaml::Value::String("version".to_string());
+    let version_str = entry
+      .get(&version_key)
+      .map(yaml_value_to_string)
+      .unwrap_or_default();
+
+    let mut deps = FxHashMap::default();
+    for dep_key in ["dependencies", "optionalDependencies", "peerDependencies"] {
+      if let Some(d) = entry
+        .get(serde_yaml::Value::String(dep_key.to_string()))
+        .and_then(|v| v.as_mapping())
+      {
+        for (name, ver) in d {
+          if let Some(n) = name.as_str() {
+            let v = yaml_value_to_string(ver);
+            // Strip "npm:" protocol prefix from Berry dep specifiers
+            let v = v.strip_prefix("npm:").unwrap_or(&v).to_string();
+            deps.insert(n.to_string(), v);
+          }
+        }
+      }
+    }
+
+    packages.insert(
+      pkg_name,
+      PackageInfo {
+        version: version_str,
+        dependencies: deps,
+      },
+    );
+  }
+
+  Ok(packages)
+}
+
+/// Convert a serde_yaml::Value to a trimmed string, handling numeric coercion.
+fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
+  match v {
+    serde_yaml::Value::String(s) => s.clone(),
+    serde_yaml::Value::Number(n) => {
+      if let Some(i) = n.as_i64() {
+        i.to_string()
+      } else if let Some(f) = n.as_f64() {
+        format!("{f}")
+      } else {
+        String::new()
+      }
+    }
+    serde_yaml::Value::Bool(b) => b.to_string(),
+    _ => serde_yaml::to_string(v)
+      .unwrap_or_default()
+      .trim()
+      .to_string(),
+  }
+}
+
+/// Extract the package name from a Yarn Berry entry key.
+/// Keys look like `"image-lib@npm:^2.6.0"` or `"@scope/pkg@npm:^1.0.0"`
+/// or multi-specifier `"pkg@npm:^1.0.0, pkg@npm:^2.0.0"`.
+fn extract_yarn_berry_name(key: &str) -> String {
+  // Take the first specifier (before any comma)
+  let first = key.split(',').next().unwrap_or(key).trim();
+
+  // Find the `@npm:` or `@workspace:` protocol separator
+  // For scoped packages like "@scope/pkg@npm:^1.0.0", we need the LAST `@`
+  // that's followed by a protocol (npm:, workspace:, patch:, etc.)
+  if let Some(pos) = first
+    .rfind("@npm:")
+    .or_else(|| first.rfind("@workspace:"))
+    .or_else(|| first.rfind("@patch:"))
+    .or_else(|| first.rfind("@file:"))
+    .or_else(|| first.rfind("@link:"))
+    .or_else(|| first.rfind("@portal:"))
+  {
+    return first[..pos].to_string();
+  }
+
+  // Fallback: find the last '@' that isn't at position 0 (scoped package prefix)
+  if let Some(at_pos) = first.rfind('@') {
+    if at_pos > 0 {
+      return first[..at_pos].to_string();
+    }
+  }
+
+  first.to_string()
+}
+
+/// Parse Yarn Classic (v1) lockfile using the text-based state machine.
+fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, PackageInfo>> {
+  let mut packages = FxHashMap::default();
 
   let mut current_name: Option<String> = None;
   let mut current_version = String::new();
@@ -428,7 +591,7 @@ fn parse_yarn_lockfile(content: &str, pkg_json_content: Option<&str>) -> Result<
     }
 
     if in_dependencies {
-      if let Some((dep_name, dep_ver)) = parse_yarn_dep_line(trimmed) {
+      if let Some((dep_name, dep_ver)) = parse_yarn_classic_dep_line(trimmed) {
         current_deps.insert(dep_name, dep_ver);
       } else {
         in_dependencies = false;
@@ -446,28 +609,25 @@ fn parse_yarn_lockfile(content: &str, pkg_json_content: Option<&str>) -> Result<
     );
   }
 
-  Ok(LockfileData {
-    direct_dependencies,
-    packages,
-  })
+  Ok(packages)
 }
 
-fn parse_yarn_dep_line(line: &str) -> Option<(String, String)> {
+/// Parse a Yarn Classic dependency line like `lib-a "^1.0.0"` or `"@scope/pkg" "^1.0.0"`.
+fn parse_yarn_classic_dep_line(line: &str) -> Option<(String, String)> {
   let line = line.trim();
   if line.is_empty() || line.ends_with(':') {
     return None;
   }
 
-  let parts: Vec<&str> = if let Some(stripped) = line.strip_prefix('"') {
+  if let Some(stripped) = line.strip_prefix('"') {
     let end_quote = stripped.find('"')?;
     let name = &stripped[..end_quote];
     let rest = stripped[end_quote + 1..].trim();
     let version = rest.trim_matches('"');
     return Some((name.to_string(), version.to_string()));
-  } else {
-    line.splitn(2, ' ').collect()
-  };
+  }
 
+  let parts: Vec<&str> = line.splitn(2, ' ').collect();
   if parts.len() == 2 {
     Some((
       parts[0].trim_matches('"').to_string(),
@@ -541,13 +701,18 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
 // ---------------------------------------------------------------------------
 
 /// Build a reverse dependency graph: for each package `P`, stores all packages
-/// that list `P` as a dependency.  Borrows from [`LockfileData`] to avoid clones.
+/// that list `P` as a dependency.  Uses bare package names (not full paths) so
+/// the graph is consistent regardless of lockfile format.
 pub fn build_reverse_dep_graph(data: &LockfileData) -> FxHashMap<&str, Vec<&str>> {
   let mut reverse: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
 
-  for (pkg_name, info) in &data.packages {
+  for (pkg_key, info) in &data.packages {
+    let parent_name = package_name_from_key(pkg_key);
     for dep_name in info.dependencies.keys() {
-      reverse.entry(dep_name.as_str()).or_default().push(pkg_name);
+      reverse
+        .entry(dep_name.as_str())
+        .or_default()
+        .push(parent_name);
     }
   }
 
@@ -593,29 +758,33 @@ pub fn resolve_to_direct_deps(
 // Diffing
 // ---------------------------------------------------------------------------
 
-/// Compare two sets of resolved packages and return the names that were added,
-/// removed, or had their version changed.
+/// Compare two sets of resolved packages and return the **package names** that
+/// were added, removed, or had their version changed.
+///
+/// Keys in the maps may be full paths (npm v3: `node_modules/debug/node_modules/ms`)
+/// or bare names (yarn, pnpm, bun: `ms`).  The returned set always contains
+/// bare package names suitable for import matching.
 pub fn diff_lockfile_packages(
   current: &FxHashMap<String, PackageInfo>,
   previous: &FxHashMap<String, PackageInfo>,
 ) -> FxHashSet<String> {
   let mut changed = FxHashSet::default();
 
-  for (name, info) in current {
-    match previous.get(name) {
+  for (key, info) in current {
+    match previous.get(key) {
       Some(prev_info) if prev_info.version != info.version => {
-        changed.insert(name.clone());
+        changed.insert(package_name_from_key(key).to_string());
       }
       None => {
-        changed.insert(name.clone());
+        changed.insert(package_name_from_key(key).to_string());
       }
       _ => {}
     }
   }
 
-  for name in previous.keys() {
-    if !current.contains_key(name) {
-      changed.insert(name.clone());
+  for key in previous.keys() {
+    if !current.contains_key(key) {
+      changed.insert(package_name_from_key(key).to_string());
     }
   }
 
@@ -881,12 +1050,14 @@ mod tests {
     assert!(data.direct_dependencies.contains("vitest"));
     assert_eq!(data.direct_dependencies.len(), 2);
 
-    assert_eq!(data.packages["lib-a"].version, "1.0.0");
+    assert_eq!(data.packages["node_modules/lib-a"].version, "1.0.0");
     assert_eq!(
-      data.packages["lib-a"].dependencies.get("lib-nested-1"),
+      data.packages["node_modules/lib-a"]
+        .dependencies
+        .get("lib-nested-1"),
       Some(&"^2.0.0".to_string())
     );
-    assert_eq!(data.packages["lib-nested-1"].version, "2.0.0");
+    assert_eq!(data.packages["node_modules/lib-nested-1"].version, "2.0.0");
   }
 
   #[test]
@@ -938,7 +1109,42 @@ mod tests {
 
     let data = parse_npm_lockfile(content).unwrap();
     assert!(data.direct_dependencies.contains("@scope/pkg"));
-    assert_eq!(data.packages["@scope/pkg"].version, "1.0.0");
+    assert_eq!(data.packages["node_modules/@scope/pkg"].version, "1.0.0");
+  }
+
+  #[test]
+  fn test_npm_v3_nested_instances_not_overwritten() {
+    let base = r#"{
+      "lockfileVersion": 3,
+      "packages": {
+        "": { "dependencies": { "ms": "^2.1.0", "debug": "^4.0.0" } },
+        "node_modules/body-parser/node_modules/ms": { "version": "2.0.0" },
+        "node_modules/debug": { "version": "4.3.4", "dependencies": { "ms": "2.1.2" } },
+        "node_modules/debug/node_modules/ms": { "version": "2.1.3" },
+        "node_modules/ms": { "version": "2.1.2" }
+      }
+    }"#;
+    let current = r#"{
+      "lockfileVersion": 3,
+      "packages": {
+        "": { "dependencies": { "ms": "^2.1.0", "debug": "^4.0.0" } },
+        "node_modules/body-parser/node_modules/ms": { "version": "2.0.0" },
+        "node_modules/debug": { "version": "4.3.4", "dependencies": { "ms": "2.1.2" } },
+        "node_modules/debug/node_modules/ms": { "version": "2.1.3" },
+        "node_modules/ms": { "version": "2.1.3" }
+      }
+    }"#;
+
+    let base_data = parse_npm_lockfile(base).unwrap();
+    let current_data = parse_npm_lockfile(current).unwrap();
+
+    // Hoisted ms changed from 2.1.2 to 2.1.3 — must be detected
+    let changed = diff_lockfile_packages(&current_data.packages, &base_data.packages);
+    assert!(
+      changed.contains("ms"),
+      "hoisted ms version change should be detected, got: {:?}",
+      changed
+    );
   }
 
   // --- npm error cases ---
@@ -1098,6 +1304,180 @@ lib-a@^1.0.0:
     let data = parse_yarn_lockfile(content, None).unwrap();
     assert!(data.direct_dependencies.is_empty());
     assert_eq!(data.packages["lib-a"].version, "1.0.0");
+  }
+
+  // --- yarn Berry (v2+) parsing ---
+
+  #[test]
+  fn test_parse_yarn_berry_lockfile() {
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"image-lib@npm:^2.6.0":
+  version: 3.3.1
+  resolution: "image-lib@npm:3.3.1"
+  dependencies:
+    sharp: "npm:^0.33.0"
+    color: "npm:^4.0.0"
+  checksum: 10c0/abc123
+  languageName: node
+  linkType: hard
+
+"sharp@npm:^0.33.0":
+  version: 0.33.5
+  resolution: "sharp@npm:0.33.5"
+  checksum: 10c0/def456
+  languageName: node
+  linkType: hard
+
+"color@npm:^4.0.0":
+  version: 4.2.3
+  resolution: "color@npm:4.2.3"
+  checksum: 10c0/ghi789
+  languageName: node
+  linkType: hard
+"#;
+
+    let pkg_json = r#"{"dependencies":{"image-lib":"^2.6.0"}}"#;
+    let data = parse_yarn_lockfile(content, Some(pkg_json)).unwrap();
+
+    assert!(data.direct_dependencies.contains("image-lib"));
+    assert_eq!(data.packages.len(), 3);
+    assert_eq!(data.packages["image-lib"].version, "3.3.1");
+    assert_eq!(data.packages["sharp"].version, "0.33.5");
+    assert_eq!(data.packages["color"].version, "4.2.3");
+
+    assert_eq!(
+      data.packages["image-lib"]
+        .dependencies
+        .get("sharp")
+        .unwrap(),
+      "^0.33.0"
+    );
+    assert_eq!(
+      data.packages["image-lib"]
+        .dependencies
+        .get("color")
+        .unwrap(),
+      "^4.0.0"
+    );
+  }
+
+  #[test]
+  fn test_parse_yarn_berry_scoped_packages() {
+    let content = r#"__metadata:
+  version: 8
+
+"@scope/my-lib@npm:^1.0.0":
+  version: 1.2.3
+  resolution: "@scope/my-lib@npm:1.2.3"
+  dependencies:
+    "@scope/nested": "npm:^2.0.0"
+  languageName: node
+  linkType: hard
+
+"@scope/nested@npm:^2.0.0":
+  version: 2.0.1
+  resolution: "@scope/nested@npm:2.0.1"
+  languageName: node
+  linkType: hard
+"#;
+
+    let pkg_json = r#"{"dependencies":{"@scope/my-lib":"^1.0.0"}}"#;
+    let data = parse_yarn_lockfile(content, Some(pkg_json)).unwrap();
+
+    assert!(data.direct_dependencies.contains("@scope/my-lib"));
+    assert_eq!(data.packages["@scope/my-lib"].version, "1.2.3");
+    assert_eq!(data.packages["@scope/nested"].version, "2.0.1");
+    assert!(data.packages["@scope/my-lib"]
+      .dependencies
+      .contains_key("@scope/nested"));
+  }
+
+  #[test]
+  fn test_parse_yarn_berry_multi_specifier_entry() {
+    let content = r#"__metadata:
+  version: 8
+
+"lodash@npm:^4.17.0, lodash@npm:^4.17.21":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+  languageName: node
+  linkType: hard
+"#;
+
+    let data = parse_yarn_lockfile(content, None).unwrap();
+    assert_eq!(data.packages["lodash"].version, "4.17.21");
+  }
+
+  #[test]
+  fn test_parse_yarn_berry_no_deps() {
+    let content = r#"__metadata:
+  version: 8
+
+"simple-pkg@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "simple-pkg@npm:1.0.0"
+  languageName: node
+  linkType: hard
+"#;
+
+    let data = parse_yarn_lockfile(content, None).unwrap();
+    assert_eq!(data.packages["simple-pkg"].version, "1.0.0");
+    assert!(data.packages["simple-pkg"].dependencies.is_empty());
+  }
+
+  #[test]
+  fn test_yarn_berry_version_change_detected() {
+    let old_content = r#"__metadata:
+  version: 8
+
+"image-lib@npm:^2.6.0":
+  version: 2.6.0
+  resolution: "image-lib@npm:2.6.0"
+  languageName: node
+  linkType: hard
+"#;
+    let new_content = r#"__metadata:
+  version: 8
+
+"image-lib@npm:^2.6.0":
+  version: 3.3.1
+  resolution: "image-lib@npm:3.3.1"
+  languageName: node
+  linkType: hard
+"#;
+
+    let pkg_json = r#"{"dependencies":{"image-lib":"^2.6.0"}}"#;
+    let old_data = parse_yarn_lockfile(old_content, Some(pkg_json)).unwrap();
+    let new_data = parse_yarn_lockfile(new_content, Some(pkg_json)).unwrap();
+
+    assert_eq!(old_data.packages["image-lib"].version, "2.6.0");
+    assert_eq!(new_data.packages["image-lib"].version, "3.3.1");
+
+    let changed = diff_lockfile_packages(&old_data.packages, &new_data.packages);
+    assert!(
+      changed.contains("image-lib"),
+      "image-lib should be detected as changed"
+    );
+  }
+
+  #[test]
+  fn test_extract_yarn_berry_name() {
+    assert_eq!(extract_yarn_berry_name("image-lib@npm:^2.6.0"), "image-lib");
+    assert_eq!(
+      extract_yarn_berry_name("@scope/pkg@npm:^1.0.0"),
+      "@scope/pkg"
+    );
+    assert_eq!(
+      extract_yarn_berry_name("lodash@npm:^4.17.0, lodash@npm:^4.17.21"),
+      "lodash"
+    );
+    assert_eq!(
+      extract_yarn_berry_name("@scope/pkg@workspace:*"),
+      "@scope/pkg"
+    );
   }
 
   // --- bun parsing ---

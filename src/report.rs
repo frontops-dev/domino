@@ -932,7 +932,9 @@ fn generate_details_html(report: &AffectedReport) -> String {
 
     for cause in &project.causes {
       match cause {
-        AffectCause::DirectChange { .. } => has_direct = true,
+        AffectCause::DirectChange { .. }
+        | AffectCause::AssetChange { .. }
+        | AffectCause::LockfileChange { .. } => has_direct = true,
         AffectCause::ImportedSymbol { .. } => has_imported = true,
         _ => {}
       }
@@ -1072,7 +1074,7 @@ fn generate_details_html(report: &AffectedReport) -> String {
           dependency,
           importing_file,
         } => {
-          html.push_str("<span class=\"cause-type imported\">Lockfile Change</span>");
+          html.push_str("<span class=\"cause-type direct\">Lockfile Change</span>");
           html.push_str("<div class=\"cause-details\">");
           html.push_str(&format!(
             "Dependency: <span class=\"symbol\">{}</span><br/>",

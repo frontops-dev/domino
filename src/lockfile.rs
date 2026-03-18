@@ -133,17 +133,30 @@ pub(crate) fn get_file_from_revision(
     )));
   }
 
-  if let Ok(size_str) = std::str::from_utf8(&size_output.stdout) {
-    if let Ok(size) = size_str.trim().parse::<u64>() {
-      if size > MAX_LOCKFILE_BYTES {
-        return Err(DominoError::Other(format!(
-          "Git object '{}' exceeds {} MB size limit ({} bytes)",
+  let size = std::str::from_utf8(&size_output.stdout)
+    .map_err(|_| {
+      DominoError::Other(format!(
+        "git cat-file -s returned non-UTF-8 for '{}'",
+        revision_path
+      ))
+    })
+    .and_then(|s| {
+      s.trim().parse::<u64>().map_err(|_| {
+        DominoError::Other(format!(
+          "git cat-file -s returned unparseable size for '{}': {:?}",
           revision_path,
-          MAX_LOCKFILE_BYTES / (1024 * 1024),
-          size,
-        )));
-      }
-    }
+          s.trim()
+        ))
+      })
+    })?;
+
+  if size > MAX_LOCKFILE_BYTES {
+    return Err(DominoError::Other(format!(
+      "Git object '{}' exceeds {} MB size limit ({} bytes)",
+      revision_path,
+      MAX_LOCKFILE_BYTES / (1024 * 1024),
+      size,
+    )));
   }
 
   // Phase 2: read content (size already validated).
@@ -154,7 +167,10 @@ pub(crate) fn get_file_from_revision(
     .map_err(|e| DominoError::Other(format!("Failed to execute git cat-file -p: {}", e)))?;
 
   if !output.status.success() {
-    return Ok(None);
+    return Err(DominoError::Other(format!(
+      "git cat-file -p failed for '{}' (object exists but content unreadable)",
+      revision_path
+    )));
   }
 
   String::from_utf8(output.stdout)
@@ -727,9 +743,10 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
   let mut packages = FxHashMap::default();
 
   if let Some(workspaces) = parsed.get("workspaces").and_then(|v| v.as_object()) {
-    if let Some(root) = workspaces.get("") {
+    // Collect direct deps from the root ("") and every workspace package entry.
+    for workspace_entry in workspaces.values() {
       for key in ["dependencies", "devDependencies", "optionalDependencies"] {
-        if let Some(deps) = root.get(key).and_then(|v| v.as_object()) {
+        if let Some(deps) = workspace_entry.get(key).and_then(|v| v.as_object()) {
           for dep_name in deps.keys() {
             direct_dependencies.insert(dep_name.clone());
           }
@@ -1025,7 +1042,7 @@ fn collect_base_workspace_pkg_jsons(cwd: &Path, merge_base: &str) -> Result<Vec<
         .iter()
         .any(|pat| glob_match(pat, &parent_str))
       {
-        if let Ok(Some(content)) = get_file_from_revision(cwd, merge_base, pkg_path) {
+        if let Some(content) = get_file_from_revision(cwd, merge_base, pkg_path)? {
           result.push(content);
         }
       }

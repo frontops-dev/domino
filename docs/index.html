@@ -774,13 +774,10 @@
     <!-- Top nav -->
     <nav class="topnav">
       <a href="#" class="topnav-brand">
-        <img
-          src="https://github.com/user-attachments/assets/012a005f-04e4-480e-8d50-5314bdd04a6d"
-          alt="domino logo"
-        />
+        <img src="./assets/logo.svg" alt="domino logo" />
         domino
       </a>
-      <span class="topnav-badge">v0.7.1</span>
+      <span class="topnav-badge">latest</span>
       <div class="topnav-links">
         <a href="https://github.com/frontops-dev/domino" target="_blank" rel="noopener">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -842,11 +839,7 @@
         <div class="content-inner">
           <!-- Hero -->
           <section class="hero" id="overview">
-            <img
-              src="https://github.com/user-attachments/assets/012a005f-04e4-480e-8d50-5314bdd04a6d"
-              alt="domino logo"
-              class="hero-logo"
-            />
+            <img src="./assets/logo.svg" alt="domino logo" class="hero-logo" />
             <h1>domino</h1>
             <p class="hero-tagline">
               A high-performance Rust implementation of <strong style="color: var(--text)"
@@ -928,7 +921,7 @@
 
             <h3>Binary from source</h3>
             <p>If you prefer a standalone binary built from source:</p>
-            <pre><code><span class="t-cmd">git</span> clone git@github.com:frontops-dev/domino.git
+            <pre><code><span class="t-cmd">git</span> clone https://github.com/frontops-dev/domino.git
 <span class="t-cmd">cd</span> domino
 <span class="t-cmd">cargo</span> build --release
 <span class="t-comment"># Binary available at ./target/release/domino</span></code></pre>
@@ -1023,7 +1016,14 @@
 <span class="t-cmd">domino</span> affected <span class="t-flag">--json</span>
 
 <span class="t-comment"># Generate report and open it</span>
-<span class="t-cmd">domino</span> affected <span class="t-flag">--report</span> <span class="t-val">report.html</span> && open report.html</code></pre>
+<span class="t-cmd">domino</span> affected <span class="t-flag">--report</span> <span class="t-val">report.html</span>
+
+<span class="t-comment"># Open the report (macOS)</span>
+open report.html
+<span class="t-comment"># Open the report (Linux)</span>
+xdg-open report.html
+<span class="t-comment"># Open the report (Windows)</span>
+start report.html</code></pre>
           </section>
 
           <!-- Lockfile -->

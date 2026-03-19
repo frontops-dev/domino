@@ -394,7 +394,8 @@ fn find_affected_internal(
                 continue;
               }
 
-              if let Some(pkg) = utils::get_package_name_by_path(file_path, &config.projects) {
+              let owning_packages = project_index.get_package_names_by_path(file_path);
+              for pkg in &owning_packages {
                 affected_packages.insert(pkg.clone());
                 if generate_report {
                   for &(_, dep_name) in &matching_imports {
@@ -435,7 +436,7 @@ fn find_affected_internal(
                       &reference_finder,
                       file_path,
                       &sym,
-                      &config.projects,
+                      &project_index,
                       &mut state,
                     ) {
                       debug!("Error tracing lockfile symbol '{}': {}", sym, e);

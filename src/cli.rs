@@ -1,7 +1,7 @@
 use crate::core;
 use crate::error::Result;
 use crate::profiler::Profiler;
-use crate::types::TrueAffectedConfig;
+use crate::types::{LockfileStrategy, TrueAffectedConfig};
 use crate::workspace;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -57,6 +57,10 @@ enum Commands {
     /// Generate HTML dependency graph report
     #[arg(long)]
     report: Option<PathBuf>,
+
+    /// Lockfile change detection strategy: none, direct, full
+    #[arg(long, default_value = "direct")]
+    lockfile_strategy: LockfileStrategy,
   },
 }
 
@@ -93,6 +97,7 @@ pub fn run() -> Result<()> {
       ts_config,
       profile,
       report,
+      lockfile_strategy,
     } => {
       let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
@@ -156,6 +161,7 @@ pub fn run() -> Result<()> {
           "build".to_string(),
           ".git".to_string(),
         ],
+        lockfile_strategy,
       };
 
       // Use the report-generating version if --report is specified

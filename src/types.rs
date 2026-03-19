@@ -1,5 +1,47 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Lockfile change detection strategy
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum LockfileStrategy {
+  /// Lockfile changes are ignored entirely
+  None,
+  /// Mark projects that import affected deps (no reference chain tracing)
+  #[default]
+  Direct,
+  /// Mark importing projects AND trace full reference chains
+  Full,
+}
+
+impl fmt::Display for LockfileStrategy {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      LockfileStrategy::None => write!(f, "none"),
+      LockfileStrategy::Direct => write!(f, "direct"),
+      LockfileStrategy::Full => write!(f, "full"),
+    }
+  }
+}
+
+impl FromStr for LockfileStrategy {
+  type Err = String;
+
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    match s.to_lowercase().as_str() {
+      "none" => Ok(LockfileStrategy::None),
+      "direct" => Ok(LockfileStrategy::Direct),
+      "full" => Ok(LockfileStrategy::Full),
+      _ => Err(format!(
+        "Invalid lockfile strategy '{}'. Expected: none, direct, full",
+        s
+      )),
+    }
+  }
+}
 
 /// A project in the workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +144,8 @@ pub struct TrueAffectedConfig {
   /// Paths to ignore
   #[allow(dead_code)]
   pub ignored_paths: Vec<String>,
+  /// Lockfile change detection strategy
+  pub lockfile_strategy: LockfileStrategy,
 }
 
 /// Result of the true affected analysis
@@ -183,4 +227,74 @@ pub enum AffectCause {
     /// Line where the reference appears
     line: usize,
   },
+  /// Lockfile dependency changed
+  #[serde(rename = "lockfile_change")]
+  LockfileChange {
+    /// The affected dependency name
+    dependency: String,
+    /// Source file that imports the dependency
+    importing_file: PathBuf,
+  },
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_lockfile_strategy_from_str_valid() {
+    assert_eq!(
+      "none".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::None
+    );
+    assert_eq!(
+      "direct".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Direct
+    );
+    assert_eq!(
+      "full".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Full
+    );
+  }
+
+  #[test]
+  fn test_lockfile_strategy_from_str_case_insensitive() {
+    assert_eq!(
+      "Direct".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Direct
+    );
+    assert_eq!(
+      "FULL".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::Full
+    );
+    assert_eq!(
+      "None".parse::<LockfileStrategy>().unwrap(),
+      LockfileStrategy::None
+    );
+  }
+
+  #[test]
+  fn test_lockfile_strategy_from_str_invalid() {
+    assert!("invalid".parse::<LockfileStrategy>().is_err());
+    assert!("".parse::<LockfileStrategy>().is_err());
+    assert!("direkt".parse::<LockfileStrategy>().is_err());
+  }
+
+  #[test]
+  fn test_lockfile_strategy_display_roundtrip() {
+    for strategy in [
+      LockfileStrategy::None,
+      LockfileStrategy::Direct,
+      LockfileStrategy::Full,
+    ] {
+      let s = strategy.to_string();
+      let parsed: LockfileStrategy = s.parse().unwrap();
+      assert_eq!(parsed, strategy);
+    }
+  }
+
+  #[test]
+  fn test_lockfile_strategy_default() {
+    assert_eq!(LockfileStrategy::default(), LockfileStrategy::Direct);
+  }
 }

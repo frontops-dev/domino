@@ -3,7 +3,13 @@ use crate::types::ChangedFile;
 use regex::Regex;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
 use tracing::{debug, warn};
+
+static FILE_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r#"(?:["\s]a/)(.*)(?:["\s]b/)"#).expect("file regex is valid"));
+static LINE_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"@@ -.* \+(\d+)(?:,\d+)? @@").expect("line regex is valid"));
 
 /// Detect the default branch (tries origin/main, then origin/master)
 pub fn detect_default_branch(repo_path: &Path) -> String {
@@ -89,35 +95,30 @@ pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
     )));
   }
 
-  Ok(String::from_utf8_lossy(&output.stdout).to_string())
+  Ok(
+    String::from_utf8(output.stdout)
+      .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+  )
 }
 
-/// Parse git diff output to extract changed files and line numbers
-pub fn get_changed_files(repo_path: &Path, base: &str) -> Result<Vec<ChangedFile>> {
+/// Parse git diff output to extract changed files and line numbers.
+/// Returns the changed files along with the computed merge-base SHA.
+pub fn get_changed_files(repo_path: &Path, base: &str) -> Result<(Vec<ChangedFile>, String)> {
   debug!("Getting diff for base: {}", base);
 
-  // First, find the merge base between base and HEAD
-  // This ensures we only see changes from the current branch, not changes
-  // from the base branch that happened after branching
   let merge_base = get_merge_base(repo_path, base, "HEAD")?;
   debug!("Merge base: {}", merge_base);
 
-  // Then diff the merge base against the working tree (not HEAD)
-  // This includes both committed and uncommitted changes, matching traf's behavior
   let diff = get_diff(repo_path, &merge_base)?;
+  let files = parse_diff(&diff)?;
 
-  parse_diff(&diff)
+  Ok((files, merge_base))
 }
 
 /// Parse git diff output into ChangedFile structs
 fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
-  // Regex to extract file path: matches "a/path/to/file" between quotes or spaces
-  let file_regex = Regex::new(r#"(?:["\s]a/)(.*)(?:["\s]b/)"#)
-    .map_err(|e| DominoError::Parse(format!("Invalid file regex: {}", e)))?;
-
-  // Regex to extract line numbers: matches "+<line_number>" in diff header
-  let line_regex = Regex::new(r"@@ -.* \+(\d+)(?:,\d+)? @@")
-    .map_err(|e| DominoError::Parse(format!("Invalid line regex: {}", e)))?;
+  let file_regex = &*FILE_RE;
+  let line_regex = &*LINE_RE;
 
   let changed_files: Vec<ChangedFile> = diff
     .split("diff --git")

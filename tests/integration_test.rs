@@ -2168,6 +2168,12 @@ export function run() {
 // ===========================================================================
 
 fn setup_lockfile_test_repo() -> (TempDir, PathBuf) {
+/// Integration test: multiple projects sharing the same sourceRoot are all reported as affected.
+///
+/// This tests the scenario described in issue #38 where variant builds (e.g., MV2 vs MV3)
+/// point to the same source directory but only one was reported as affected.
+#[test]
+fn test_shared_source_root_all_projects_affected() {
   let tmp = TempDir::new().expect("Failed to create temp dir");
   let root = tmp
     .path()
@@ -2192,6 +2198,15 @@ fn setup_lockfile_test_repo() -> (TempDir, PathBuf) {
 
 export function useHelper() {
   return helper();
+  // Create project structure with shared sourceRoot
+  let shared_src = root.join("projects").join("app-desktop").join("src");
+  fs::create_dir_all(&shared_src).unwrap();
+
+  // Create a source file
+  fs::write(
+    shared_src.join("main.ts"),
+    r#"export function bootstrap() {
+  return 'hello';
 }
 "#,
   )
@@ -2511,6 +2526,12 @@ fn test_lockfile_no_change_zero_impact() {
   fs::write(
     root.join("proj-c/src/index.ts"),
     r#"export function standalone() {
+  // Create feature branch with a change
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    shared_src.join("main.ts"),
+    r#"export function bootstrap() {
   return 'modified';
 }
 "#,
@@ -2520,6 +2541,10 @@ fn test_lockfile_no_change_zero_impact() {
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-m", "modify proj-c"]);
 
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify bootstrap"]);
+
+  // Run find_affected with two projects sharing the same sourceRoot
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
@@ -2528,6 +2553,24 @@ fn test_lockfile_no_change_zero_impact() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
+    projects: vec![
+      Project {
+        name: "app-desktop".to_string(),
+        source_root: PathBuf::from("projects/app-desktop/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app-desktop-mv3".to_string(),
+        source_root: PathBuf::from("projects/app-desktop/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2543,6 +2586,13 @@ fn test_lockfile_no_change_zero_impact() {
     affected.len(),
     1,
     "Only proj-c should be affected. Got: {:?}",
+    affected.contains(&"app-desktop".to_string()),
+    "app-desktop should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app-desktop-mv3".to_string()),
+    "app-desktop-mv3 should be affected (shares sourceRoot with app-desktop). Got: {:?}",
     affected
   );
 }

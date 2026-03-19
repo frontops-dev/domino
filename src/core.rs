@@ -7,7 +7,7 @@ use crate::types::{
   AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, LockfileStrategy,
   Project, TrueAffectedConfig,
 };
-use crate::utils;
+use crate::utils::{self, ProjectIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,15 +58,18 @@ fn find_affected_internal(
     });
   }
 
-  // Step 2: Build workspace analyzer (includes building import index)
+  // Step 2: Build project index for O(unique_roots) lookups instead of O(n_projects)
+  let project_index = ProjectIndex::new(&config.projects);
+
+  // Step 3: Build workspace analyzer (includes building import index)
   debug!("Building workspace semantic analysis...");
   let analyzer = WorkspaceAnalyzer::new(config.projects.clone(), &config.cwd, profiler.clone())?;
   debug!("Analyzed {} files", analyzer.files.len());
 
-  // Step 3: Initialize reference finder
+  // Step 4: Initialize reference finder
   let reference_finder = ReferenceFinder::new(&analyzer, &config.cwd, profiler.clone());
 
-  // Step 4: Track affected packages and their causes
+  // Step 5: Track affected packages and their causes
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
@@ -74,6 +77,7 @@ fn find_affected_internal(
   let detected_pm = lockfile::detect_package_manager(&config.cwd);
   let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
 
+  // Step 6: Partition changed files into source and non-source
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
     .iter()
     .filter(|f| {
@@ -89,7 +93,7 @@ fn find_affected_internal(
     asset_files.len()
   );
 
-  // Step 5a: Process source files
+  // Step 6a: Process source files
   for changed_file in &source_files {
     let file_path = &changed_file.file_path;
 
@@ -99,8 +103,9 @@ fn find_affected_internal(
       continue;
     }
 
-    // Add the package that owns this file
-    if let Some(pkg) = utils::get_package_name_by_path(file_path, &config.projects) {
+    // Add all packages that own this file (multiple projects can share the same sourceRoot)
+    let owning_packages = project_index.get_package_names_by_path(file_path);
+    for pkg in &owning_packages {
       debug!("File {:?} belongs to package '{}'", file_path, pkg);
       affected_packages.insert(pkg.clone());
 
@@ -121,13 +126,13 @@ fn find_affected_internal(
                 line,
               });
           } else {
-            for symbol in symbols {
+            for symbol in &symbols {
               project_causes
                 .entry(pkg.clone())
                 .or_default()
                 .push(AffectCause::DirectChange {
                   file: file_path.clone(),
-                  symbol: Some(symbol),
+                  symbol: Some(symbol.clone()),
                   line,
                 });
             }
@@ -143,7 +148,7 @@ fn find_affected_internal(
         &reference_finder,
         file_path,
         line,
-        &config.projects,
+        &project_index,
         &mut affected_packages,
         if generate_report {
           Some(&mut project_causes)
@@ -157,7 +162,7 @@ fn find_affected_internal(
     }
   }
 
-  // Step 5b: Process non-source asset files
+  // Step 6b: Process non-source asset files
   if !asset_files.is_empty() {
     debug!("Processing {} asset files", asset_files.len());
     let asset_finder = AssetReferenceFinder::new(&config.cwd);
@@ -165,8 +170,9 @@ fn find_affected_internal(
     for asset_file in &asset_files {
       let asset_path = &asset_file.file_path;
 
-      // Mark the owning project as affected
-      if let Some(pkg) = utils::get_package_name_by_path(asset_path, &config.projects) {
+      // Mark all owning projects as affected (multiple projects can share the same sourceRoot)
+      let owning_packages = project_index.get_package_names_by_path(asset_path);
+      for pkg in &owning_packages {
         debug!("Asset {:?} belongs to package '{}'", asset_path, pkg);
         affected_packages.insert(pkg.clone());
 
@@ -208,8 +214,9 @@ fn find_affected_internal(
           for reference in references {
             let source_file_rel = &reference.source_file;
 
-            // Mark the referencing project as affected
-            if let Some(pkg) = utils::get_package_name_by_path(source_file_rel, &config.projects) {
+            // Mark all referencing projects as affected
+            let ref_packages = project_index.get_package_names_by_path(source_file_rel);
+            for pkg in &ref_packages {
               affected_packages.insert(pkg.clone());
 
               // Record asset change cause if generating report
@@ -297,7 +304,7 @@ fn find_affected_internal(
                       &reference_finder,
                       source_file_rel,
                       &export_symbol,
-                      &config.projects,
+                      &project_index,
                       &mut state,
                     ) {
                       debug!(
@@ -331,7 +338,7 @@ fn find_affected_internal(
                     &reference_finder,
                     source_file_rel,
                     &local_name,
-                    &config.projects,
+                    &project_index,
                     &mut state,
                   ) {
                     debug!(
@@ -446,6 +453,7 @@ fn find_affected_internal(
   }
 
   // Step 6: Add implicit dependencies
+  // Step 7: Add implicit dependencies
   add_implicit_dependencies(
     &config.projects,
     &mut affected_packages,
@@ -456,13 +464,13 @@ fn find_affected_internal(
     },
   );
 
-  // Step 7: Convert to sorted vector
+  // Step 8: Convert to sorted vector
   let mut affected_projects: Vec<String> = affected_packages.into_iter().collect();
   affected_projects.sort();
 
   debug!("Affected projects: {:?}", affected_projects);
 
-  // Step 8: Build report if requested
+  // Step 9: Build report if requested
   let report = if generate_report {
     let mut projects_info: Vec<AffectedProjectInfo> = project_causes
       .into_iter()
@@ -496,7 +504,7 @@ fn process_changed_line(
   reference_finder: &ReferenceFinder,
   file_path: &Path,
   line: usize,
-  projects: &[Project],
+  project_index: &ProjectIndex,
   affected_packages: &mut FxHashSet<String>,
   project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
 ) -> Result<()> {
@@ -522,7 +530,7 @@ fn process_changed_line(
       reference_finder,
       file_path,
       &symbol_name,
-      projects,
+      project_index,
       &mut state,
     )?;
   }
@@ -535,7 +543,7 @@ fn process_changed_symbol(
   reference_finder: &ReferenceFinder,
   file_path: &Path,
   symbol_name: &str,
-  projects: &[Project],
+  project_index: &ProjectIndex,
   state: &mut AffectedState,
 ) -> Result<()> {
   // Avoid infinite recursion
@@ -547,8 +555,8 @@ fn process_changed_symbol(
 
   debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
 
-  // Get the source project for causality tracking
-  let source_project = utils::get_package_name_by_path(file_path, projects);
+  // Get the source projects for causality tracking (may be multiple with shared sourceRoot)
+  let source_projects = project_index.get_package_names_by_path(file_path);
 
   // 1. Find local references in the same file
   let local_refs = analyzer.find_local_references(file_path, symbol_name)?;
@@ -575,7 +583,7 @@ fn process_changed_symbol(
           reference_finder,
           file_path,
           &container_symbol,
-          projects,
+          project_index,
           state,
         )?;
       }
@@ -626,7 +634,7 @@ fn process_changed_symbol(
         reference_finder,
         file_path,
         &exported_symbol,
-        projects,
+        project_index,
         state,
       )?;
     }
@@ -634,13 +642,14 @@ fn process_changed_symbol(
 
   // For each cross-file reference, recursively process the containing symbol in that file
   for reference in cross_file_refs {
-    // Mark the package as affected
-    if let Some(pkg) = utils::get_package_name_by_path(&reference.file_path, projects) {
+    // Mark all matching packages as affected
+    let ref_packages = project_index.get_package_names_by_path(&reference.file_path);
+    for pkg in &ref_packages {
       state.affected_packages.insert(pkg.clone());
 
       // Track cause if generating report
       if let Some(ref mut causes_map) = state.project_causes {
-        if let Some(ref src_proj) = source_project {
+        for src_proj in &source_projects {
           causes_map
             .entry(pkg.clone())
             .or_default()
@@ -684,7 +693,7 @@ fn process_changed_symbol(
             reference_finder,
             &reference.file_path,
             local_name,
-            projects,
+            project_index,
             state,
           )?;
         }
@@ -705,7 +714,7 @@ fn process_changed_symbol(
             reference_finder,
             &reference.file_path,
             &container_symbol,
-            projects,
+            project_index,
             state,
           )?;
         }

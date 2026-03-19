@@ -45,6 +45,33 @@ jobs:
         run: cargo clippy
       - name: Test publish-preview script
         run: node --test tests/publish-preview.test.js
+  verify-pr-title:
+    name: Verify PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate conventional commit format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          TITLE="$PR_TITLE"
+          PATTERN="^(feat|fix|chore|ci|docs|refactor|test|perf|build|style|revert)(\(.+\))?(!)?: .+"
+
+          if [[ ! "$TITLE" =~ $PATTERN ]]; then
+            echo "::error::PR title must follow conventional commits format."
+            echo ""
+            echo "Expected: <type>(<optional scope>): <description>"
+            echo "Got:      $TITLE"
+            echo ""
+            echo "Allowed types: feat, fix, chore, ci, docs, refactor, test, perf, build, style, revert"
+            echo "Examples:"
+            echo "  feat: add new parser"
+            echo "  fix(resolver): handle circular imports"
+            echo "  feat!: redesign API"
+            exit 1
+          fi
+
+          echo "PR title is valid: $TITLE"
   build:
     strategy:
       fail-fast: false
@@ -322,17 +349,61 @@ jobs:
       - test-linux-binding
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: yarn
+          registry-url: https://registry.npmjs.org/
       - name: Install dependencies
         run: yarn install --frozen-lockfile
       - name: Download all artifacts
         uses: actions/download-artifact@v6
         with:
           path: artifacts
+      - name: Determine version bump
+        id: version
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+
+          if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
+            echo "Current commit is a version commit, skipping bump"
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "is_release=false" >> $GITHUB_OUTPUT
+
+          LAST_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tags found, using all commits"
+            COMMITS=$(git log --format="%s" --no-merges)
+          else
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
+          fi
+
+          BUMP="patch"
+
+          if echo "$COMMITS" | grep -qE "^[a-z]+(\(.+\))?!:|BREAKING CHANGE"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+            BUMP="minor"
+          fi
+
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+          echo "Determined bump: $BUMP"
+      - name: Bump version
+        id: bump
+        if: steps.version.outputs.is_release != 'true'
+        run: |
+          npm version ${{ steps.version.outputs.bump }} --no-git-tag-version --ignore-scripts
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Bumped to $NEW_VERSION"
       - name: Generate packages
         run: node scripts/generate-packages.js
       - name: List packages
@@ -341,16 +412,16 @@ jobs:
       - name: Publish to npm
         run: |
           npm config set provenance true
-
-          # Publish release version for version tags
-          if git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+$";
-          then
-            npm publish --access public
-          elif git log -1 --pretty=%B | grep "^[0-9]\+\.[0-9]\+\.[0-9]\+";
-          then
-            npm publish --tag next --access public
-          else
-            echo "Not a release, skipping publish"
-          fi
+          npm publish --access public
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Push version commit and tag
+        if: steps.version.outputs.is_release != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "${{ steps.bump.outputs.new_version }}"
+          git tag "v${{ steps.bump.outputs.new_version }}"
+          git push origin main --tags

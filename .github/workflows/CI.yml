@@ -387,10 +387,10 @@ jobs:
           if [ -z "$LAST_TAG" ]; then
             echo "No previous tags found, using all commits"
             SUBJECTS=$(git log --format="%s" --no-merges)
-            BODIES=$(git log --format="%B" --no-merges)
+            BODIES=$(git log --format="%b" --no-merges)
           else
             SUBJECTS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
-            BODIES=$(git log "${LAST_TAG}..HEAD" --format="%B" --no-merges)
+            BODIES=$(git log "${LAST_TAG}..HEAD" --format="%b" --no-merges)
           fi
 
           BUMP="patch"

@@ -90,8 +90,9 @@ fn find_affected_internal(
       continue;
     }
 
-    // Add the package that owns this file
-    if let Some(pkg) = utils::get_package_name_by_path(file_path, &config.projects) {
+    // Add all packages that own this file (multiple projects can share the same sourceRoot)
+    let owning_packages = utils::get_package_names_by_path(file_path, &config.projects);
+    for pkg in &owning_packages {
       debug!("File {:?} belongs to package '{}'", file_path, pkg);
       affected_packages.insert(pkg.clone());
 
@@ -112,13 +113,13 @@ fn find_affected_internal(
                 line,
               });
           } else {
-            for symbol in symbols {
+            for symbol in &symbols {
               project_causes
                 .entry(pkg.clone())
                 .or_default()
                 .push(AffectCause::DirectChange {
                   file: file_path.clone(),
-                  symbol: Some(symbol),
+                  symbol: Some(symbol.clone()),
                   line,
                 });
             }
@@ -156,8 +157,9 @@ fn find_affected_internal(
     for asset_file in &asset_files {
       let asset_path = &asset_file.file_path;
 
-      // Mark the owning project as affected
-      if let Some(pkg) = utils::get_package_name_by_path(asset_path, &config.projects) {
+      // Mark all owning projects as affected (multiple projects can share the same sourceRoot)
+      let owning_packages = utils::get_package_names_by_path(asset_path, &config.projects);
+      for pkg in &owning_packages {
         debug!("Asset {:?} belongs to package '{}'", asset_path, pkg);
         affected_packages.insert(pkg.clone());
 
@@ -199,8 +201,9 @@ fn find_affected_internal(
           for reference in references {
             let source_file_rel = &reference.source_file;
 
-            // Mark the referencing project as affected
-            if let Some(pkg) = utils::get_package_name_by_path(source_file_rel, &config.projects) {
+            // Mark all referencing projects as affected
+            let ref_packages = utils::get_package_names_by_path(source_file_rel, &config.projects);
+            for pkg in &ref_packages {
               affected_packages.insert(pkg.clone());
 
               // Record asset change cause if generating report
@@ -455,8 +458,8 @@ fn process_changed_symbol(
 
   debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
 
-  // Get the source project for causality tracking
-  let source_project = utils::get_package_name_by_path(file_path, projects);
+  // Get the source projects for causality tracking (may be multiple with shared sourceRoot)
+  let source_projects = utils::get_package_names_by_path(file_path, projects);
 
   // 1. Find local references in the same file
   let local_refs = analyzer.find_local_references(file_path, symbol_name)?;
@@ -542,13 +545,14 @@ fn process_changed_symbol(
 
   // For each cross-file reference, recursively process the containing symbol in that file
   for reference in cross_file_refs {
-    // Mark the package as affected
-    if let Some(pkg) = utils::get_package_name_by_path(&reference.file_path, projects) {
+    // Mark all matching packages as affected
+    let ref_packages = utils::get_package_names_by_path(&reference.file_path, projects);
+    for pkg in &ref_packages {
       state.affected_packages.insert(pkg.clone());
 
       // Track cause if generating report
       if let Some(ref mut causes_map) = state.project_causes {
-        if let Some(ref src_proj) = source_project {
+        for src_proj in &source_projects {
           causes_map
             .entry(pkg.clone())
             .or_default()

@@ -14,12 +14,14 @@ pub fn is_source_file(path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-/// Find which project a file belongs to based on its path
-pub fn get_package_name_by_path(file_path: &Path, projects: &[Project]) -> Option<String> {
+/// Find ALL projects a file belongs to based on its path.
+/// Multiple projects can share the same sourceRoot (e.g., variant builds).
+pub fn get_package_names_by_path(file_path: &Path, projects: &[Project]) -> Vec<String> {
   projects
     .iter()
-    .find(|project| file_path.starts_with(&project.source_root))
+    .filter(|project| file_path.starts_with(&project.source_root))
     .map(|project| project.name.clone())
+    .collect()
 }
 
 /// Convert line number to byte offset in source text
@@ -103,7 +105,7 @@ mod tests {
   }
 
   #[test]
-  fn test_get_package_name_by_path() {
+  fn test_get_package_names_by_path() {
     let projects = vec![
       Project {
         name: "core".to_string(),
@@ -122,18 +124,59 @@ mod tests {
     ];
 
     assert_eq!(
-      get_package_name_by_path(Path::new("libs/core/src/index.ts"), &projects),
-      Some("core".to_string())
+      get_package_names_by_path(Path::new("libs/core/src/index.ts"), &projects),
+      vec!["core".to_string()]
     );
 
     assert_eq!(
-      get_package_name_by_path(Path::new("libs/nx/src/cli.ts"), &projects),
-      Some("nx".to_string())
+      get_package_names_by_path(Path::new("libs/nx/src/cli.ts"), &projects),
+      vec!["nx".to_string()]
     );
 
     assert_eq!(
-      get_package_name_by_path(Path::new("other/file.ts"), &projects),
-      None
+      get_package_names_by_path(Path::new("other/file.ts"), &projects),
+      Vec::<String>::new()
     );
+  }
+
+  #[test]
+  fn test_get_package_names_by_path_shared_source_root() {
+    let projects = vec![
+      Project {
+        name: "app-desktop".to_string(),
+        source_root: "projects/app-desktop/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app-desktop-mv3".to_string(),
+        source_root: "projects/app-desktop/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "other-project".to_string(),
+        source_root: "projects/other/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ];
+
+    // File in shared sourceRoot should match both projects
+    let mut result =
+      get_package_names_by_path(Path::new("projects/app-desktop/src/main.ts"), &projects);
+    result.sort();
+    assert_eq!(result, vec!["app-desktop", "app-desktop-mv3"]);
+
+    // File in unique sourceRoot should match only one project
+    let result = get_package_names_by_path(Path::new("projects/other/src/index.ts"), &projects);
+    assert_eq!(result, vec!["other-project"]);
+
+    // File outside all sourceRoots should match nothing
+    let result = get_package_names_by_path(Path::new("unknown/file.ts"), &projects);
+    assert!(result.is_empty());
   }
 }

@@ -2601,12 +2601,6 @@ fn test_lockfile_no_change_zero_impact() {
   fs::write(
     root.join("proj-c/src/index.ts"),
     r#"export function standalone() {
-  // Create feature branch with a change
-  git_in(&root, &["checkout", "-b", "feature"]);
-
-  fs::write(
-    shared_src.join("main.ts"),
-    r#"export function bootstrap() {
   return 'modified';
 }
 "#,
@@ -2616,10 +2610,6 @@ fn test_lockfile_no_change_zero_impact() {
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-m", "modify proj-c"]);
 
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "modify bootstrap"]);
-
-  // Run find_affected with two projects sharing the same sourceRoot
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),

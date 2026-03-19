@@ -386,16 +386,20 @@ jobs:
 
           if [ -z "$LAST_TAG" ]; then
             echo "No previous tags found, using all commits"
-            COMMITS=$(git log --format="%B" --no-merges)
+            SUBJECTS=$(git log --format="%s" --no-merges)
+            BODIES=$(git log --format="%B" --no-merges)
           else
-            COMMITS=$(git log "${LAST_TAG}..HEAD" --format="%B" --no-merges)
+            SUBJECTS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
+            BODIES=$(git log "${LAST_TAG}..HEAD" --format="%B" --no-merges)
           fi
 
           BUMP="patch"
 
-          if echo "$COMMITS" | grep -qE "^[a-z]+(\(.+\))?!:|BREAKING CHANGE"; then
+          if echo "$SUBJECTS" | grep -qE "^[a-z]+(\(.+\))?!:"; then
             BUMP="major"
-          elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+          elif echo "$BODIES" | grep -qE "BREAKING CHANGE"; then
+            BUMP="major"
+          elif echo "$SUBJECTS" | grep -qE "^feat(\(.+\))?:"; then
             BUMP="minor"
           fi
 

@@ -2185,6 +2185,8 @@ fn test_shared_source_root_all_projects_affected() {
 
   // Init git repo
   git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
   git_in(&root, &["branch", "-M", "main"]);
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-m", "initial"]);

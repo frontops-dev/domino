@@ -60,7 +60,7 @@
     "prepublishOnly": "napi prepublish -t npm",
     "test": "ava",
     "preversion": "napi build --platform && git add .",
-    "version": "napi version",
+    "version": "napi version && node scripts/sync-cargo-version.js && git add Cargo.toml",
     "prepare": "husky"
   },
   "devDependencies": {

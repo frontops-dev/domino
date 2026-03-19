@@ -1,5 +1,5 @@
 use crate::types::Project;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Extensions considered as source files (analyzed by Oxc parser)
 const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
@@ -14,14 +14,41 @@ pub fn is_source_file(path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-/// Find ALL projects a file belongs to based on its path.
-/// Multiple projects can share the same sourceRoot (e.g., variant builds).
-pub fn get_package_names_by_path(file_path: &Path, projects: &[Project]) -> Vec<String> {
-  projects
-    .iter()
-    .filter(|project| file_path.starts_with(&project.source_root))
-    .map(|project| project.name.clone())
-    .collect()
+/// Pre-built index from sourceRoot to project names for O(unique_roots) lookups
+/// instead of O(total_projects) on every call.
+pub struct ProjectIndex {
+  /// Each entry is a unique sourceRoot paired with all project names that share it.
+  entries: Vec<(PathBuf, Vec<String>)>,
+}
+
+impl ProjectIndex {
+  /// Build the index once from a slice of projects.
+  pub fn new(projects: &[Project]) -> Self {
+    // Group project names by sourceRoot
+    let mut map: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for project in projects {
+      if let Some(entry) = map
+        .iter_mut()
+        .find(|(root, _)| *root == project.source_root)
+      {
+        entry.1.push(project.name.clone());
+      } else {
+        map.push((project.source_root.clone(), vec![project.name.clone()]));
+      }
+    }
+    Self { entries: map }
+  }
+
+  /// Find ALL project names whose sourceRoot is a prefix of `file_path`.
+  pub fn get_package_names_by_path(&self, file_path: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    for (root, names) in &self.entries {
+      if file_path.starts_with(root) {
+        result.extend(names.iter().cloned());
+      }
+    }
+    result
+  }
 }
 
 /// Convert line number to byte offset in source text
@@ -105,7 +132,7 @@ mod tests {
   }
 
   #[test]
-  fn test_get_package_names_by_path() {
+  fn test_project_index() {
     let projects = vec![
       Project {
         name: "core".to_string(),
@@ -123,24 +150,24 @@ mod tests {
       },
     ];
 
+    let index = ProjectIndex::new(&projects);
+
     assert_eq!(
-      get_package_names_by_path(Path::new("libs/core/src/index.ts"), &projects),
+      index.get_package_names_by_path(Path::new("libs/core/src/index.ts")),
       vec!["core".to_string()]
     );
-
     assert_eq!(
-      get_package_names_by_path(Path::new("libs/nx/src/cli.ts"), &projects),
+      index.get_package_names_by_path(Path::new("libs/nx/src/cli.ts")),
       vec!["nx".to_string()]
     );
-
     assert_eq!(
-      get_package_names_by_path(Path::new("other/file.ts"), &projects),
+      index.get_package_names_by_path(Path::new("other/file.ts")),
       Vec::<String>::new()
     );
   }
 
   #[test]
-  fn test_get_package_names_by_path_shared_source_root() {
+  fn test_project_index_shared_source_root() {
     let projects = vec![
       Project {
         name: "app-desktop".to_string(),
@@ -165,18 +192,19 @@ mod tests {
       },
     ];
 
+    let index = ProjectIndex::new(&projects);
+
     // File in shared sourceRoot should match both projects
-    let mut result =
-      get_package_names_by_path(Path::new("projects/app-desktop/src/main.ts"), &projects);
+    let mut result = index.get_package_names_by_path(Path::new("projects/app-desktop/src/main.ts"));
     result.sort();
     assert_eq!(result, vec!["app-desktop", "app-desktop-mv3"]);
 
     // File in unique sourceRoot should match only one project
-    let result = get_package_names_by_path(Path::new("projects/other/src/index.ts"), &projects);
+    let result = index.get_package_names_by_path(Path::new("projects/other/src/index.ts"));
     assert_eq!(result, vec!["other-project"]);
 
     // File outside all sourceRoots should match nothing
-    let result = get_package_names_by_path(Path::new("unknown/file.ts"), &projects);
+    let result = index.get_package_names_by_path(Path::new("unknown/file.ts"));
     assert!(result.is_empty());
   }
 }

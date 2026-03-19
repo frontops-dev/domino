@@ -405,11 +405,14 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
       - name: Generate packages
+        if: steps.version.outputs.is_release != 'true'
         run: node scripts/generate-packages.js
       - name: List packages
+        if: steps.version.outputs.is_release != 'true'
         run: ls -R ./npm
         shell: bash
       - name: Publish to npm
+        if: steps.version.outputs.is_release != 'true'
         run: |
           npm config set provenance true
           npm publish --access public

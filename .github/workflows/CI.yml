@@ -16,7 +16,12 @@ env:
       - '**/*.gitignore'
       - .editorconfig
       - docs/**
-  pull_request: null
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -381,9 +386,9 @@ jobs:
 
           if [ -z "$LAST_TAG" ]; then
             echo "No previous tags found, using all commits"
-            COMMITS=$(git log --format="%s" --no-merges)
+            COMMITS=$(git log --format="%B" --no-merges)
           else
-            COMMITS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --format="%B" --no-merges)
           fi
 
           BUMP="patch"
@@ -414,6 +419,12 @@ jobs:
       - name: Publish to npm
         if: steps.version.outputs.is_release != 'true'
         run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "Version ${PKG_VERSION} already published, skipping"
+            exit 0
+          fi
           npm config set provenance true
           npm publish --access public
         env:

@@ -128,6 +128,18 @@ fn read_tsconfig_file(path: &Path) -> Option<TsconfigFile> {
   }
 }
 
+/// Resolve a tsconfig `extends` specifier to a filesystem path.
+///
+/// Only relative (`./…`) and absolute (`/…`) specifiers are resolved.
+/// Bare package specifiers (e.g. `@nx/js/tsconfig-lib`) are intentionally
+/// skipped because resolving them would require full Node module resolution
+/// against `node_modules`, which is out of scope here. In practice this means
+/// `exclude` patterns defined inside an npm-published tsconfig preset are not
+/// inherited — an acceptable trade-off since project-level tsconfigs almost
+/// always declare their own `exclude` array.
+///
+/// See `resolve_extends_specifier` in `resolve_options.rs` for the equivalent
+/// logic used when collecting `compilerOptions.paths`.
 fn resolve_extends(parent_dir: &Path, specifier: &str) -> Option<PathBuf> {
   if !specifier.starts_with('.') && !specifier.starts_with('/') {
     return None;

@@ -59,7 +59,9 @@ fn find_affected_internal(
   }
 
   // Step 2: Build project index for O(unique_roots) lookups instead of O(n_projects)
-  let project_index = ProjectIndex::new(&config.projects);
+  // Also parses each project's tsconfig to extract exclude patterns, so that
+  // files excluded by tsconfig (e.g. stories, specs) don't mark a project affected.
+  let project_index = ProjectIndex::new(&config.projects, &config.cwd);
 
   // Step 3: Build workspace analyzer (includes building import index)
   debug!("Building workspace semantic analysis...");

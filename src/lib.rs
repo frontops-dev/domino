@@ -8,6 +8,7 @@ pub mod lockfile;
 pub mod profiler;
 pub mod report;
 pub mod semantic;
+pub mod tsconfig;
 pub mod types;
 pub mod utils;
 pub mod workspace;

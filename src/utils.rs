@@ -1,5 +1,8 @@
+use crate::tsconfig::TsconfigExcludes;
 use crate::types::Project;
+use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 /// Extensions considered as source files (analyzed by Oxc parser)
 const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
@@ -16,16 +19,24 @@ pub fn is_source_file(path: &Path) -> bool {
 
 /// Pre-built index from sourceRoot to project names for O(unique_roots) lookups
 /// instead of O(total_projects) on every call.
+///
+/// Also holds per-project tsconfig exclude patterns so that files excluded
+/// by a project's tsconfig (e.g. `*.stories.tsx`, `*.spec.ts`) don't count
+/// toward marking that project as affected.
 pub struct ProjectIndex {
   /// Each entry is a unique sourceRoot paired with all project names that share it.
   entries: Vec<(PathBuf, Vec<String>)>,
+  /// Compiled exclude patterns per project name.
+  excludes: FxHashMap<String, TsconfigExcludes>,
 }
 
 impl ProjectIndex {
-  /// Build the index once from a slice of projects.
-  pub fn new(projects: &[Project]) -> Self {
-    // Group project names by sourceRoot
+  /// Build the index from a slice of projects, parsing each project's tsconfig
+  /// to extract exclude patterns.
+  pub fn new(projects: &[Project], cwd: &Path) -> Self {
     let mut map: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut excludes = FxHashMap::default();
+
     for project in projects {
       if let Some(entry) = map
         .iter_mut()
@@ -35,16 +46,44 @@ impl ProjectIndex {
       } else {
         map.push((project.source_root.clone(), vec![project.name.clone()]));
       }
+
+      if let Some(ts_config) = &project.ts_config {
+        if let Some(parsed) = TsconfigExcludes::parse(ts_config, cwd) {
+          debug!(
+            "Loaded {} exclude patterns for project '{}' from {}",
+            parsed.pattern_count(),
+            project.name,
+            ts_config.display()
+          );
+          excludes.insert(project.name.clone(), parsed);
+        }
+      }
     }
-    Self { entries: map }
+
+    Self {
+      entries: map,
+      excludes,
+    }
   }
 
-  /// Find ALL project names whose sourceRoot is a prefix of `file_path`.
+  /// Find ALL project names whose sourceRoot is a prefix of `file_path`,
+  /// excluding projects whose tsconfig excludes the file.
   pub fn get_package_names_by_path(&self, file_path: &Path) -> Vec<String> {
     let mut result = Vec::new();
     for (root, names) in &self.entries {
       if file_path.starts_with(root) {
-        result.extend(names.iter().cloned());
+        for name in names {
+          if let Some(excl) = self.excludes.get(name) {
+            if excl.is_excluded(file_path) {
+              debug!(
+                "File {:?} excluded by tsconfig for project '{}'",
+                file_path, name
+              );
+              continue;
+            }
+          }
+          result.push(name.clone());
+        }
       }
     }
     result
@@ -133,6 +172,7 @@ mod tests {
 
   #[test]
   fn test_project_index() {
+    let tmp = tempfile::TempDir::new().unwrap();
     let projects = vec![
       Project {
         name: "core".to_string(),
@@ -150,7 +190,7 @@ mod tests {
       },
     ];
 
-    let index = ProjectIndex::new(&projects);
+    let index = ProjectIndex::new(&projects, tmp.path());
 
     assert_eq!(
       index.get_package_names_by_path(Path::new("libs/core/src/index.ts")),
@@ -168,6 +208,7 @@ mod tests {
 
   #[test]
   fn test_project_index_shared_source_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
     let projects = vec![
       Project {
         name: "app-desktop".to_string(),
@@ -192,7 +233,7 @@ mod tests {
       },
     ];
 
-    let index = ProjectIndex::new(&projects);
+    let index = ProjectIndex::new(&projects, tmp.path());
 
     // File in shared sourceRoot should match both projects
     let mut result = index.get_package_names_by_path(Path::new("projects/app-desktop/src/main.ts"));
@@ -206,5 +247,47 @@ mod tests {
     // File outside all sourceRoots should match nothing
     let result = index.get_package_names_by_path(Path::new("unknown/file.ts"));
     assert!(result.is_empty());
+  }
+
+  #[test]
+  fn test_project_index_tsconfig_excludes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let lib_dir = cwd.join("libs/ui-widgets");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{ "exclude": ["**/*.spec.ts", "**/*.stories.tsx"] }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "ui-widgets".to_string(),
+      source_root: "libs/ui-widgets/src".into(),
+      ts_config: Some(lib_dir.join("tsconfig.lib.json")),
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let index = ProjectIndex::new(&projects, cwd);
+
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/ui-widgets/src/index.ts")),
+      vec!["ui-widgets"],
+      "normal source files should match"
+    );
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/ui-widgets/src/Grid.stories.tsx"))
+        .is_empty(),
+      "stories files should be excluded"
+    );
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
+        .is_empty(),
+      "spec files should be excluded"
+    );
   }
 }

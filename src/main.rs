@@ -6,6 +6,7 @@ mod lockfile;
 mod profiler;
 mod report;
 mod semantic;
+mod tsconfig;
 mod types;
 mod utils;
 mod workspace;

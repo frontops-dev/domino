@@ -2636,3 +2636,270 @@ fn test_lockfile_no_change_zero_impact() {
     affected
   );
 }
+
+/// Verifies that files excluded by a project's tsconfig (e.g. `*.stories.tsx`)
+/// do NOT cause that project to be marked as affected, even when a transitive
+/// type dependency chain reaches the excluded file.
+///
+/// Layout:
+///   shared-types/src/types.ts   — exports `SharedType` (changed)
+///   shared-types/src/index.ts   — barrel re-export
+///   ui-widgets/src/Grid.tsx     — normal source (no import from shared-types)
+///   ui-widgets/src/Grid.stories.tsx — stories file that imports SharedType
+///   ui-widgets/tsconfig.lib.json    — excludes **/*.stories.tsx
+///
+/// Without tsconfig-exclude filtering, domino would mark ui-widgets as affected
+/// because Grid.stories.tsx imports SharedType. With the fix, the stories file
+/// is excluded from project ownership, so ui-widgets is not affected.
+#[test]
+fn test_tsconfig_exclude_prevents_false_positive_via_stories() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo --
+  let shared_src = root.join("shared-types/src");
+  let widgets_src = root.join("ui-widgets/src");
+  let widgets_dir = root.join("ui-widgets");
+  fs::create_dir_all(&shared_src).unwrap();
+  fs::create_dir_all(&widgets_src).unwrap();
+
+  fs::write(
+    shared_src.join("types.ts"),
+    r#"export interface SharedType {
+  name: string;
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    shared_src.join("index.ts"),
+    "export { SharedType } from './types';\n",
+  )
+  .unwrap();
+
+  fs::write(
+    widgets_src.join("Grid.tsx"),
+    r#"export function Grid() {
+  return null;
+}
+"#,
+  )
+  .unwrap();
+
+  // stories file imports SharedType — this is the only link from ui-widgets to shared-types
+  fs::write(
+    widgets_src.join("Grid.stories.tsx"),
+    r#"import type { SharedType } from '../../shared-types/src';
+
+export const mockData: SharedType = { name: 'test' };
+"#,
+  )
+  .unwrap();
+
+  // tsconfig that excludes stories
+  fs::write(
+    widgets_dir.join("tsconfig.lib.json"),
+    r#"{
+  "compilerOptions": { "strict": true },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": [
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.stories.ts",
+    "**/*.stories.tsx"
+  ]
+}"#,
+  )
+  .unwrap();
+
+  // -- init git --
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- feature branch: change SharedType --
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    shared_src.join("types.ts"),
+    r#"export interface SharedType {
+  name: string;
+  description?: string;
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "add description field"]);
+
+  // -- run with tsconfig exclude --
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "shared-types".to_string(),
+        source_root: PathBuf::from("shared-types/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "ui-widgets".to_string(),
+        source_root: PathBuf::from("ui-widgets/src"),
+        ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"shared-types".to_string()),
+    "shared-types should be affected (directly changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"ui-widgets".to_string()),
+    "ui-widgets should NOT be affected (only link is via excluded stories file). Got: {:?}",
+    affected
+  );
+}
+
+/// Complement to the above: when a non-excluded file in ui-widgets imports
+/// from shared-types, ui-widgets IS correctly marked as affected.
+#[test]
+fn test_tsconfig_exclude_does_not_suppress_real_dependencies() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let shared_src = root.join("shared-types/src");
+  let widgets_src = root.join("ui-widgets/src");
+  let widgets_dir = root.join("ui-widgets");
+  fs::create_dir_all(&shared_src).unwrap();
+  fs::create_dir_all(&widgets_src).unwrap();
+
+  fs::write(
+    shared_src.join("types.ts"),
+    r#"export interface SharedType {
+  name: string;
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    shared_src.join("index.ts"),
+    "export { SharedType } from './types';\n",
+  )
+  .unwrap();
+
+  // Production source file that imports SharedType
+  fs::write(
+    widgets_src.join("Grid.tsx"),
+    r#"import type { SharedType } from '../../shared-types/src';
+
+export function Grid(props: SharedType) {
+  return null;
+}
+"#,
+  )
+  .unwrap();
+
+  // stories file also imports it (but excluded)
+  fs::write(
+    widgets_src.join("Grid.stories.tsx"),
+    r#"import type { SharedType } from '../../shared-types/src';
+
+export const mockData: SharedType = { name: 'test' };
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    widgets_dir.join("tsconfig.lib.json"),
+    r#"{
+  "exclude": ["**/*.spec.ts", "**/*.spec.tsx", "**/*.stories.ts", "**/*.stories.tsx"]
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    shared_src.join("types.ts"),
+    r#"export interface SharedType {
+  name: string;
+  description?: string;
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "add description field"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "shared-types".to_string(),
+        source_root: PathBuf::from("shared-types/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "ui-widgets".to_string(),
+        source_root: PathBuf::from("ui-widgets/src"),
+        ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"shared-types".to_string()),
+    "shared-types should be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"ui-widgets".to_string()),
+    "ui-widgets SHOULD be affected (Grid.tsx imports SharedType and is not excluded). Got: {:?}",
+    affected
+  );
+}

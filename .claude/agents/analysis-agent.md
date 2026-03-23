@@ -24,20 +24,25 @@ You are a specialist selector/router. You receive a baseSha or branch context, a
 
 ## Selection Matrix
 
-| File Pattern | Specialists |
-|---|---|
-| `src/**/*.rs` | rust-specialist, security-specialist |
-| `tests/**/*.rs` | test-specialist, rust-specialist |
-| `__test__/**/*.ts` | test-specialist |
-| `.claude/**`, `CLAUDE.md` | ai-specialist |
-| `Cargo.toml`, `Cargo.lock` | rust-specialist, security-specialist |
-| `.github/**/*.yml` | rust-specialist |
-| `*.md` (non-CLAUDE) | (skip or handle directly) |
-| `*.toml` (non-Cargo) | rust-specialist |
+| File Pattern               | Specialists                                                  |
+| -------------------------- | ------------------------------------------------------------ |
+| `src/**/*.rs`              | rust-specialist, security-specialist, performance-specialist |
+| `tests/**/*.rs`            | test-specialist, rust-specialist                             |
+| `__test__/**/*.ts`         | test-specialist                                              |
+| `.claude/**`, `CLAUDE.md`  | ai-specialist                                                |
+| `Cargo.toml`, `Cargo.lock` | rust-specialist, security-specialist, performance-specialist |
+| `.github/**/*.yml`         | rust-specialist                                              |
+| `*.md` (non-CLAUDE)        | (skip or handle directly)                                    |
+| `*.toml` (non-Cargo)       | rust-specialist                                              |
+| `benches/**`               | performance-specialist, rust-specialist                      |
 
 ### Implicit test-specialist routing
 
 If any `src/**/*.rs` files changed but no corresponding test files (`tests/**/*.rs`, `__test__/**`) changed, add `test-specialist` to verify test coverage for the new/modified code.
+
+### Implicit performance-specialist routing
+
+The performance-specialist is **always** included when any `src/**/*.rs` or `Cargo.toml` files change. Every PR must be checked for performance regressions. This is not optional — domino's 3-5x speed advantage over traf must be preserved.
 
 ## Content-Pattern Routing
 
@@ -58,17 +63,20 @@ Return a JSON object with the following structure:
     {
       "name": "rust-specialist",
       "reason": "Modified .rs source files in src/",
-      "files": [{"path": "src/core.rs", "status": "M"}, {"path": "src/git.rs", "status": "M"}]
+      "files": [
+        { "path": "src/core.rs", "status": "M" },
+        { "path": "src/git.rs", "status": "M" }
+      ]
     },
     {
       "name": "security-specialist",
       "reason": "unsafe blocks detected in src/semantic/analyzer.rs",
-      "files": [{"path": "src/semantic/analyzer.rs", "status": "M"}]
+      "files": [{ "path": "src/semantic/analyzer.rs", "status": "M" }]
     }
   ],
   "summary": {
     "total_files": 5,
-    "by_status": {"M": 3, "A": 1, "D": 1}
+    "by_status": { "M": 3, "A": 1, "D": 1 }
   },
   "skipped": ["README.md"]
 }

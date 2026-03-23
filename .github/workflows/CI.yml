@@ -470,7 +470,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
-          yarn install
+          # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
+          YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install
           git add package.json Cargo.toml yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           git tag "v${{ steps.bump.outputs.new_version }}"

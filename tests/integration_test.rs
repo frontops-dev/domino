@@ -2903,3 +2903,58 @@ export const mockData: SharedType = { name: 'test' };
     affected
   );
 }
+
+/// Regression test for #47: many changed lines inside a single exported object
+/// should produce the same affected result as a one-line change to that object.
+/// Before the fix, each changed line restarted the full reference graph traversal
+/// with a fresh visited set, causing exponential time on large single-export diffs.
+#[test]
+fn test_large_single_export_deduplication() {
+  let branch = TestBranch::new("test-large-single-export-dedup");
+
+  // Create a file in proj1 with a large exported object (many lines, one symbol)
+  let mut large_object = String::from("export const bigConfig: Record<string, string> = {\n");
+  for i in 0..200 {
+    large_object.push_str(&format!("  key{i}: 'value{i}',\n"));
+  }
+  large_object.push_str("};\n");
+  branch.make_change("proj1/big-config.ts", &large_object);
+
+  // proj2 imports this symbol
+  branch.make_change(
+    "proj2/consumer.ts",
+    "import { bigConfig } from '@monorepo/proj1/big-config';\nexport const count = Object.keys(bigConfig).length;\n",
+  );
+
+  // Commit the baseline
+  // Now make a large change: add 100 more entries to the same exported object
+  let mut updated_object = String::from("export const bigConfig: Record<string, string> = {\n");
+  for i in 0..300 {
+    updated_object.push_str(&format!("  key{i}: 'value{i}',\n"));
+  }
+  updated_object.push_str("};\n");
+  branch.make_change("proj1/big-config.ts", &updated_object);
+
+  let affected = branch.get_affected();
+
+  // proj1 is directly affected (owns the file)
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (owns the changed file). Got: {:?}",
+    affected
+  );
+
+  // proj2 should be affected (imports bigConfig)
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (imports bigConfig from proj1). Got: {:?}",
+    affected
+  );
+
+  // proj3 should be affected (implicit dependency on proj1)
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dep on proj1). Got: {:?}",
+    affected
+  );
+}

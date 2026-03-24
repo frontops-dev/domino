@@ -105,6 +105,25 @@ fn find_affected_internal(
       continue;
     }
 
+    // Resolve symbols for each changed line once — shared by both report-building
+    // and the deduplication pass below to avoid redundant AST lookups.
+    let symbols_by_line: Vec<(usize, Vec<String>)> = changed_file
+      .changed_lines
+      .iter()
+      .map(
+        |&line| match analyzer.find_node_at_line(file_path, line, 0) {
+          Ok(symbols) => (line, symbols),
+          Err(e) => {
+            debug!(
+              "Error finding symbol at line {} in {:?}: {}",
+              line, file_path, e
+            );
+            (line, Vec::new())
+          }
+        },
+      )
+      .collect();
+
     // Add all packages that own this file (multiple projects can share the same sourceRoot)
     let owning_packages = project_index.get_package_names_by_path(file_path);
     for pkg in &owning_packages {
@@ -113,11 +132,7 @@ fn find_affected_internal(
 
       // Record direct change cause if generating report
       if generate_report {
-        // For each changed line, record it as a direct change
-        for &line in &changed_file.changed_lines {
-          let symbols = analyzer
-            .find_node_at_line(file_path, line, 0)
-            .unwrap_or_default();
+        for &(line, ref symbols) in &symbols_by_line {
           if symbols.is_empty() {
             project_causes
               .entry(pkg.clone())
@@ -128,7 +143,7 @@ fn find_affected_internal(
                 line,
               });
           } else {
-            for symbol in &symbols {
+            for symbol in symbols {
               project_causes
                 .entry(pkg.clone())
                 .or_default()
@@ -143,23 +158,58 @@ fn find_affected_internal(
       }
     }
 
-    // Process each changed line
-    for &line in &changed_file.changed_lines {
-      if let Err(e) = process_changed_line(
-        &analyzer,
-        &reference_finder,
-        file_path,
-        line,
-        &project_index,
-        &mut affected_packages,
-        if generate_report {
+    // Pre-deduplicate: collect unique symbols across all changed lines before tracing.
+    // This avoids redundant recursive reference traversals when many changed lines
+    // map to the same symbol (e.g., additions inside a single large exported object).
+    let unique_symbols: FxHashSet<&String> = symbols_by_line
+      .iter()
+      .flat_map(|(_, symbols)| symbols.iter())
+      .collect();
+
+    if unique_symbols.is_empty() {
+      debug!(
+        "No traceable symbols found in {:?}, skipping reference traversal",
+        file_path
+      );
+    } else {
+      debug!(
+        "Found {} unique symbols from {} changed lines in {:?}",
+        unique_symbols.len(),
+        changed_file.changed_lines.len(),
+        file_path
+      );
+
+      // Trace each unique symbol exactly once with a shared visited set.
+      // NOTE: sharing the visited set across symbols is correct for affected_packages
+      // (set insert is idempotent) but means project_causes may not record every
+      // independent cause path — a project affected via two different symbols will
+      // only have the cause from whichever symbol was traced first.
+      let mut visited = FxHashSet::default();
+      let mut state = AffectedState {
+        affected_packages: &mut affected_packages,
+        project_causes: if generate_report {
           Some(&mut project_causes)
         } else {
           None
         },
-      ) {
-        debug!("Error processing line {} in {:?}: {}", line, file_path, e);
-        // Continue processing other lines
+        visited: &mut visited,
+      };
+
+      for symbol_name in &unique_symbols {
+        debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
+        if let Err(e) = process_changed_symbol(
+          &analyzer,
+          &reference_finder,
+          file_path,
+          symbol_name,
+          &project_index,
+          &mut state,
+        ) {
+          debug!(
+            "Error processing symbol '{}' in {:?}: {}",
+            symbol_name, file_path, e
+          );
+        }
       }
     }
   }
@@ -500,45 +550,6 @@ fn find_affected_internal(
     affected_projects,
     report,
   })
-}
-
-fn process_changed_line(
-  analyzer: &WorkspaceAnalyzer,
-  reference_finder: &ReferenceFinder,
-  file_path: &Path,
-  line: usize,
-  project_index: &ProjectIndex,
-  affected_packages: &mut FxHashSet<String>,
-  project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
-) -> Result<()> {
-  // Find the symbols at this line
-  let symbol_names = analyzer.find_node_at_line(file_path, line, 0)?;
-  if symbol_names.is_empty() {
-    debug!("No symbol found at line {} in {:?}", line, file_path);
-    return Ok(());
-  }
-
-  // Use a visited set to avoid infinite recursion
-  let mut visited = FxHashSet::default();
-  let mut state = AffectedState {
-    affected_packages,
-    project_causes,
-    visited: &mut visited,
-  };
-
-  for symbol_name in symbol_names {
-    debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
-    process_changed_symbol(
-      analyzer,
-      reference_finder,
-      file_path,
-      &symbol_name,
-      project_index,
-      &mut state,
-    )?;
-  }
-
-  Ok(())
 }
 
 fn process_changed_symbol(

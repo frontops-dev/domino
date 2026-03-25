@@ -1,6 +1,6 @@
 {
   "name": "@front-ops/domino",
-  "version": "1.0.3",
+  "version": "1.0.2",
   "description": "True Affected - Semantic change detection for monorepos",
   "main": "index.js",
   "repository": {
@@ -80,13 +80,19 @@
     "typescript": "^5.9.2"
   },
   "optionalDependencies": {
-    "@front-ops/domino-darwin-arm64": "1.0.3",
-    "@front-ops/domino-darwin-x64": "1.0.3",
-    "@front-ops/domino-linux-arm64-gnu": "1.0.3",
-    "@front-ops/domino-linux-arm64-musl": "1.0.3",
-    "@front-ops/domino-linux-x64-gnu": "1.0.3",
-    "@front-ops/domino-linux-x64-musl": "1.0.3",
-    "@front-ops/domino-win32-x64-msvc": "1.0.3"
+    "@front-ops/domino-darwin-arm64": "1.0.2",
+    "@front-ops/domino-darwin-x64": "1.0.2",
+    "@front-ops/domino-linux-arm64-gnu": "1.0.2",
+    "@front-ops/domino-linux-arm64-musl": "1.0.2",
+    "@front-ops/domino-linux-x64-gnu": "1.0.2",
+    "@front-ops/domino-linux-x64-musl": "1.0.2",
+    "@front-ops/domino-win32-x64-msvc": "1.0.2",
+    "@oxc-node/core-darwin-arm64": "^0.0.34",
+    "@oxc-node/core-darwin-x64": "^0.0.34",
+    "@oxc-node/core-linux-arm64-gnu": "^0.0.34",
+    "@oxc-node/core-linux-arm64-musl": "^0.0.35",
+    "@oxc-node/core-linux-x64-gnu": "^0.0.34",
+    "@oxc-node/core-linux-x64-musl": "^0.0.35"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [

@@ -71,6 +71,9 @@ npx @front-ops/domino affected
 # Use a different base branch
 npx @front-ops/domino affected --base origin/develop
 
+# Compare specific commits (useful in CI patch pipelines)
+npx @front-ops/domino affected --base abc123 --head def456
+
 # Output as JSON
 npx @front-ops/domino affected --json
 
@@ -95,6 +98,9 @@ domino affected
 # Use a different base branch
 domino affected --base origin/develop
 
+# Compare specific commits (useful in CI patch pipelines)
+domino affected --base abc123 --head def456
+
 # Output as JSON
 domino affected --json
 
@@ -108,6 +114,7 @@ domino affected --report report.html
 ### Options
 
 - `--base <BRANCH>`: Base branch to compare against (default: `origin/main`)
+- `--head <COMMIT>`: Head commit to compare (defaults to working tree)
 - `--all`: Show all projects regardless of changes
 - `--json`: Output results as JSON
 - `--report <PATH>`: Generate a detailed analysis report

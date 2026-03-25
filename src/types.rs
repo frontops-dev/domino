@@ -133,6 +133,8 @@ pub struct TrueAffectedConfig {
   pub cwd: PathBuf,
   /// Base branch to compare against
   pub base: String,
+  /// Head commit to compare (defaults to working tree)
+  pub head: Option<String>,
   /// Root tsconfig path
   #[allow(dead_code)]
   pub root_ts_config: Option<PathBuf>,

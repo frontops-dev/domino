@@ -47,7 +47,8 @@ fn find_affected_internal(
   debug!("Projects: {}", config.projects.len());
 
   // Step 1: Get changed files from git (also returns the merge-base SHA)
-  let (changed_files, merge_base) = git::get_changed_files(&config.cwd, &config.base)?;
+  let (changed_files, merge_base) =
+    git::get_changed_files(&config.cwd, &config.base, config.head.as_deref())?;
   debug!("Found {} changed files", changed_files.len());
 
   if changed_files.is_empty() {
@@ -505,6 +506,7 @@ fn find_affected_internal(
     }
   }
 
+  // Step 6: Add implicit dependencies
   // Step 7: Add implicit dependencies
   add_implicit_dependencies(
     &config.projects,

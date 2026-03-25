@@ -824,6 +824,7 @@ mod tests {
     let projects = vec![
       Project {
         name: "app".to_string(),
+        root: PathBuf::from("apps/app"),
         source_root: PathBuf::from("apps/app"),
         ts_config: None,
         implicit_dependencies: vec!["lib1".to_string(), "lib2".to_string()],
@@ -831,6 +832,7 @@ mod tests {
       },
       Project {
         name: "lib1".to_string(),
+        root: PathBuf::from("libs/lib1"),
         source_root: PathBuf::from("libs/lib1"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -838,6 +840,7 @@ mod tests {
       },
       Project {
         name: "lib2".to_string(),
+        root: PathBuf::from("libs/lib2"),
         source_root: PathBuf::from("libs/lib2"),
         ts_config: None,
         implicit_dependencies: vec![],

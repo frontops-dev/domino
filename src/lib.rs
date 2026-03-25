@@ -50,9 +50,11 @@ mod napi_bindings {
 
   impl From<NapiProject> for Project {
     fn from(project: NapiProject) -> Self {
+      let source_root = PathBuf::from(&project.source_root);
       Self {
         name: project.name,
-        source_root: PathBuf::from(project.source_root),
+        root: source_root.clone(),
+        source_root,
         ts_config: project.ts_config.map(PathBuf::from),
         implicit_dependencies: project.implicit_dependencies,
         targets: project.targets,

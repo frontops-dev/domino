@@ -48,7 +48,9 @@ impl FromStr for LockfileStrategy {
 pub struct Project {
   /// Project name
   pub name: String,
-  /// Path to the project source root
+  /// Path to the project root directory (where project.json lives, relative to workspace root)
+  pub root: PathBuf,
+  /// Path to the project source root (may differ from root, e.g. "libs/my-lib/src")
   pub source_root: PathBuf,
   /// Path to the project's tsconfig.json (optional)
   pub ts_config: Option<PathBuf>,

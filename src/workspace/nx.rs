@@ -144,8 +144,14 @@ fn parse_project_json(path: &Path, cwd: &Path) -> Result<Project> {
     .map(|t| t.keys().cloned().collect())
     .unwrap_or_default();
 
+  let root = project_dir
+    .strip_prefix(cwd)
+    .unwrap_or(project_dir)
+    .to_path_buf();
+
   Ok(Project {
     name,
+    root,
     source_root,
     ts_config,
     implicit_dependencies: nx_project.implicit_dependencies,
@@ -230,8 +236,12 @@ fn get_workspace_json_projects(cwd: &Path) -> Result<Vec<Project>> {
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
 
+      // In workspace.json, the key is the project directory path
+      let root = PathBuf::from(&name);
+
       projects.push(Project {
         name,
+        root,
         source_root,
         ts_config,
         implicit_dependencies: nx_project.implicit_dependencies,

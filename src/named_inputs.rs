@@ -267,7 +267,7 @@ pub fn filter_negated_files(
     return changed_files;
   }
 
-  let project_roots: Vec<&Path> = projects.iter().map(|p| p.source_root.as_path()).collect();
+  let project_roots: Vec<&Path> = projects.iter().map(|p| p.root.as_path()).collect();
 
   let before = changed_files.len();
   let filtered: Vec<ChangedFile> = changed_files

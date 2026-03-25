@@ -1,8 +1,9 @@
+use crate::types::{ChangedFile, Project};
 use glob::Pattern;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Resolved named inputs configuration from nx.json
@@ -235,6 +236,55 @@ impl ResolvedNamedInputs {
       .iter()
       .any(|root| self.is_negated(file_path, root))
   }
+}
+
+/// Check if any changed file triggers global invalidation.
+/// Returns `Some(file_path)` of the triggering file, or `None`.
+pub fn check_global_invalidation(
+  inputs: &ResolvedNamedInputs,
+  changed_files: &[ChangedFile],
+) -> Option<PathBuf> {
+  for changed_file in changed_files {
+    if inputs.matches_global_pattern(&changed_file.file_path) {
+      debug!(
+        "Global invalidation triggered by {:?}",
+        changed_file.file_path
+      );
+      return Some(changed_file.file_path.clone());
+    }
+  }
+  None
+}
+
+/// Filter out changed files that match negation patterns from namedInputs.
+/// Returns a new vector with negated files removed.
+pub fn filter_negated_files(
+  inputs: &ResolvedNamedInputs,
+  changed_files: Vec<ChangedFile>,
+  projects: &[Project],
+) -> Vec<ChangedFile> {
+  if inputs.negation_suffixes.is_empty() {
+    return changed_files;
+  }
+
+  let project_roots: Vec<&Path> = projects.iter().map(|p| p.source_root.as_path()).collect();
+
+  let before = changed_files.len();
+  let filtered: Vec<ChangedFile> = changed_files
+    .into_iter()
+    .filter(|f| !inputs.is_negated_by_any_project(&f.file_path, &project_roots))
+    .collect();
+  let after = filtered.len();
+
+  if before != after {
+    debug!(
+      "Filtered {} files by namedInputs negation patterns ({} → {})",
+      before - after,
+      before,
+      after
+    );
+  }
+  filtered
 }
 
 #[cfg(test)]

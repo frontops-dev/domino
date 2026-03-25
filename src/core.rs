@@ -59,74 +59,35 @@ fn find_affected_internal(
     });
   }
 
-  // Step 1b: Resolve Nx namedInputs for global invalidation and negation patterns
+  // Step 1b: Apply Nx namedInputs — global invalidation and negation filtering
   let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
-
-  // Step 1c: Check if any changed file matches a global invalidation pattern
-  // If so, ALL projects are affected — short-circuit the entire analysis.
-  if let Some(ref inputs) = resolved_inputs {
-    for changed_file in &changed_files {
-      if inputs.matches_global_pattern(&changed_file.file_path) {
-        debug!(
-          "Global invalidation triggered by {:?}",
-          changed_file.file_path
-        );
-        let mut all_projects: Vec<String> =
-          config.projects.iter().map(|p| p.name.clone()).collect();
-        all_projects.sort();
-
-        profiler.print_report();
-
-        return Ok(AffectedResult {
-          affected_projects: all_projects.clone(),
-          report: if generate_report {
-            Some(AffectedReport {
-              projects: all_projects
-                .iter()
-                .map(|name| AffectedProjectInfo {
-                  name: name.clone(),
-                  causes: vec![AffectCause::GlobalInvalidation {
-                    file: changed_file.file_path.clone(),
-                  }],
-                })
-                .collect(),
-            })
-          } else {
-            None
-          },
-        });
-      }
-    }
-  }
-
-  // Step 1d: Filter out changed files that match negation patterns
   let changed_files = if let Some(ref inputs) = resolved_inputs {
-    if !inputs.negation_suffixes.is_empty() {
-      let project_roots: Vec<&Path> = config
-        .projects
-        .iter()
-        .map(|p| p.source_root.as_path())
-        .collect();
-
-      let before = changed_files.len();
-      let filtered: Vec<ChangedFile> = changed_files
-        .into_iter()
-        .filter(|f| !inputs.is_negated_by_any_project(&f.file_path, &project_roots))
-        .collect();
-      let after = filtered.len();
-
-      if before != after {
-        debug!(
-          "Filtered {} files by namedInputs negation patterns ({} → {})",
-          before - after,
-          before,
-          after
-        );
-      }
-      filtered
-    } else {
-      changed_files
+    // Check for global invalidation (e.g., babel.config.json, patches/*)
+    if let Some(trigger_file) = named_inputs::check_global_invalidation(inputs, &changed_files) {
+      let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
+      all_projects.sort();
+      profiler.print_report();
+      return Ok(AffectedResult {
+        affected_projects: all_projects.clone(),
+        report: if generate_report {
+          Some(AffectedReport {
+            projects: all_projects
+              .iter()
+              .map(|name| AffectedProjectInfo {
+                name: name.clone(),
+                causes: vec![AffectCause::GlobalInvalidation {
+                  file: trigger_file.clone(),
+                }],
+              })
+              .collect(),
+          })
+        } else {
+          None
+        },
+      });
     }
+    // Filter out negated files (e.g., *.figma.tsx)
+    named_inputs::filter_negated_files(inputs, changed_files, &config.projects)
   } else {
     changed_files
   };

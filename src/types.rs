@@ -235,6 +235,12 @@ pub enum AffectCause {
     /// Source file that imports the dependency
     importing_file: PathBuf,
   },
+  /// Global invalidation via Nx namedInputs (e.g., sharedGlobals)
+  #[serde(rename = "global_invalidation")]
+  GlobalInvalidation {
+    /// The file that triggered global invalidation
+    file: PathBuf,
+  },
 }
 
 #[cfg(test)]

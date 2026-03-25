@@ -5,6 +5,7 @@ pub mod core;
 pub mod error;
 pub mod git;
 pub mod lockfile;
+pub mod named_inputs;
 pub mod profiler;
 pub mod report;
 pub mod semantic;

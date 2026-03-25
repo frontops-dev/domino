@@ -3,6 +3,7 @@ mod core;
 mod error;
 mod git;
 mod lockfile;
+mod named_inputs;
 mod profiler;
 mod report;
 mod semantic;

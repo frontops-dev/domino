@@ -856,6 +856,9 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
         AffectCause::LockfileChange { .. } => {
           direct_changes.insert(project.name.clone());
         }
+        AffectCause::GlobalInvalidation { .. } => {
+          direct_changes.insert(project.name.clone());
+        }
       }
     }
   }
@@ -934,7 +937,8 @@ fn generate_details_html(report: &AffectedReport) -> String {
       match cause {
         AffectCause::DirectChange { .. }
         | AffectCause::AssetChange { .. }
-        | AffectCause::LockfileChange { .. } => has_direct = true,
+        | AffectCause::LockfileChange { .. }
+        | AffectCause::GlobalInvalidation { .. } => has_direct = true,
         AffectCause::ImportedSymbol { .. } => has_imported = true,
         _ => {}
       }
@@ -1083,6 +1087,15 @@ fn generate_details_html(report: &AffectedReport) -> String {
           html.push_str(&format!(
             "Imported in: <span class=\"code-path\">{}</span>",
             importing_file.display()
+          ));
+          html.push_str("</div>");
+        }
+        AffectCause::GlobalInvalidation { file } => {
+          html.push_str("<span class=\"cause-type direct\">Global Invalidation</span>");
+          html.push_str("<div class=\"cause-details\">");
+          html.push_str(&format!(
+            "Triggered by: <span class=\"code-path\">{}</span>",
+            file.display()
           ));
           html.push_str("</div>");
         }

@@ -2958,3 +2958,299 @@ fn test_large_single_export_deduplication() {
     affected
   );
 }
+
+// ============================================================================
+// Named Inputs (Nx namedInputs) tests
+// ============================================================================
+
+/// Helper to create a temporary Nx monorepo with namedInputs support
+struct TempNxRepo {
+  dir: TempDir,
+}
+
+impl TempNxRepo {
+  fn new(nx_json: &str) -> Self {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Init git
+    Command::new("git")
+      .args(["init", "-q"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+    Command::new("git")
+      .args(["config", "user.email", "test@example.com"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+    Command::new("git")
+      .args(["config", "user.name", "Test"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+    Command::new("git")
+      .args(["branch", "-M", "main"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    // Write nx.json
+    fs::write(root.join("nx.json"), nx_json).unwrap();
+
+    // Create two projects
+    fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-a/project.json"),
+      r#"{ "name": "lib-a" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-a/src/index.ts"),
+      "export const a = 1;\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("libs/lib-b/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-b/project.json"),
+      r#"{ "name": "lib-b" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-b/src/index.ts"),
+      "export const b = 2;\n",
+    )
+    .unwrap();
+
+    // Create a workspace-root config file that might be a global input
+    fs::write(root.join("babel.config.json"), "{}").unwrap();
+
+    // Initial commit
+    Command::new("git")
+      .args(["add", "."])
+      .current_dir(root)
+      .output()
+      .unwrap();
+    Command::new("git")
+      .args(["commit", "-q", "-m", "init"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    // Create test branch
+    Command::new("git")
+      .args(["checkout", "-q", "-b", "test-branch"])
+      .current_dir(root)
+      .output()
+      .unwrap();
+
+    Self { dir }
+  }
+
+  fn root(&self) -> &std::path::Path {
+    self.dir.path()
+  }
+
+  fn change_and_commit(&self, file: &str, content: &str) {
+    let path = self.root().join(file);
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, content).unwrap();
+    Command::new("git")
+      .args(["add", file])
+      .current_dir(self.root())
+      .output()
+      .unwrap();
+    Command::new("git")
+      .args(["commit", "-q", "-m", &format!("change {}", file)])
+      .current_dir(self.root())
+      .output()
+      .unwrap();
+  }
+
+  fn get_affected(&self) -> Vec<String> {
+    let projects = domino::workspace::discover_projects(self.root()).unwrap();
+    let config = TrueAffectedConfig {
+      cwd: self.root().to_path_buf(),
+      base: "main".to_string(),
+      root_ts_config: None,
+      projects,
+      include: vec![],
+      ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
+    };
+
+    let profiler = Arc::new(Profiler::new(false));
+    find_affected(config, profiler)
+      .expect("find_affected failed")
+      .affected_projects
+  }
+}
+
+#[test]
+fn test_named_inputs_global_invalidation() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json"]
+      }
+    }"#,
+  );
+
+  // Change babel.config.json (a global input)
+  repo.change_and_commit("babel.config.json", r#"{"presets": ["@babel/preset-env"]}"#);
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file (should be negated)
+  repo.change_and_commit(
+    "libs/lib-a/src/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected (the only changed file matches a negation pattern)
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (only .figma.tsx changed, which is negated). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_does_not_affect_normal_files() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a normal .ts file (should NOT be negated)
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 42;\n");
+
+  let affected = repo.get_affected();
+
+  // lib-a SHOULD be affected (normal .ts file changed)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected (normal .ts file changed). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_recursive_resolution() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json", "ciInputs"],
+        "ciInputs": ["{workspaceRoot}/ci/utils.sh"]
+      }
+    }"#,
+  );
+
+  // Create and change a deeply-nested global input
+  repo.change_and_commit("ci/utils.sh", "#!/bin/bash\necho 'updated'\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected (ci/utils.sh is resolved through the chain)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_no_config_fallback() {
+  // nx.json without namedInputs — should behave as before
+  let repo = TempNxRepo::new(r#"{"npmScope": "myorg"}"#);
+
+  // Change a normal file
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 99;\n");
+
+  let affected = repo.get_affected();
+
+  // Only lib-a should be affected (normal behavior)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"lib-b".to_string()),
+    "lib-b should NOT be affected (no cross-file reference). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_glob_wildcard_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/patches/*"]
+      }
+    }"#,
+  );
+
+  // Create a patch file
+  repo.change_and_commit("patches/some-dep.patch", "--- a/file\n+++ b/file\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+}

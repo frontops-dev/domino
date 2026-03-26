@@ -1,0 +1,35 @@
+tribunal:
+  api_keys:
+    anthropic: ${ANTHROPIC_API_KEY}
+
+  quorum:
+    strategy: majority
+    min_approvals: 2
+
+  triggers:
+    - opened
+    - synchronize
+
+  conversation:
+    enabled: true
+    respond_to_mentions: true
+
+  agents:
+    - name: rust-specialist
+      role: 'Rust expert. Focus on memory safety, ownership patterns, lifetime correctness, idiomatic Rust, and proper error handling. Check for unsafe code, unwrap misuse, and clippy-level issues.'
+      provider: anthropic
+      model: claude-sonnet-4-6
+      context: diff_with_refs
+
+    - name: security-reviewer
+      role: 'Security specialist. Focus on vulnerabilities, unsafe blocks, injection risks, and supply chain concerns in dependencies.'
+      provider: anthropic
+      model: claude-sonnet-4-6
+      context: diff_with_refs
+      weight: 2
+
+    - name: devils-advocate
+      role: 'Challenge every assumption. Question necessity of changes, edge cases, potential regressions, and whether the complexity is justified.'
+      provider: anthropic
+      model: claude-sonnet-4-6
+      context: diff

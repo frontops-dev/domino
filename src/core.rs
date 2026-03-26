@@ -507,7 +507,6 @@ fn find_affected_internal(
   }
 
   // Step 6: Add implicit dependencies
-  // Step 7: Add implicit dependencies
   add_implicit_dependencies(
     &config.projects,
     &mut affected_packages,

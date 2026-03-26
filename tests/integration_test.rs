@@ -3024,7 +3024,7 @@ impl TempNxRepo {
     fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
     fs::write(
       root.join("libs/lib-a/project.json"),
-      r#"{ "name": "lib-a" }"#,
+      r#"{ "name": "lib-a", "sourceRoot": "libs/lib-a/src" }"#,
     )
     .unwrap();
     fs::write(
@@ -3256,6 +3256,38 @@ fn test_named_inputs_glob_wildcard_pattern() {
   assert!(
     affected.contains(&"lib-b".to_string()),
     "lib-b should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_with_root_differs_from_source_root() {
+  // lib-a has sourceRoot = "libs/lib-a/src" but project root = "libs/lib-a"
+  // Negation patterns should match against project root, not sourceRoot
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file OUTSIDE sourceRoot but INSIDE project root
+  // (e.g., libs/lib-a/Button.figma.tsx — under libs/lib-a/ but not libs/lib-a/src/)
+  repo.change_and_commit(
+    "libs/lib-a/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected — negation pattern matches against project root
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (.figma.tsx outside sourceRoot but inside project root should still be negated). Got: {:?}",
     affected
   );
 }

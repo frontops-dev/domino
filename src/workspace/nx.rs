@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 #[serde(rename_all = "camelCase")]
 struct NxProjectJson {
   name: Option<String>,
+  root: Option<String>,
   source_root: Option<String>,
   project_type: Option<String>,
   #[serde(default)]
@@ -236,8 +237,12 @@ fn get_workspace_json_projects(cwd: &Path) -> Result<Vec<Project>> {
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
 
-      // In workspace.json, the key is the project directory path
-      let root = PathBuf::from(&name);
+      // Use the parsed root property if available, otherwise fall back to the key name
+      let root = nx_project
+        .root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&name));
 
       projects.push(Project {
         name,

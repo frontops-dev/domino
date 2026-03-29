@@ -660,6 +660,21 @@ impl WorkspaceAnalyzer {
     crate::utils::offset_to_line_col(source, offset)
   }
 
+  /// Extract the first binding identifier name from a `VariableDeclaration`.
+  ///
+  /// Returns the name of the first `BindingIdentifier` found among the declarators,
+  /// or `None` if there are no binding identifiers.
+  fn first_binding_name_from_var_decl(
+    var_decl: &oxc_ast::ast::VariableDeclaration,
+  ) -> Option<String> {
+    for declarator in &var_decl.declarations {
+      if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &declarator.id.kind {
+        return Some(ident.name.to_string());
+      }
+    }
+    None
+  }
+
   /// Helper method to extract symbol name from an export declaration
   ///
   /// Handles various export patterns:
@@ -914,12 +929,7 @@ impl WorkspaceAnalyzer {
         // inside the VariableDeclaration span but OUTSIDE the VariableDeclarator span.
         // Without this arm the walk-up loop would never encounter VariableDeclarator
         // (it is a child, not an ancestor) and the function would return empty.
-        for declarator in &var_decl.declarations {
-          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &declarator.id.kind {
-            top_level_name = Some(ident.name.to_string());
-            break;
-          }
-        }
+        top_level_name = Self::first_binding_name_from_var_decl(var_decl);
       }
       _ => {}
     }
@@ -1014,14 +1024,7 @@ impl WorkspaceAnalyzer {
           // inside the `const`/`let`/`var` keyword we hit VariableDeclaration before
           // VariableDeclarator (its child).
           if !found_export_wrapper && top_level_name.is_none() {
-            for declarator in &var_decl.declarations {
-              if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) =
-                &declarator.id.kind
-              {
-                top_level_name = Some(ident.name.to_string());
-                break;
-              }
-            }
+            top_level_name = Self::first_binding_name_from_var_decl(var_decl);
           }
         }
         _ => {}
@@ -1170,6 +1173,49 @@ export const MY_REGEX = new RegExp(combined)"#;
     let result = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), vec!["MY_REGEX".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_let_var_column_zero() {
+    // Regression test: `let` and `var` declarations must also be identified at column 0,
+    // not just `const`.
+    let source = r#"let localLet = 1
+var localVar = 2"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["localLet".to_string()]);
+
+    let result = analyzer.find_node_at_line(file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["localVar".to_string()]);
   }
 
   #[test]

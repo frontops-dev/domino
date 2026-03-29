@@ -370,7 +370,7 @@ export function anotherFn() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1784,7 +1784,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1892,7 +1892,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2019,7 +2019,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2150,7 +2150,7 @@ export function run() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2241,7 +2241,7 @@ fn test_shared_source_root_all_projects_affected() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2419,7 +2419,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2475,7 +2475,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Full,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2536,7 +2536,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2588,7 +2588,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2629,7 +2629,7 @@ fn test_lockfile_no_change_zero_impact() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2775,7 +2775,7 @@ export const mockData: SharedType = { name: 'test' };
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2899,7 +2899,7 @@ export const mockData: SharedType = { name: 'test' };
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-      ignore_tsconfig_excludes: false,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));

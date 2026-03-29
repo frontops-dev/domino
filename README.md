@@ -114,6 +114,7 @@ domino affected --report report.html
 - `--debug`: Enable debug logging
 - `--cwd <PATH>`: Set the current working directory
 - `--lockfile-strategy <STRATEGY>`: Lockfile change detection strategy (default: `direct`)
+- `--ignore-tsconfig-excludes`: Skip tsconfig exclude patterns (e.g., `*.spec.ts`, `*.stories.tsx`). Useful for test targets where test-file imports should also be traced
 
 ### Lockfile Change Detection
 

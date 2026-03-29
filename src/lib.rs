@@ -70,6 +70,8 @@ mod napi_bindings {
     pub enable_profiling: Option<bool>,
     /// Lockfile change detection strategy: "none", "direct", "full" (default: "direct")
     pub lockfile_strategy: Option<String>,
+    /// Skip tsconfig exclude patterns (e.g., *.spec.ts, *.stories.tsx)
+    pub ignore_tsconfig_excludes: Option<bool>,
   }
 
   #[napi(object)]
@@ -100,6 +102,7 @@ mod napi_bindings {
       include: options.include.unwrap_or_default(),
       ignored_paths: options.ignored_paths.unwrap_or_default(),
       lockfile_strategy,
+      ignore_tsconfig_excludes: options.ignore_tsconfig_excludes.unwrap_or(false),
     };
 
     let result =

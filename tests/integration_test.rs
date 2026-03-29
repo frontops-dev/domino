@@ -163,6 +163,7 @@ impl TestBranch {
       include: vec![],
       ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
+      ignore_tsconfig_excludes: false,
     };
 
     // Create a profiler (disabled for tests)
@@ -369,6 +370,7 @@ export function anotherFn() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1782,6 +1784,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -1889,6 +1892,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2015,6 +2019,7 @@ export function main() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2145,6 +2150,7 @@ export function run() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2235,6 +2241,7 @@ fn test_shared_source_root_all_projects_affected() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2412,6 +2419,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2467,6 +2475,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Full,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2527,6 +2536,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2578,6 +2588,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2618,6 +2629,7 @@ fn test_lockfile_no_change_zero_impact() {
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2763,6 +2775,7 @@ export const mockData: SharedType = { name: 'test' };
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2886,6 +2899,7 @@ export const mockData: SharedType = { name: 'test' };
     include: vec![],
     ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
+    ignore_tsconfig_excludes: false,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2955,6 +2969,303 @@ fn test_large_single_export_deduplication() {
   assert!(
     affected.contains(&"proj3".to_string()),
     "proj3 should be affected (implicit dep on proj1). Got: {:?}",
+    affected
+  );
+}
+
+// ============================================================================
+// Named Inputs (Nx namedInputs) tests
+// ============================================================================
+
+/// Helper to create a temporary Nx monorepo with namedInputs support
+struct TempNxRepo {
+  dir: TempDir,
+}
+
+impl TempNxRepo {
+  fn new(nx_json: &str) -> Self {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Init git
+    git_in(root, &["init", "-q"]);
+    git_in(root, &["config", "user.email", "test@example.com"]);
+    git_in(root, &["config", "user.name", "Test"]);
+    git_in(root, &["branch", "-M", "main"]);
+
+    // Write nx.json
+    fs::write(root.join("nx.json"), nx_json).unwrap();
+
+    // Create two projects
+    fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-a/project.json"),
+      r#"{ "name": "lib-a", "sourceRoot": "libs/lib-a/src" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-a/src/index.ts"),
+      "export const a = 1;\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("libs/lib-b/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-b/project.json"),
+      r#"{ "name": "lib-b" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-b/src/index.ts"),
+      "export const b = 2;\n",
+    )
+    .unwrap();
+
+    // Create a workspace-root config file that might be a global input
+    fs::write(root.join("babel.config.json"), "{}").unwrap();
+
+    // Initial commit
+    git_in(root, &["add", "."]);
+    git_in(root, &["commit", "-q", "-m", "init"]);
+
+    // Create test branch
+    git_in(root, &["checkout", "-q", "-b", "test-branch"]);
+
+    Self { dir }
+  }
+
+  fn root(&self) -> &std::path::Path {
+    self.dir.path()
+  }
+
+  fn change_and_commit(&self, file: &str, content: &str) {
+    let path = self.root().join(file);
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, content).unwrap();
+    git_in(self.root(), &["add", file]);
+    git_in(
+      self.root(),
+      &["commit", "-q", "-m", &format!("change {}", file)],
+    );
+  }
+
+  fn get_affected(&self) -> Vec<String> {
+    let projects = domino::workspace::discover_projects(self.root()).unwrap();
+    let config = TrueAffectedConfig {
+      cwd: self.root().to_path_buf(),
+      base: "main".to_string(),
+      root_ts_config: None,
+      projects,
+      include: vec![],
+      ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
+      ignore_tsconfig_excludes: false,
+    };
+
+    let profiler = Arc::new(Profiler::new(false));
+    find_affected(config, profiler)
+      .expect("find_affected failed")
+      .affected_projects
+  }
+}
+
+#[test]
+fn test_named_inputs_global_invalidation() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json"]
+      }
+    }"#,
+  );
+
+  // Change babel.config.json (a global input)
+  repo.change_and_commit("babel.config.json", r#"{"presets": ["@babel/preset-env"]}"#);
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file (should be negated)
+  repo.change_and_commit(
+    "libs/lib-a/src/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected (the only changed file matches a negation pattern)
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (only .figma.tsx changed, which is negated). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_does_not_affect_normal_files() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a normal .ts file (should NOT be negated)
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 42;\n");
+
+  let affected = repo.get_affected();
+
+  // lib-a SHOULD be affected (normal .ts file changed)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected (normal .ts file changed). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_recursive_resolution() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json", "ciInputs"],
+        "ciInputs": ["{workspaceRoot}/ci/utils.sh"]
+      }
+    }"#,
+  );
+
+  // Create and change a deeply-nested global input
+  repo.change_and_commit("ci/utils.sh", "#!/bin/bash\necho 'updated'\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected (ci/utils.sh is resolved through the chain)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_no_config_fallback() {
+  // nx.json without namedInputs — should behave as before
+  let repo = TempNxRepo::new(r#"{"npmScope": "myorg"}"#);
+
+  // Change a normal file
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 99;\n");
+
+  let affected = repo.get_affected();
+
+  // Only lib-a should be affected (normal behavior)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"lib-b".to_string()),
+    "lib-b should NOT be affected (no cross-file reference). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_glob_wildcard_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/patches/*"]
+      }
+    }"#,
+  );
+
+  // Create a patch file
+  repo.change_and_commit("patches/some-dep.patch", "--- a/file\n+++ b/file\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_with_root_differs_from_source_root() {
+  // lib-a has sourceRoot = "libs/lib-a/src" but project root = "libs/lib-a"
+  // Negation patterns should match against project root, not sourceRoot
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file INSIDE sourceRoot — the negation pattern
+  // ({projectRoot}/**/*.figma.tsx) should still exclude it since it's matched
+  // relative to project root (libs/lib-a), not sourceRoot (libs/lib-a/src).
+  repo.change_and_commit(
+    "libs/lib-a/src/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected — negation pattern excludes .figma.tsx files
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (.figma.tsx matched by negation pattern against project root). Got: {:?}",
     affected
   );
 }

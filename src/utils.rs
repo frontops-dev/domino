@@ -33,7 +33,12 @@ pub struct ProjectIndex {
 impl ProjectIndex {
   /// Build the index from a slice of projects, parsing each project's tsconfig
   /// to extract exclude patterns.
-  pub fn new(projects: &[Project], cwd: &Path) -> Self {
+  ///
+  /// When `ignore_tsconfig_excludes` is true, tsconfig exclude patterns are not
+  /// loaded — every file under a project's sourceRoot counts toward marking it
+  /// affected. This is useful for test targets where test-file imports should
+  /// also be traced.
+  pub fn new(projects: &[Project], cwd: &Path, ignore_tsconfig_excludes: bool) -> Self {
     let mut map: Vec<(PathBuf, Vec<String>)> = Vec::new();
     let mut excludes = FxHashMap::default();
 
@@ -47,17 +52,23 @@ impl ProjectIndex {
         map.push((project.source_root.clone(), vec![project.name.clone()]));
       }
 
-      if let Some(ts_config) = &project.ts_config {
-        if let Some(parsed) = TsconfigExcludes::parse(ts_config, cwd) {
-          debug!(
-            "Loaded {} exclude patterns for project '{}' from {}",
-            parsed.pattern_count(),
-            project.name,
-            ts_config.display()
-          );
-          excludes.insert(project.name.clone(), parsed);
+      if !ignore_tsconfig_excludes {
+        if let Some(ts_config) = &project.ts_config {
+          if let Some(parsed) = TsconfigExcludes::parse(ts_config, cwd) {
+            debug!(
+              "Loaded {} exclude patterns for project '{}' from {}",
+              parsed.pattern_count(),
+              project.name,
+              ts_config.display()
+            );
+            excludes.insert(project.name.clone(), parsed);
+          }
         }
       }
+    }
+
+    if ignore_tsconfig_excludes {
+      debug!("Tsconfig excludes disabled — all files count toward affected detection");
     }
 
     Self {
@@ -190,7 +201,7 @@ mod tests {
       },
     ];
 
-    let index = ProjectIndex::new(&projects, tmp.path());
+    let index = ProjectIndex::new(&projects, tmp.path(), false);
 
     assert_eq!(
       index.get_package_names_by_path(Path::new("libs/core/src/index.ts")),
@@ -233,7 +244,7 @@ mod tests {
       },
     ];
 
-    let index = ProjectIndex::new(&projects, tmp.path());
+    let index = ProjectIndex::new(&projects, tmp.path(), false);
 
     // File in shared sourceRoot should match both projects
     let mut result = index.get_package_names_by_path(Path::new("projects/app-desktop/src/main.ts"));
@@ -270,7 +281,7 @@ mod tests {
       targets: vec![],
     }];
 
-    let index = ProjectIndex::new(&projects, cwd);
+    let index = ProjectIndex::new(&projects, cwd, false);
 
     assert_eq!(
       index.get_package_names_by_path(Path::new("libs/ui-widgets/src/index.ts")),

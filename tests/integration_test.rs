@@ -3079,6 +3079,7 @@ impl TempNxRepo {
     let config = TrueAffectedConfig {
       cwd: self.root().to_path_buf(),
       base: "main".to_string(),
+      head: None,
       root_ts_config: None,
       projects,
       include: vec![],
@@ -3288,6 +3289,10 @@ fn test_named_inputs_negation_with_root_differs_from_source_root() {
   assert!(
     !affected.contains(&"lib-a".to_string()),
     "lib-a should NOT be affected (.figma.tsx matched by negation pattern against project root). Got: {:?}",
+    affected
+  );
+}
+
 #[test]
 fn test_head_flag_commit_to_commit_diff() {
   let branch = TestBranch::new("test-head-flag");
@@ -3318,6 +3323,7 @@ export function unusedFn() {
     projects: vec![
       Project {
         name: "proj1".to_string(),
+        root: PathBuf::from("proj1"),
         source_root: PathBuf::from("proj1"),
         ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -3325,6 +3331,7 @@ export function unusedFn() {
       },
       Project {
         name: "proj2".to_string(),
+        root: PathBuf::from("proj2"),
         source_root: PathBuf::from("proj2"),
         ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -3332,6 +3339,7 @@ export function unusedFn() {
       },
       Project {
         name: "proj3".to_string(),
+        root: PathBuf::from("proj3"),
         source_root: PathBuf::from("proj3"),
         ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
         implicit_dependencies: vec!["proj1".to_string()],

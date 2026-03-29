@@ -908,6 +908,19 @@ impl WorkspaceAnalyzer {
         found_export_wrapper = true;
         top_level_name = Some("default".to_string());
       }
+      AstKind::VariableDeclaration(var_decl) => {
+        // Handle non-exported variable declarations (e.g., `const x = ...`).
+        // At column 0 the cursor lands on the `const`/`let`/`var` keyword, which is
+        // inside the VariableDeclaration span but OUTSIDE the VariableDeclarator span.
+        // Without this arm the walk-up loop would never encounter VariableDeclarator
+        // (it is a child, not an ancestor) and the function would return empty.
+        for declarator in &var_decl.declarations {
+          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &declarator.id.kind {
+            top_level_name = Some(ident.name.to_string());
+            break;
+          }
+        }
+      }
       _ => {}
     }
 
@@ -996,6 +1009,21 @@ impl WorkspaceAnalyzer {
             }
           }
         }
+        AstKind::VariableDeclaration(var_decl) => {
+          // Same rationale as the initial-node check: when walking up from a position
+          // inside the `const`/`let`/`var` keyword we hit VariableDeclaration before
+          // VariableDeclarator (its child).
+          if !found_export_wrapper && top_level_name.is_none() {
+            for declarator in &var_decl.declarations {
+              if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) =
+                &declarator.id.kind
+              {
+                top_level_name = Some(ident.name.to_string());
+                break;
+              }
+            }
+          }
+        }
         _ => {}
       }
 
@@ -1079,15 +1107,69 @@ export { MemoizedComponent };"#;
     let symbol = result.unwrap();
     assert_eq!(symbol, vec!["MemoizedComponent".to_string()]);
 
-    // Test with column 0 (line start) - should still find a containing symbol
+    // Test with column 0 (line start) - should find the VariableDeclaration container
     let result = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result.is_ok());
+    let symbol = result.unwrap();
+    assert_eq!(symbol, vec!["MemoizedComponent".to_string()]);
 
     // Test line 4 with AnotherVar
     let result = analyzer.find_node_at_line(file_path, 4, 10);
     assert!(result.is_ok());
     let symbol = result.unwrap();
     assert_eq!(symbol, vec!["AnotherVar".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_const_column_zero() {
+    // Regression test: non-exported `const` declarations must be identified
+    // when find_node_at_line is called with column 0 (the `const` keyword).
+    // Previously this returned empty because VariableDeclaration was not handled.
+    let source = r#"const basePattern = `some-pattern`
+const combined = `prefix-${basePattern}-suffix`
+export const MY_REGEX = new RegExp(combined)"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 1: `const basePattern = ...` — column 0 is the `const` keyword
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["basePattern".to_string()]);
+
+    // Line 2: `const combined = ...` — column 0
+    let result = analyzer.find_node_at_line(file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["combined".to_string()]);
+
+    // Line 3: `export const MY_REGEX = ...` — column 0 (export keyword)
+    let result = analyzer.find_node_at_line(file_path, 3, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["MY_REGEX".to_string()]);
   }
 
   #[test]

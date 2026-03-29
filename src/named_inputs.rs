@@ -12,10 +12,9 @@ pub struct ResolvedNamedInputs {
   /// Glob patterns for workspace-root files that invalidate all projects
   /// e.g., "babel.config.json", "patches/*"
   pub global_patterns: Vec<Pattern>,
-  /// Negation glob patterns for project-root files to exclude
-  /// Stored as (pattern_suffix) where the caller replaces {projectRoot} with actual root
+  /// Pre-compiled negation glob patterns for project-root files to exclude
   /// e.g., "**/*.figma.tsx"
-  pub negation_suffixes: Vec<String>,
+  pub negation_patterns: Vec<Pattern>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,14 +56,21 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
   }
 
   let mut global_patterns = Vec::new();
-  let mut negation_suffixes = Vec::new();
+  let mut negation_patterns = Vec::new();
 
   for pattern_str in &resolved_patterns {
     if let Some(negated) = pattern_str.strip_prefix('!') {
       // Negation pattern
       if let Some(suffix) = negated.strip_prefix("{projectRoot}/") {
-        debug!("Negation pattern (project-root): !{}", suffix);
-        negation_suffixes.push(suffix.to_string());
+        match Pattern::new(suffix) {
+          Ok(pat) => {
+            debug!("Negation pattern (project-root): !{}", suffix);
+            negation_patterns.push(pat);
+          }
+          Err(e) => {
+            warn!("Invalid negation glob pattern '{}': {}", suffix, e);
+          }
+        }
       } else if let Some(suffix) = negated.strip_prefix("{workspaceRoot}/") {
         debug!(
           "Negation pattern (workspace-root): !{} — skipping (not yet supported)",
@@ -73,16 +79,9 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
       }
     } else if let Some(suffix) = pattern_str.strip_prefix("{workspaceRoot}/") {
       // Global workspace-root pattern
-      let opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-      };
       match Pattern::new(suffix) {
         Ok(pat) => {
           debug!("Global pattern: {}", suffix);
-          // Verify the pattern actually works with our options
-          let _ = pat.matches_with("test", opts);
           global_patterns.push(pat);
         }
         Err(e) => {
@@ -93,20 +92,20 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
     // {projectRoot}/** positive patterns are already handled by sourceRoot-based ownership
   }
 
-  if global_patterns.is_empty() && negation_suffixes.is_empty() {
+  if global_patterns.is_empty() && negation_patterns.is_empty() {
     debug!("No actionable patterns resolved from namedInputs");
     return None;
   }
 
   debug!(
-    "Resolved {} global patterns, {} negation suffixes",
+    "Resolved {} global patterns, {} negation patterns",
     global_patterns.len(),
-    negation_suffixes.len()
+    negation_patterns.len()
   );
 
   Some(ResolvedNamedInputs {
     global_patterns,
-    negation_suffixes,
+    negation_patterns,
   })
 }
 
@@ -185,7 +184,7 @@ impl ResolvedNamedInputs {
   /// `file_path` should be relative to workspace root.
   /// `project_root` is the project's source root (relative to workspace root).
   pub fn is_negated(&self, file_path: &Path, project_root: &Path) -> bool {
-    if self.negation_suffixes.is_empty() {
+    if self.negation_patterns.is_empty() {
       return false;
     }
 
@@ -206,21 +205,14 @@ impl ResolvedNamedInputs {
       require_literal_leading_dot: false,
     };
 
-    for suffix in &self.negation_suffixes {
-      match Pattern::new(suffix) {
-        Ok(pat) => {
-          if pat.matches_with(relative_str, opts) {
-            debug!(
-              "File '{}' excluded by negation pattern '!{{projectRoot}}/{}'",
-              file_path.display(),
-              suffix
-            );
-            return true;
-          }
-        }
-        Err(e) => {
-          warn!("Invalid negation pattern '{}': {}", suffix, e);
-        }
+    for pat in &self.negation_patterns {
+      if pat.matches_with(relative_str, opts) {
+        debug!(
+          "File '{}' excluded by negation pattern '!{{projectRoot}}/{}'",
+          file_path.display(),
+          pat.as_str()
+        );
+        return true;
       }
     }
     false
@@ -229,7 +221,7 @@ impl ResolvedNamedInputs {
   /// Check if a file is negated by any of the given project roots.
   /// Returns true if the file matches a negation pattern for any project that owns it.
   pub fn is_negated_by_any_project(&self, file_path: &Path, project_roots: &[&Path]) -> bool {
-    if self.negation_suffixes.is_empty() {
+    if self.negation_patterns.is_empty() {
       return false;
     }
     project_roots
@@ -263,7 +255,7 @@ pub fn filter_negated_files(
   changed_files: Vec<ChangedFile>,
   projects: &[Project],
 ) -> Vec<ChangedFile> {
-  if inputs.negation_suffixes.is_empty() {
+  if inputs.negation_patterns.is_empty() {
     return changed_files;
   }
 
@@ -340,7 +332,7 @@ mod tests {
     );
 
     let resolved = resolve_from_nx_json(root).unwrap();
-    assert_eq!(resolved.negation_suffixes.len(), 2);
+    assert_eq!(resolved.negation_patterns.len(), 2);
 
     let project_root = PathBuf::from("libs/ui");
     assert!(resolved.is_negated(

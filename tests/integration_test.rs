@@ -2986,21 +2986,6 @@ fn test_large_single_export_deduplication() {
 // Named Inputs (Nx namedInputs) tests
 // ============================================================================
 
-/// Run a git command and assert it succeeds
-fn run_git(root: &std::path::Path, args: &[&str]) {
-  let output = Command::new("git")
-    .args(args)
-    .current_dir(root)
-    .output()
-    .expect("failed to execute git");
-  assert!(
-    output.status.success(),
-    "git {} failed: {}",
-    args.join(" "),
-    String::from_utf8_lossy(&output.stderr)
-  );
-}
-
 /// Helper to create a temporary Nx monorepo with namedInputs support
 struct TempNxRepo {
   dir: TempDir,
@@ -3012,10 +2997,10 @@ impl TempNxRepo {
     let root = dir.path();
 
     // Init git
-    run_git(root, &["init", "-q"]);
-    run_git(root, &["config", "user.email", "test@example.com"]);
-    run_git(root, &["config", "user.name", "Test"]);
-    run_git(root, &["branch", "-M", "main"]);
+    git_in(root, &["init", "-q"]);
+    git_in(root, &["config", "user.email", "test@example.com"]);
+    git_in(root, &["config", "user.name", "Test"]);
+    git_in(root, &["branch", "-M", "main"]);
 
     // Write nx.json
     fs::write(root.join("nx.json"), nx_json).unwrap();
@@ -3049,11 +3034,11 @@ impl TempNxRepo {
     fs::write(root.join("babel.config.json"), "{}").unwrap();
 
     // Initial commit
-    run_git(root, &["add", "."]);
-    run_git(root, &["commit", "-q", "-m", "init"]);
+    git_in(root, &["add", "."]);
+    git_in(root, &["commit", "-q", "-m", "init"]);
 
     // Create test branch
-    run_git(root, &["checkout", "-q", "-b", "test-branch"]);
+    git_in(root, &["checkout", "-q", "-b", "test-branch"]);
 
     Self { dir }
   }
@@ -3068,8 +3053,8 @@ impl TempNxRepo {
       fs::create_dir_all(parent).unwrap();
     }
     fs::write(&path, content).unwrap();
-    run_git(self.root(), &["add", file]);
-    run_git(
+    git_in(self.root(), &["add", file]);
+    git_in(
       self.root(),
       &["commit", "-q", "-m", &format!("change {}", file)],
     );
@@ -3275,19 +3260,20 @@ fn test_named_inputs_negation_with_root_differs_from_source_root() {
     }"#,
   );
 
-  // Change a .figma.tsx file OUTSIDE sourceRoot but INSIDE project root
-  // (e.g., libs/lib-a/Button.figma.tsx — under libs/lib-a/ but not libs/lib-a/src/)
+  // Change a .figma.tsx file INSIDE sourceRoot — the negation pattern
+  // ({projectRoot}/**/*.figma.tsx) should still exclude it since it's matched
+  // relative to project root (libs/lib-a), not sourceRoot (libs/lib-a/src).
   repo.change_and_commit(
-    "libs/lib-a/Button.figma.tsx",
+    "libs/lib-a/src/Button.figma.tsx",
     "export const FigmaButton = () => {};\n",
   );
 
   let affected = repo.get_affected();
 
-  // lib-a should NOT be affected — negation pattern matches against project root
+  // lib-a should NOT be affected — negation pattern excludes .figma.tsx files
   assert!(
     !affected.contains(&"lib-a".to_string()),
-    "lib-a should NOT be affected (.figma.tsx outside sourceRoot but inside project root should still be negated). Got: {:?}",
+    "lib-a should NOT be affected (.figma.tsx matched by negation pattern against project root). Got: {:?}",
     affected
   );
 }

@@ -67,23 +67,24 @@ fn find_affected_internal(
       let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
       all_projects.sort();
       profiler.print_report();
+      let report = if generate_report {
+        Some(AffectedReport {
+          projects: all_projects
+            .iter()
+            .map(|name| AffectedProjectInfo {
+              name: name.clone(),
+              causes: vec![AffectCause::GlobalInvalidation {
+                file: trigger_file.clone(),
+              }],
+            })
+            .collect(),
+        })
+      } else {
+        None
+      };
       return Ok(AffectedResult {
-        affected_projects: all_projects.clone(),
-        report: if generate_report {
-          Some(AffectedReport {
-            projects: all_projects
-              .iter()
-              .map(|name| AffectedProjectInfo {
-                name: name.clone(),
-                causes: vec![AffectCause::GlobalInvalidation {
-                  file: trigger_file.clone(),
-                }],
-              })
-              .collect(),
-          })
-        } else {
-          None
-        },
+        affected_projects: all_projects,
+        report,
       });
     }
     // Filter out negated files (e.g., *.figma.tsx)

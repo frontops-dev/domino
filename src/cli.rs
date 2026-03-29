@@ -58,6 +58,10 @@ enum Commands {
     #[arg(long)]
     report: Option<PathBuf>,
 
+    /// Head commit to compare (defaults to working tree)
+    #[arg(long)]
+    head: Option<String>,
+
     /// Lockfile change detection strategy: none, direct, full
     #[arg(long, default_value = "direct")]
     lockfile_strategy: LockfileStrategy,
@@ -91,6 +95,7 @@ pub fn run() -> Result<()> {
   match cli.command {
     Commands::Affected {
       base,
+      head,
       cwd,
       json,
       all,
@@ -115,6 +120,7 @@ pub fn run() -> Result<()> {
       };
 
       debug!("Discovering projects in {:?}", cwd);
+      debug!("Head: {:?}", head);
 
       // Discover projects
       let projects = workspace::discover_projects(&cwd)?;
@@ -152,6 +158,7 @@ pub fn run() -> Result<()> {
       let config = TrueAffectedConfig {
         cwd: cwd.clone(),
         base,
+        head,
         root_ts_config: ts_config,
         projects,
         include: vec![],

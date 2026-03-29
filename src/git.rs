@@ -39,6 +39,25 @@ pub fn detect_default_branch(repo_path: &Path) -> String {
   "origin/main".to_string()
 }
 
+/// Resolve a git ref to its SHA
+fn resolve_ref(repo_path: &Path, reference: &str) -> Result<String> {
+  let output = Command::new("git")
+    .args(["rev-parse", reference])
+    .current_dir(repo_path)
+    .output()
+    .map_err(|e| DominoError::Other(format!("Failed to execute git rev-parse: {}", e)))?;
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(DominoError::Other(format!(
+      "Git rev-parse failed for '{}': {}",
+      reference, stderr
+    )));
+  }
+
+  Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Get the merge base between two branches
 pub fn get_merge_base(repo_path: &Path, base: &str, head: &str) -> Result<String> {
   // Try git merge-base first
@@ -74,15 +93,24 @@ pub fn get_merge_base(repo_path: &Path, base: &str, head: &str) -> Result<String
   Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Get git diff output between a commit and the working tree
-/// Using two-dot diff (no HEAD target) to include staged and unstaged changes,
-/// matching traf's behavior exactly.
-pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
-  let output = Command::new("git")
-    .arg("diff")
-    .arg(base)
-    .arg("--unified=0")
-    .arg("--relative")
+/// Get git diff output between a commit and a head ref or the working tree.
+///
+/// When `head` is `Some(h)`, performs a two-dot diff between `base` and `h`
+/// (commit-to-commit). When `head` is `None`, diffs `base` against the working
+/// tree (staged and unstaged changes included), matching traf's behavior.
+pub fn get_diff(repo_path: &Path, base: &str, head: Option<&str>) -> Result<String> {
+  let mut cmd = Command::new("git");
+  cmd.arg("diff");
+
+  if let Some(h) = head {
+    cmd.arg(format!("{}..{}", base, h));
+  } else {
+    cmd.arg(base);
+  }
+
+  cmd.arg("--unified=0").arg("--relative");
+
+  let output = cmd
     .current_dir(repo_path)
     .output()
     .map_err(|e| DominoError::Other(format!("Failed to execute git diff: {}", e)))?;
@@ -103,13 +131,28 @@ pub fn get_diff(repo_path: &Path, base: &str) -> Result<String> {
 
 /// Parse git diff output to extract changed files and line numbers.
 /// Returns the changed files along with the computed merge-base SHA.
-pub fn get_changed_files(repo_path: &Path, base: &str) -> Result<(Vec<ChangedFile>, String)> {
+///
+/// When `head` is `Some(h)`, the diff is computed as `base..head`
+/// (commit-to-commit, no merge-base computation). When `head` is `None`,
+/// the diff is computed between `merge-base(base, HEAD)` and the working tree.
+pub fn get_changed_files(
+  repo_path: &Path,
+  base: &str,
+  head: Option<&str>,
+) -> Result<(Vec<ChangedFile>, String)> {
   debug!("Getting diff for base: {}", base);
 
-  let merge_base = get_merge_base(repo_path, base, "HEAD")?;
-  debug!("Merge base: {}", merge_base);
+  let (diff_base, merge_base) = if head.is_some() {
+    debug!("Explicit head provided, using base ref directly");
+    let resolved = resolve_ref(repo_path, base)?;
+    (resolved.clone(), resolved)
+  } else {
+    let mb = get_merge_base(repo_path, base, "HEAD")?;
+    debug!("Merge base: {}", mb);
+    (mb.clone(), mb)
+  };
 
-  let diff = get_diff(repo_path, &merge_base)?;
+  let diff = get_diff(repo_path, &diff_base, head)?;
   let files = parse_diff(&diff)?;
 
   Ok((files, merge_base))

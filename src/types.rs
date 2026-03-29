@@ -146,6 +146,9 @@ pub struct TrueAffectedConfig {
   pub ignored_paths: Vec<String>,
   /// Lockfile change detection strategy
   pub lockfile_strategy: LockfileStrategy,
+  /// When true, skip tsconfig exclude patterns (e.g., *.spec.ts, *.stories.tsx).
+  /// Useful for test targets where test-file imports should also be traced.
+  pub ignore_tsconfig_excludes: bool,
 }
 
 /// Result of the true affected analysis

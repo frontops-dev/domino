@@ -61,6 +61,11 @@ enum Commands {
     /// Lockfile change detection strategy: none, direct, full
     #[arg(long, default_value = "direct")]
     lockfile_strategy: LockfileStrategy,
+
+    /// Skip tsconfig exclude patterns (e.g., *.spec.ts, *.stories.tsx).
+    /// Useful for test targets where test-file imports should also be traced.
+    #[arg(long)]
+    ignore_tsconfig_excludes: bool,
   },
 }
 
@@ -98,6 +103,7 @@ pub fn run() -> Result<()> {
       profile,
       report,
       lockfile_strategy,
+      ignore_tsconfig_excludes,
     } => {
       let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
@@ -162,6 +168,7 @@ pub fn run() -> Result<()> {
           ".git".to_string(),
         ],
         lockfile_strategy,
+        ignore_tsconfig_excludes,
       };
 
       // Use the report-generating version if --report is specified

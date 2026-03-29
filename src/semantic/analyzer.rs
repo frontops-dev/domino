@@ -687,12 +687,7 @@ impl WorkspaceAnalyzer {
   fn extract_symbol_from_export_decl(decl: &oxc_ast::ast::Declaration) -> Option<String> {
     match decl {
       oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
-        for declarator in &var_decl.declarations {
-          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind {
-            return Some(id.name.to_string());
-          }
-        }
-        None
+        Self::first_binding_name_from_var_decl(var_decl)
       }
       oxc_ast::ast::Declaration::FunctionDeclaration(func_decl) => {
         func_decl.id.as_ref().map(|id| id.name.to_string())
@@ -1216,6 +1211,41 @@ var localVar = 2"#;
     let result = analyzer.find_node_at_line(file_path, 2, 0);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), vec!["localVar".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_destructuring_column_zero() {
+    // Documents known limitation: destructuring patterns (e.g., `const { a, b } = obj`)
+    // return empty because first_binding_name_from_var_decl only matches BindingIdentifier,
+    // not ObjectPattern or ArrayPattern.
+    let source = r#"const { a, b } = { a: 1, b: 2 }
+const [x, y] = [1, 2]"#;
+
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    // Object destructuring at column 0 — returns empty (no simple BindingIdentifier)
+    let result = analyzer.find_node_at_line(&file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Vec::<String>::new());
+
+    // Array destructuring at column 0 — also returns empty
+    let result = analyzer.find_node_at_line(&file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Vec::<String>::new());
+  }
+
+  #[test]
+  fn test_find_node_at_line_multiple_declarators_column_zero() {
+    // `const a = 1, b = 2` at column 0 returns only the first declarator ("a").
+    // This is by design: first_binding_name_from_var_decl returns the first
+    // BindingIdentifier found.
+    let source = "const a = 1, b = 2";
+
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    let result = analyzer.find_node_at_line(&file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["a".to_string()]);
   }
 
   #[test]

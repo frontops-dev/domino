@@ -63,6 +63,8 @@ mod napi_bindings {
   pub struct FindAffectedOptions {
     pub cwd: String,
     pub base: String,
+    /// Head commit to compare (defaults to working tree)
+    pub head: Option<String>,
     pub root_ts_config: Option<String>,
     pub projects: Vec<NapiProject>,
     pub include: Option<Vec<String>>,
@@ -95,6 +97,7 @@ mod napi_bindings {
     let config = TrueAffectedConfig {
       cwd,
       base: options.base,
+      head: options.head,
       root_ts_config: options.root_ts_config.map(PathBuf::from),
       projects,
       include: options.include.unwrap_or_default(),

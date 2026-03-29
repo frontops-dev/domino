@@ -136,6 +136,7 @@ impl TestBranch {
     let config = TrueAffectedConfig {
       cwd: fixture_path(),
       base: "main".to_string(),
+      head: None,
       root_ts_config: Some(PathBuf::from("tsconfig.json")),
       projects: vec![
         Project {
@@ -342,6 +343,7 @@ export function anotherFn() {
   let config = TrueAffectedConfig {
     cwd: fixture_path(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: Some(PathBuf::from("tsconfig.json")),
     projects: vec![
       Project {
@@ -1762,6 +1764,7 @@ export function main() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -1869,6 +1872,7 @@ export function main() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -1995,6 +1999,7 @@ export function main() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -2124,6 +2129,7 @@ export function run() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -2215,6 +2221,7 @@ fn test_shared_source_root_all_projects_affected() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -2407,6 +2414,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: lockfile_projects(),
     include: vec![],
@@ -2462,6 +2470,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: lockfile_projects(),
     include: vec![],
@@ -2522,6 +2531,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: lockfile_projects(),
     include: vec![],
@@ -2573,6 +2583,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: lockfile_projects(),
     include: vec![],
@@ -2613,6 +2624,7 @@ fn test_lockfile_no_change_zero_impact() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: lockfile_projects(),
     include: vec![],
@@ -2743,6 +2755,7 @@ export const mockData: SharedType = { name: 'test' };
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -2866,6 +2879,7 @@ export const mockData: SharedType = { name: 'test' };
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
     root_ts_config: None,
     projects: vec![
       Project {
@@ -2952,6 +2966,83 @@ fn test_large_single_export_deduplication() {
   );
 
   // proj3 should be affected (implicit dependency on proj1)
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dep on proj1). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_head_flag_commit_to_commit_diff() {
+  let branch = TestBranch::new("test-head-flag");
+
+  // Make a change on the branch
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'modified-for-head-test';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  // Get the branch tip commit SHA
+  let head_sha = git_command(&["rev-parse", "HEAD"]);
+  let main_sha = git_command(&["rev-parse", "main"]);
+
+  // Use explicit head to compare commits directly
+  let config = TrueAffectedConfig {
+    cwd: fixture_path(),
+    base: main_sha,
+    head: Some(head_sha),
+    root_ts_config: Some(PathBuf::from("tsconfig.json")),
+    projects: vec![
+      Project {
+        name: "proj1".to_string(),
+        source_root: PathBuf::from("proj1"),
+        ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj2".to_string(),
+        source_root: PathBuf::from("proj2"),
+        ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj3".to_string(),
+        source_root: PathBuf::from("proj3"),
+        ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
+        implicit_dependencies: vec!["proj1".to_string()],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("Failed to find affected projects with --head")
+    .affected_projects;
+
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (directly changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (imports from proj1). Got: {:?}",
+    affected
+  );
   assert!(
     affected.contains(&"proj3".to_string()),
     "proj3 should be affected (implicit dep on proj1). Got: {:?}",

@@ -1001,6 +1001,10 @@
                 <span class="option-desc">Base branch to compare against. Default: <code>origin/main</code></span>
               </li>
               <li class="option-item">
+                <span class="option-flag">--head &lt;COMMIT&gt;</span>
+                <span class="option-desc">Head commit to compare. Enables commit-to-commit diffs instead of diffing against the working tree</span>
+              </li>
+              <li class="option-item">
                 <span class="option-flag">--all</span>
                 <span class="option-desc">List all projects in the workspace, regardless of changes</span>
               </li>
@@ -1032,6 +1036,9 @@
             <h3>Examples</h3>
             <pre><code><span class="t-comment"># Compare against a different branch</span>
 <span class="t-cmd">domino</span> affected <span class="t-flag">--base</span> <span class="t-val">origin/develop</span>
+
+<span class="t-comment"># Compare specific commits (useful in CI patch pipelines)</span>
+<span class="t-cmd">domino</span> affected <span class="t-flag">--base</span> <span class="t-val">abc123</span> <span class="t-flag">--head</span> <span class="t-val">def456</span>
 
 <span class="t-comment"># Run on a different directory</span>
 <span class="t-cmd">domino</span> affected <span class="t-flag">--cwd</span> <span class="t-val">/path/to/monorepo</span>
@@ -1153,6 +1160,7 @@ start report.html</code></pre>
 <span class="t-keyword">const</span> affected = <span class="t-keyword">await</span> <span class="t-cmd">findAffected</span>({
   cwd: <span class="t-val">'/path/to/monorepo'</span>,
   base: <span class="t-val">'origin/main'</span>,
+  head: <span class="t-val">'abc123'</span>,              <span class="t-comment">// optional — defaults to working tree</span>
   lockfileStrategy: <span class="t-val">'direct'</span>,  <span class="t-comment">// 'none' | 'direct' | 'full'</span>
 })
 

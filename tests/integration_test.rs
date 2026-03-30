@@ -141,6 +141,7 @@ impl TestBranch {
       projects: vec![
         Project {
           name: "proj1".to_string(),
+          root: PathBuf::from("proj1"),
           source_root: PathBuf::from("proj1"),
           ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
           implicit_dependencies: vec![],
@@ -148,6 +149,7 @@ impl TestBranch {
         },
         Project {
           name: "proj2".to_string(),
+          root: PathBuf::from("proj2"),
           source_root: PathBuf::from("proj2"),
           ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
           implicit_dependencies: vec![],
@@ -155,6 +157,7 @@ impl TestBranch {
         },
         Project {
           name: "proj3".to_string(),
+          root: PathBuf::from("proj3"),
           source_root: PathBuf::from("proj3"),
           ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
           implicit_dependencies: vec!["proj1".to_string()],
@@ -348,6 +351,7 @@ export function anotherFn() {
     projects: vec![
       Project {
         name: "proj1".to_string(),
+        root: PathBuf::from("proj1"),
         source_root: PathBuf::from("proj1"),
         ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -355,6 +359,7 @@ export function anotherFn() {
       },
       Project {
         name: "proj2".to_string(),
+        root: PathBuf::from("proj2"),
         source_root: PathBuf::from("proj2"),
         ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -362,6 +367,7 @@ export function anotherFn() {
       },
       Project {
         name: "proj3".to_string(),
+        root: PathBuf::from("proj3"),
         source_root: PathBuf::from("proj3"),
         ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
         implicit_dependencies: vec!["proj1".to_string()],
@@ -1769,6 +1775,7 @@ export function main() {
     projects: vec![
       Project {
         name: "lib".to_string(),
+        root: PathBuf::from("lib"),
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -1776,6 +1783,7 @@ export function main() {
       },
       Project {
         name: "app".to_string(),
+        root: PathBuf::from("app"),
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -1877,6 +1885,7 @@ export function main() {
     projects: vec![
       Project {
         name: "lib".to_string(),
+        root: PathBuf::from("lib"),
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -1884,6 +1893,7 @@ export function main() {
       },
       Project {
         name: "app".to_string(),
+        root: PathBuf::from("app"),
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2004,6 +2014,7 @@ export function main() {
     projects: vec![
       Project {
         name: "@test/lib".to_string(),
+        root: PathBuf::from("lib"),
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2011,6 +2022,7 @@ export function main() {
       },
       Project {
         name: "@test/app".to_string(),
+        root: PathBuf::from("app"),
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2135,6 +2147,7 @@ export function run() {
       Project {
         // Nx project name does NOT match the tsconfig path alias
         name: "my-lib".to_string(),
+        root: PathBuf::from("libs/my-lib/src"),
         source_root: PathBuf::from("libs/my-lib/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2142,6 +2155,7 @@ export function run() {
       },
       Project {
         name: "my-app".to_string(),
+        root: PathBuf::from("apps/my-app/src"),
         source_root: PathBuf::from("apps/my-app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2226,6 +2240,7 @@ fn test_shared_source_root_all_projects_affected() {
     projects: vec![
       Project {
         name: "app-desktop".to_string(),
+        root: PathBuf::from("projects/app-desktop/src"),
         source_root: PathBuf::from("projects/app-desktop/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2233,6 +2248,7 @@ fn test_shared_source_root_all_projects_affected() {
       },
       Project {
         name: "app-desktop-mv3".to_string(),
+        root: PathBuf::from("projects/app-desktop/src"),
         source_root: PathBuf::from("projects/app-desktop/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2359,6 +2375,7 @@ fn lockfile_projects() -> Vec<Project> {
   vec![
     Project {
       name: "proj-a".to_string(),
+      root: PathBuf::from("proj-a"),
       source_root: PathBuf::from("proj-a"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -2366,6 +2383,7 @@ fn lockfile_projects() -> Vec<Project> {
     },
     Project {
       name: "proj-b".to_string(),
+      root: PathBuf::from("proj-b"),
       source_root: PathBuf::from("proj-b"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -2373,6 +2391,7 @@ fn lockfile_projects() -> Vec<Project> {
     },
     Project {
       name: "proj-c".to_string(),
+      root: PathBuf::from("proj-c"),
       source_root: PathBuf::from("proj-c"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -2760,6 +2779,7 @@ export const mockData: SharedType = { name: 'test' };
     projects: vec![
       Project {
         name: "shared-types".to_string(),
+        root: PathBuf::from("shared-types/src"),
         source_root: PathBuf::from("shared-types/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2767,6 +2787,7 @@ export const mockData: SharedType = { name: 'test' };
       },
       Project {
         name: "ui-widgets".to_string(),
+        root: PathBuf::from("ui-widgets/src"),
         source_root: PathBuf::from("ui-widgets/src"),
         ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
         implicit_dependencies: vec![],
@@ -2884,6 +2905,7 @@ export const mockData: SharedType = { name: 'test' };
     projects: vec![
       Project {
         name: "shared-types".to_string(),
+        root: PathBuf::from("shared-types/src"),
         source_root: PathBuf::from("shared-types/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2891,6 +2913,7 @@ export const mockData: SharedType = { name: 'test' };
       },
       Project {
         name: "ui-widgets".to_string(),
+        root: PathBuf::from("ui-widgets/src"),
         source_root: PathBuf::from("ui-widgets/src"),
         ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
         implicit_dependencies: vec![],
@@ -2973,6 +2996,303 @@ fn test_large_single_export_deduplication() {
   );
 }
 
+// ============================================================================
+// Named Inputs (Nx namedInputs) tests
+// ============================================================================
+
+/// Helper to create a temporary Nx monorepo with namedInputs support
+struct TempNxRepo {
+  dir: TempDir,
+}
+
+impl TempNxRepo {
+  fn new(nx_json: &str) -> Self {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Init git
+    git_in(root, &["init", "-q"]);
+    git_in(root, &["config", "user.email", "test@example.com"]);
+    git_in(root, &["config", "user.name", "Test"]);
+    git_in(root, &["branch", "-M", "main"]);
+
+    // Write nx.json
+    fs::write(root.join("nx.json"), nx_json).unwrap();
+
+    // Create two projects
+    fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-a/project.json"),
+      r#"{ "name": "lib-a", "sourceRoot": "libs/lib-a/src" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-a/src/index.ts"),
+      "export const a = 1;\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("libs/lib-b/src")).unwrap();
+    fs::write(
+      root.join("libs/lib-b/project.json"),
+      r#"{ "name": "lib-b" }"#,
+    )
+    .unwrap();
+    fs::write(
+      root.join("libs/lib-b/src/index.ts"),
+      "export const b = 2;\n",
+    )
+    .unwrap();
+
+    // Create a workspace-root config file that might be a global input
+    fs::write(root.join("babel.config.json"), "{}").unwrap();
+
+    // Initial commit
+    git_in(root, &["add", "."]);
+    git_in(root, &["commit", "-q", "-m", "init"]);
+
+    // Create test branch
+    git_in(root, &["checkout", "-q", "-b", "test-branch"]);
+
+    Self { dir }
+  }
+
+  fn root(&self) -> &std::path::Path {
+    self.dir.path()
+  }
+
+  fn change_and_commit(&self, file: &str, content: &str) {
+    let path = self.root().join(file);
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, content).unwrap();
+    git_in(self.root(), &["add", file]);
+    git_in(
+      self.root(),
+      &["commit", "-q", "-m", &format!("change {}", file)],
+    );
+  }
+
+  fn get_affected(&self) -> Vec<String> {
+    let projects = domino::workspace::discover_projects(self.root()).unwrap();
+    let config = TrueAffectedConfig {
+      cwd: self.root().to_path_buf(),
+      base: "main".to_string(),
+      head: None,
+      root_ts_config: None,
+      projects,
+      include: vec![],
+      ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
+    };
+
+    let profiler = Arc::new(Profiler::new(false));
+    find_affected(config, profiler)
+      .expect("find_affected failed")
+      .affected_projects
+  }
+}
+
+#[test]
+fn test_named_inputs_global_invalidation() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json"]
+      }
+    }"#,
+  );
+
+  // Change babel.config.json (a global input)
+  repo.change_and_commit("babel.config.json", r#"{"presets": ["@babel/preset-env"]}"#);
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file (should be negated)
+  repo.change_and_commit(
+    "libs/lib-a/src/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected (the only changed file matches a negation pattern)
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (only .figma.tsx changed, which is negated). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_does_not_affect_normal_files() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a normal .ts file (should NOT be negated)
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 42;\n");
+
+  let affected = repo.get_affected();
+
+  // lib-a SHOULD be affected (normal .ts file changed)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected (normal .ts file changed). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_recursive_resolution() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json", "ciInputs"],
+        "ciInputs": ["{workspaceRoot}/ci/utils.sh"]
+      }
+    }"#,
+  );
+
+  // Create and change a deeply-nested global input
+  repo.change_and_commit("ci/utils.sh", "#!/bin/bash\necho 'updated'\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected (ci/utils.sh is resolved through the chain)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by recursive global invalidation. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_no_config_fallback() {
+  // nx.json without namedInputs — should behave as before
+  let repo = TempNxRepo::new(r#"{"npmScope": "myorg"}"#);
+
+  // Change a normal file
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 99;\n");
+
+  let affected = repo.get_affected();
+
+  // Only lib-a should be affected (normal behavior)
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"lib-b".to_string()),
+    "lib-b should NOT be affected (no cross-file reference). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_glob_wildcard_pattern() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/patches/*"]
+      }
+    }"#,
+  );
+
+  // Create a patch file
+  repo.change_and_commit("patches/some-dep.patch", "--- a/file\n+++ b/file\n");
+
+  let affected = repo.get_affected();
+
+  // ALL projects should be affected
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b should be affected by patches/* glob. Got: {:?}",
+    affected
+  );
+}
+
+#[test]
+fn test_named_inputs_negation_with_root_differs_from_source_root() {
+  // lib-a has sourceRoot = "libs/lib-a/src" but project root = "libs/lib-a"
+  // Negation patterns should match against project root, not sourceRoot
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": [
+          "{projectRoot}/**/*",
+          "!{projectRoot}/**/*.figma.tsx"
+        ]
+      }
+    }"#,
+  );
+
+  // Change a .figma.tsx file INSIDE sourceRoot — the negation pattern
+  // ({projectRoot}/**/*.figma.tsx) should still exclude it since it's matched
+  // relative to project root (libs/lib-a), not sourceRoot (libs/lib-a/src).
+  repo.change_and_commit(
+    "libs/lib-a/src/Button.figma.tsx",
+    "export const FigmaButton = () => {};\n",
+  );
+
+  let affected = repo.get_affected();
+
+  // lib-a should NOT be affected — negation pattern excludes .figma.tsx files
+  assert!(
+    !affected.contains(&"lib-a".to_string()),
+    "lib-a should NOT be affected (.figma.tsx matched by negation pattern against project root). Got: {:?}",
+    affected
+  );
+}
+
 #[test]
 fn test_head_flag_commit_to_commit_diff() {
   let branch = TestBranch::new("test-head-flag");
@@ -3003,6 +3323,7 @@ export function unusedFn() {
     projects: vec![
       Project {
         name: "proj1".to_string(),
+        root: PathBuf::from("proj1"),
         source_root: PathBuf::from("proj1"),
         ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -3010,6 +3331,7 @@ export function unusedFn() {
       },
       Project {
         name: "proj2".to_string(),
+        root: PathBuf::from("proj2"),
         source_root: PathBuf::from("proj2"),
         ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
         implicit_dependencies: vec![],
@@ -3017,6 +3339,7 @@ export function unusedFn() {
       },
       Project {
         name: "proj3".to_string(),
+        root: PathBuf::from("proj3"),
         source_root: PathBuf::from("proj3"),
         ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
         implicit_dependencies: vec!["proj1".to_string()],

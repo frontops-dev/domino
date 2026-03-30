@@ -331,6 +331,7 @@ mod tests {
 
     let projects = vec![Project {
       name: "@scope/my-lib".to_string(),
+      root: PathBuf::from("packages/my-lib"),
       source_root: PathBuf::from("packages/my-lib"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -358,6 +359,7 @@ mod tests {
 
     let projects = vec![Project {
       name: "@scope/my-lib".to_string(),
+      root: PathBuf::from("packages/my-lib"),
       source_root: PathBuf::from("packages/my-lib"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -390,6 +392,7 @@ mod tests {
 
     let projects = vec![Project {
       name: "@scope/my-lib".to_string(),
+      root: PathBuf::from("packages/my-lib"),
       source_root: PathBuf::from("packages/my-lib/src"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -420,6 +423,7 @@ mod tests {
     // source_root points to a directory that doesn't exist at all
     let projects = vec![Project {
       name: "@scope/ghost".to_string(),
+      root: PathBuf::from("packages/ghost"),
       source_root: PathBuf::from("packages/ghost"),
       ts_config: None,
       implicit_dependencies: vec![],
@@ -442,6 +446,7 @@ mod tests {
       .iter()
       .map(|n| Project {
         name: n.to_string(),
+        root: PathBuf::from("packages/placeholder"),
         source_root: PathBuf::from("packages/placeholder"),
         ts_config: None,
         implicit_dependencies: vec![],

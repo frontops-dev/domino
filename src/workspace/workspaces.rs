@@ -139,6 +139,7 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
 
   Ok(Project {
     name: pkg_json.name,
+    root: source_root.clone(),
     source_root,
     ts_config: None,
     implicit_dependencies: vec![],

@@ -176,6 +176,7 @@ mod tests {
     let projects = vec![
       Project {
         name: "core".to_string(),
+        root: "libs/core/src".into(),
         source_root: "libs/core/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -183,6 +184,7 @@ mod tests {
       },
       Project {
         name: "nx".to_string(),
+        root: "libs/nx/src".into(),
         source_root: "libs/nx/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -212,6 +214,7 @@ mod tests {
     let projects = vec![
       Project {
         name: "app-desktop".to_string(),
+        root: "projects/app-desktop/src".into(),
         source_root: "projects/app-desktop/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -219,6 +222,7 @@ mod tests {
       },
       Project {
         name: "app-desktop-mv3".to_string(),
+        root: "projects/app-desktop/src".into(),
         source_root: "projects/app-desktop/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -226,6 +230,7 @@ mod tests {
       },
       Project {
         name: "other-project".to_string(),
+        root: "projects/other/src".into(),
         source_root: "projects/other/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -264,6 +269,7 @@ mod tests {
 
     let projects = vec![Project {
       name: "ui-widgets".to_string(),
+      root: "libs/ui-widgets".into(),
       source_root: "libs/ui-widgets/src".into(),
       ts_config: Some(lib_dir.join("tsconfig.lib.json")),
       implicit_dependencies: vec![],

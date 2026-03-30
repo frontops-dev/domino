@@ -5,6 +5,7 @@ pub mod core;
 pub mod error;
 pub mod git;
 pub mod lockfile;
+pub mod named_inputs;
 pub mod profiler;
 pub mod report;
 pub mod semantic;
@@ -29,6 +30,8 @@ mod napi_bindings {
   #[napi(object)]
   pub struct NapiProject {
     pub name: String,
+    /// Project root directory (where project.json lives). Falls back to source_root if not set.
+    pub root: Option<String>,
     pub source_root: String,
     pub ts_config: Option<String>,
     pub implicit_dependencies: Vec<String>,
@@ -39,6 +42,7 @@ mod napi_bindings {
     fn from(project: Project) -> Self {
       Self {
         name: project.name,
+        root: Some(project.root.to_string_lossy().to_string()),
         source_root: project.source_root.to_string_lossy().to_string(),
         ts_config: project.ts_config.map(|p| p.to_string_lossy().to_string()),
         implicit_dependencies: project.implicit_dependencies,
@@ -49,9 +53,16 @@ mod napi_bindings {
 
   impl From<NapiProject> for Project {
     fn from(project: NapiProject) -> Self {
+      let source_root = PathBuf::from(&project.source_root);
+      let root = project
+        .root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| source_root.clone());
       Self {
         name: project.name,
-        source_root: PathBuf::from(project.source_root),
+        root,
+        source_root,
         ts_config: project.ts_config.map(PathBuf::from),
         implicit_dependencies: project.implicit_dependencies,
         targets: project.targets,

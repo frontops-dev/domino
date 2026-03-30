@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::git;
 use crate::lockfile;
+use crate::named_inputs;
 use crate::profiler::Profiler;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
@@ -58,6 +59,40 @@ fn find_affected_internal(
       report: None,
     });
   }
+
+  // Step 1b: Apply Nx namedInputs — global invalidation and negation filtering
+  let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
+  let changed_files = if let Some(ref inputs) = resolved_inputs {
+    // Check for global invalidation (e.g., babel.config.json, patches/*)
+    if let Some(trigger_file) = named_inputs::check_global_invalidation(inputs, &changed_files) {
+      let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
+      all_projects.sort();
+      profiler.print_report();
+      let report = if generate_report {
+        Some(AffectedReport {
+          projects: all_projects
+            .iter()
+            .map(|name| AffectedProjectInfo {
+              name: name.clone(),
+              causes: vec![AffectCause::GlobalInvalidation {
+                file: trigger_file.clone(),
+              }],
+            })
+            .collect(),
+        })
+      } else {
+        None
+      };
+      return Ok(AffectedResult {
+        affected_projects: all_projects,
+        report,
+      });
+    }
+    // Filter out negated files (e.g., *.figma.tsx)
+    named_inputs::filter_negated_files(inputs, changed_files, &config.projects)
+  } else {
+    changed_files
+  };
 
   // Step 2: Build project index for O(unique_roots) lookups instead of O(n_projects)
   // Also parses each project's tsconfig to extract exclude patterns, so that
@@ -791,6 +826,7 @@ mod tests {
     let projects = vec![
       Project {
         name: "app".to_string(),
+        root: PathBuf::from("apps/app"),
         source_root: PathBuf::from("apps/app"),
         ts_config: None,
         implicit_dependencies: vec!["lib1".to_string(), "lib2".to_string()],
@@ -798,6 +834,7 @@ mod tests {
       },
       Project {
         name: "lib1".to_string(),
+        root: PathBuf::from("libs/lib1"),
         source_root: PathBuf::from("libs/lib1"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -805,6 +842,7 @@ mod tests {
       },
       Project {
         name: "lib2".to_string(),
+        root: PathBuf::from("libs/lib2"),
         source_root: PathBuf::from("libs/lib2"),
         ts_config: None,
         implicit_dependencies: vec![],

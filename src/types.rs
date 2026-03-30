@@ -48,7 +48,9 @@ impl FromStr for LockfileStrategy {
 pub struct Project {
   /// Project name
   pub name: String,
-  /// Path to the project source root
+  /// Path to the project root directory (where project.json lives, relative to workspace root)
+  pub root: PathBuf,
+  /// Path to the project source root (may differ from root, e.g. "libs/my-lib/src")
   pub source_root: PathBuf,
   /// Path to the project's tsconfig.json (optional)
   pub ts_config: Option<PathBuf>,
@@ -236,6 +238,12 @@ pub enum AffectCause {
     dependency: String,
     /// Source file that imports the dependency
     importing_file: PathBuf,
+  },
+  /// Global invalidation via Nx namedInputs (e.g., sharedGlobals)
+  #[serde(rename = "global_invalidation")]
+  GlobalInvalidation {
+    /// The file that triggered global invalidation
+    file: PathBuf,
   },
 }
 

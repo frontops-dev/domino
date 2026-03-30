@@ -74,6 +74,7 @@ pub fn get_projects(cwd: &Path) -> Result<Vec<Project>> {
 
     projects.push(Project {
       name,
+      root: source_root.clone(),
       source_root,
       ts_config: None,
       implicit_dependencies: vec![],

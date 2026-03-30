@@ -182,7 +182,7 @@ impl ResolvedNamedInputs {
 
   /// Check if a changed file should be excluded by negation patterns.
   /// `file_path` should be relative to workspace root.
-  /// `project_root` is the project's source root (relative to workspace root).
+  /// `project_root` is the project's root directory (relative to workspace root).
   pub fn is_negated(&self, file_path: &Path, project_root: &Path) -> bool {
     if self.negation_patterns.is_empty() {
       return false;

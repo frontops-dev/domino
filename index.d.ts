@@ -13,15 +13,21 @@ export declare function findAffected(options: FindAffectedOptions): AffectedResu
 export interface FindAffectedOptions {
   cwd: string
   base: string
+  /** Head commit to compare (defaults to working tree) */
+  head?: string
   rootTsConfig?: string
   projects: Array<NapiProject>
   include?: Array<string>
   ignoredPaths?: Array<string>
   enableProfiling?: boolean
+  /** Lockfile change detection strategy: "none", "direct", "full" (default: "direct") */
+  lockfileStrategy?: string
 }
 
 export interface NapiProject {
   name: string
+  /** Project root directory (where project.json lives). Falls back to source_root if not set. */
+  root?: string
   sourceRoot: string
   tsConfig?: string
   implicitDependencies: Array<string>

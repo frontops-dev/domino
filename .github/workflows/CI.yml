@@ -471,7 +471,14 @@ jobs:
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
-          YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install
+          # Retry yarn install to handle npm registry propagation delay after publish.
+          for i in 1 2 3 4 5; do
+            if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+              break
+            fi
+            echo "yarn install attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
           git add package.json Cargo.toml yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           git tag "v${{ steps.bump.outputs.new_version }}"

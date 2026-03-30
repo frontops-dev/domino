@@ -660,6 +660,21 @@ impl WorkspaceAnalyzer {
     crate::utils::offset_to_line_col(source, offset)
   }
 
+  /// Extract the first binding identifier name from a `VariableDeclaration`.
+  ///
+  /// Returns the name of the first `BindingIdentifier` found among the declarators,
+  /// or `None` if there are no binding identifiers.
+  fn first_binding_name_from_var_decl(
+    var_decl: &oxc_ast::ast::VariableDeclaration,
+  ) -> Option<String> {
+    for declarator in &var_decl.declarations {
+      if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &declarator.id.kind {
+        return Some(ident.name.to_string());
+      }
+    }
+    None
+  }
+
   /// Helper method to extract symbol name from an export declaration
   ///
   /// Handles various export patterns:
@@ -672,12 +687,7 @@ impl WorkspaceAnalyzer {
   fn extract_symbol_from_export_decl(decl: &oxc_ast::ast::Declaration) -> Option<String> {
     match decl {
       oxc_ast::ast::Declaration::VariableDeclaration(var_decl) => {
-        for declarator in &var_decl.declarations {
-          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind {
-            return Some(id.name.to_string());
-          }
-        }
-        None
+        Self::first_binding_name_from_var_decl(var_decl)
       }
       oxc_ast::ast::Declaration::FunctionDeclaration(func_decl) => {
         func_decl.id.as_ref().map(|id| id.name.to_string())
@@ -908,6 +918,14 @@ impl WorkspaceAnalyzer {
         found_export_wrapper = true;
         top_level_name = Some("default".to_string());
       }
+      AstKind::VariableDeclaration(var_decl) => {
+        // Handle non-exported variable declarations (e.g., `const x = ...`).
+        // At column 0 the cursor lands on the `const`/`let`/`var` keyword, which is
+        // inside the VariableDeclaration span but OUTSIDE the VariableDeclarator span.
+        // Without this arm the walk-up loop would never encounter VariableDeclarator
+        // (it is a child, not an ancestor) and the function would return empty.
+        top_level_name = Self::first_binding_name_from_var_decl(var_decl);
+      }
       _ => {}
     }
 
@@ -996,6 +1014,14 @@ impl WorkspaceAnalyzer {
             }
           }
         }
+        AstKind::VariableDeclaration(var_decl) => {
+          // Same rationale as the initial-node check: when walking up from a position
+          // inside the `const`/`let`/`var` keyword we hit VariableDeclaration before
+          // VariableDeclarator (its child).
+          if !found_export_wrapper && top_level_name.is_none() {
+            top_level_name = Self::first_binding_name_from_var_decl(var_decl);
+          }
+        }
         _ => {}
       }
 
@@ -1079,15 +1105,147 @@ export { MemoizedComponent };"#;
     let symbol = result.unwrap();
     assert_eq!(symbol, vec!["MemoizedComponent".to_string()]);
 
-    // Test with column 0 (line start) - should still find a containing symbol
+    // Test with column 0 (line start) - should find the VariableDeclaration container
     let result = analyzer.find_node_at_line(file_path, 3, 0);
     assert!(result.is_ok());
+    let symbol = result.unwrap();
+    assert_eq!(symbol, vec!["MemoizedComponent".to_string()]);
 
     // Test line 4 with AnotherVar
     let result = analyzer.find_node_at_line(file_path, 4, 10);
     assert!(result.is_ok());
     let symbol = result.unwrap();
     assert_eq!(symbol, vec!["AnotherVar".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_const_column_zero() {
+    // Regression test: non-exported `const` declarations must be identified
+    // when find_node_at_line is called with column 0 (the `const` keyword).
+    // Previously this returned empty because VariableDeclaration was not handled.
+    let source = r#"const basePattern = `some-pattern`
+const combined = `prefix-${basePattern}-suffix`
+export const MY_REGEX = new RegExp(combined)"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    // Line 1: `const basePattern = ...` — column 0 is the `const` keyword
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["basePattern".to_string()]);
+
+    // Line 2: `const combined = ...` — column 0
+    let result = analyzer.find_node_at_line(file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["combined".to_string()]);
+
+    // Line 3: `export const MY_REGEX = ...` — column 0 (export keyword)
+    let result = analyzer.find_node_at_line(file_path, 3, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["MY_REGEX".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_let_var_column_zero() {
+    // Regression test: `let` and `var` declarations must also be identified at column 0,
+    // not just `const`.
+    let source = r#"let localLet = 1
+var localVar = 2"#;
+
+    let cwd = Path::new(".");
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler).expect("Failed to create analyzer");
+
+    let file_path = Path::new("test.ts");
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, source, source_type);
+    let parse_result = parser.parse();
+    let semantic_builder = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false);
+    let semantic_ret = semantic_builder.build(&parse_result.program);
+    let semantic: oxc_semantic::Semantic<'static> =
+      unsafe { std::mem::transmute(semantic_ret.semantic) };
+
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      FileSemanticData {
+        source: source.to_string(),
+        allocator,
+        semantic,
+      },
+    );
+
+    let result = analyzer.find_node_at_line(file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["localLet".to_string()]);
+
+    let result = analyzer.find_node_at_line(file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["localVar".to_string()]);
+  }
+
+  #[test]
+  fn test_find_node_at_line_non_exported_destructuring_column_zero() {
+    // Documents known limitation: destructuring patterns (e.g., `const { a, b } = obj`)
+    // return empty because first_binding_name_from_var_decl only matches BindingIdentifier,
+    // not ObjectPattern or ArrayPattern.
+    let source = r#"const { a, b } = { a: 1, b: 2 }
+const [x, y] = [1, 2]"#;
+
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    // Object destructuring at column 0 — returns empty (no simple BindingIdentifier)
+    let result = analyzer.find_node_at_line(&file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Vec::<String>::new());
+
+    // Array destructuring at column 0 — also returns empty
+    let result = analyzer.find_node_at_line(&file_path, 2, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Vec::<String>::new());
+  }
+
+  #[test]
+  fn test_find_node_at_line_multiple_declarators_column_zero() {
+    // `const a = 1, b = 2` at column 0 returns only the first declarator ("a").
+    // This is by design: first_binding_name_from_var_decl returns the first
+    // BindingIdentifier found.
+    let source = "const a = 1, b = 2";
+
+    let (analyzer, file_path) = create_analyzer_with_file(source, "test.ts");
+
+    let result = analyzer.find_node_at_line(&file_path, 1, 0);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), vec!["a".to_string()]);
   }
 
   #[test]

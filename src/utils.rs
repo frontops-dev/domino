@@ -1,6 +1,6 @@
 use crate::tsconfig::TsconfigExcludes;
 use crate::types::Project;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
@@ -17,8 +17,8 @@ pub fn is_source_file(path: &Path) -> bool {
     .unwrap_or(false)
 }
 
-/// Pre-built index from sourceRoot to project names for O(unique_roots) lookups
-/// instead of O(total_projects) on every call.
+/// Pre-built index from sourceRoot (and project root) to project names for
+/// O(unique_roots) lookups instead of O(total_projects) on every call.
 ///
 /// Also holds per-project tsconfig exclude patterns so that files excluded
 /// by a project's tsconfig (e.g. `*.stories.tsx`, `*.spec.ts`) don't count
@@ -26,6 +26,10 @@ pub fn is_source_file(path: &Path) -> bool {
 pub struct ProjectIndex {
   /// Each entry is a unique sourceRoot paired with all project names that share it.
   entries: Vec<(PathBuf, Vec<String>)>,
+  /// Each entry is a unique project root paired with all project names that share it.
+  /// Used as a fallback when a file is inside a project's root but outside its sourceRoot
+  /// (e.g. config files like project.json, jest.config.js, tsconfig.json).
+  root_entries: Vec<(PathBuf, Vec<String>)>,
   /// Compiled exclude patterns per project name.
   excludes: FxHashMap<String, TsconfigExcludes>,
 }
@@ -35,9 +39,11 @@ impl ProjectIndex {
   /// to extract exclude patterns.
   pub fn new(projects: &[Project], cwd: &Path) -> Self {
     let mut map: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut root_map: Vec<(PathBuf, Vec<String>)> = Vec::new();
     let mut excludes = FxHashMap::default();
 
     for project in projects {
+      // Index by sourceRoot (primary)
       if let Some(entry) = map
         .iter_mut()
         .find(|(root, _)| *root == project.source_root)
@@ -45,6 +51,15 @@ impl ProjectIndex {
         entry.1.push(project.name.clone());
       } else {
         map.push((project.source_root.clone(), vec![project.name.clone()]));
+      }
+
+      // Index by root (fallback) — only when root differs from sourceRoot
+      if project.root != project.source_root {
+        if let Some(entry) = root_map.iter_mut().find(|(root, _)| *root == project.root) {
+          entry.1.push(project.name.clone());
+        } else {
+          root_map.push((project.root.clone(), vec![project.name.clone()]));
+        }
       }
 
       if let Some(ts_config) = &project.ts_config {
@@ -62,17 +77,51 @@ impl ProjectIndex {
 
     Self {
       entries: map,
+      root_entries: root_map,
       excludes,
     }
   }
 
-  /// Find ALL project names whose sourceRoot is a prefix of `file_path`,
+  /// Find ALL project names whose sourceRoot (or root) is a prefix of `file_path`,
   /// excluding projects whose tsconfig excludes the file.
+  ///
+  /// Checks sourceRoot entries first (with tsconfig exclude filtering), then falls
+  /// back to root entries for files that live inside a project's root but outside its
+  /// sourceRoot (e.g. config files like project.json, jest.config.js).
   pub fn get_package_names_by_path(&self, file_path: &Path) -> Vec<String> {
     let mut result = Vec::new();
+    // Fast path: no root entries means every project has root == sourceRoot,
+    // so there's no fallback to run — skip the hashset allocation entirely.
+    // This is the common case for non-Nx workspaces.
+    if self.root_entries.is_empty() {
+      for (root, names) in &self.entries {
+        if file_path.starts_with(root) {
+          for name in names {
+            if let Some(excl) = self.excludes.get(name) {
+              if excl.is_excluded(file_path) {
+                debug!(
+                  "File {:?} excluded by tsconfig for project '{}'",
+                  file_path, name
+                );
+                continue;
+              }
+            }
+            result.push(name.clone());
+          }
+        }
+      }
+      return result;
+    }
+
+    // Track which projects were already considered via sourceRoot (even if excluded
+    // by tsconfig) so that the root fallback doesn't re-add them. Borrow &str from
+    // self.entries — no allocation needed.
+    let mut seen_via_source_root: FxHashSet<&str> = FxHashSet::default();
+    // Primary: match against sourceRoot (with tsconfig exclude filtering)
     for (root, names) in &self.entries {
       if file_path.starts_with(root) {
         for name in names {
+          seen_via_source_root.insert(name.as_str());
           if let Some(excl) = self.excludes.get(name) {
             if excl.is_excluded(file_path) {
               debug!(
@@ -83,6 +132,20 @@ impl ProjectIndex {
             }
           }
           result.push(name.clone());
+        }
+      }
+    }
+    // Fallback: match against project root for projects not already matched via
+    // sourceRoot. This handles files inside a project's root but outside its
+    // sourceRoot (e.g. config files). Also handles nested projects where the
+    // parent's sourceRoot is a prefix but the child was never checked.
+    // tsconfig excludes are not applied here — config files should always count.
+    for (root, names) in &self.root_entries {
+      if file_path.starts_with(root) {
+        for name in names {
+          if !seen_via_source_root.contains(name.as_str()) {
+            result.push(name.clone());
+          }
         }
       }
     }
@@ -294,6 +357,183 @@ mod tests {
         .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
         .is_empty(),
       "spec files should be excluded"
+    );
+  }
+
+  #[test]
+  fn test_project_index_root_fallback() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let projects = vec![
+      Project {
+        name: "my-app".to_string(),
+        root: "apps/my-app".into(),
+        source_root: "apps/my-app/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "my-lib".to_string(),
+        root: "libs/my-lib".into(),
+        source_root: "libs/my-lib/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      // Project where root == sourceRoot (no fallback needed)
+      Project {
+        name: "simple".to_string(),
+        root: "libs/simple".into(),
+        source_root: "libs/simple".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ];
+
+    let index = ProjectIndex::new(&projects, tmp.path());
+
+    // Source files inside sourceRoot should match (existing behavior)
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("apps/my-app/src/main.ts")),
+      vec!["my-app"]
+    );
+
+    // Config files inside root but outside sourceRoot should match via fallback
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("apps/my-app/project.json")),
+      vec!["my-app"],
+      "project.json inside root but outside sourceRoot should match"
+    );
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("apps/my-app/jest.config.js")),
+      vec!["my-app"],
+      "jest.config.js inside root but outside sourceRoot should match"
+    );
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/my-lib/tsconfig.json")),
+      vec!["my-lib"],
+      "tsconfig.json inside root but outside sourceRoot should match"
+    );
+
+    // Files completely outside all roots should still not match
+    assert!(index
+      .get_package_names_by_path(Path::new("unknown/file.ts"))
+      .is_empty());
+
+    // Project where root == sourceRoot should still work normally
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/simple/index.ts")),
+      vec!["simple"]
+    );
+  }
+
+  #[test]
+  fn test_project_index_root_fallback_with_tsconfig_excludes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let lib_dir = cwd.join("libs/ui-widgets");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{ "exclude": ["**/*.spec.ts"] }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "ui-widgets".to_string(),
+      root: "libs/ui-widgets".into(),
+      source_root: "libs/ui-widgets/src".into(),
+      ts_config: Some(lib_dir.join("tsconfig.lib.json")),
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let index = ProjectIndex::new(&projects, cwd);
+
+    // Source file in sourceRoot: normal behavior
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/ui-widgets/src/index.ts")),
+      vec!["ui-widgets"]
+    );
+
+    // Spec file in sourceRoot should be excluded by tsconfig
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
+        .is_empty(),
+      "spec files in sourceRoot should be excluded"
+    );
+
+    // Config file in root (outside sourceRoot) should match via fallback
+    // (tsconfig excludes do NOT apply to root fallback)
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/ui-widgets/jest.config.js")),
+      vec!["ui-widgets"],
+      "config files in root should match even with tsconfig excludes"
+    );
+
+    // Spec file at root level (outside sourceRoot) also matches via fallback
+    // by design — tsconfig exclude patterns are intentionally bypassed for the
+    // root fallback since a file's presence in the project root means it belongs
+    // to that project regardless of tsconfig source-compilation rules.
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/ui-widgets/utils.spec.ts")),
+      vec!["ui-widgets"],
+      "root-level spec files match via fallback (tsconfig excludes do NOT apply)"
+    );
+  }
+
+  #[test]
+  fn test_project_index_nested_projects() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let projects = vec![
+      // Parent project where root == sourceRoot (no separate src dir)
+      Project {
+        name: "parent".to_string(),
+        root: "apps/parent".into(),
+        source_root: "apps/parent".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      // Nested child project with separate src dir
+      Project {
+        name: "child".to_string(),
+        root: "apps/parent/child".into(),
+        source_root: "apps/parent/child/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ];
+
+    let index = ProjectIndex::new(&projects, tmp.path());
+
+    // Source file in child's sourceRoot matches both child (via sourceRoot)
+    // and parent (via parent's sourceRoot being a prefix)
+    let mut result = index.get_package_names_by_path(Path::new("apps/parent/child/src/main.ts"));
+    result.sort();
+    assert_eq!(result, vec!["child", "parent"]);
+
+    // Config file in child's root but outside child's sourceRoot should
+    // attribute to child (via root fallback) AND parent (via sourceRoot prefix)
+    let mut result = index.get_package_names_by_path(Path::new("apps/parent/child/project.json"));
+    result.sort();
+    assert_eq!(
+      result,
+      vec!["child", "parent"],
+      "child's project.json must attribute to child via root fallback even when parent's sourceRoot matches"
+    );
+
+    // File inside parent but outside child must attribute ONLY to parent.
+    // Guards against the root fallback over-attributing to nested projects.
+    let result = index.get_package_names_by_path(Path::new("apps/parent/parent-only.ts"));
+    assert_eq!(
+      result,
+      vec!["parent"],
+      "file inside parent only must not attribute to child"
     );
   }
 }

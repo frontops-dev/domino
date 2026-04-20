@@ -33,51 +33,51 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@front-ops/domino-darwin-arm64@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-darwin-arm64@npm:1.2.3"
+"@front-ops/domino-darwin-arm64@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-darwin-arm64@npm:1.2.4"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@front-ops/domino-darwin-x64@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-darwin-x64@npm:1.2.3"
+"@front-ops/domino-darwin-x64@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-darwin-x64@npm:1.2.4"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@front-ops/domino-linux-arm64-gnu@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-linux-arm64-gnu@npm:1.2.3"
+"@front-ops/domino-linux-arm64-gnu@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-linux-arm64-gnu@npm:1.2.4"
   conditions: os=linux & cpu=arm64 & libc=glibc
   languageName: node
   linkType: hard
 
-"@front-ops/domino-linux-arm64-musl@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-linux-arm64-musl@npm:1.2.3"
+"@front-ops/domino-linux-arm64-musl@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-linux-arm64-musl@npm:1.2.4"
   conditions: os=linux & cpu=arm64 & libc=musl
   languageName: node
   linkType: hard
 
-"@front-ops/domino-linux-x64-gnu@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-linux-x64-gnu@npm:1.2.3"
+"@front-ops/domino-linux-x64-gnu@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-linux-x64-gnu@npm:1.2.4"
   conditions: os=linux & cpu=x64 & libc=glibc
   languageName: node
   linkType: hard
 
-"@front-ops/domino-linux-x64-musl@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-linux-x64-musl@npm:1.2.3"
+"@front-ops/domino-linux-x64-musl@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-linux-x64-musl@npm:1.2.4"
   conditions: os=linux & cpu=x64 & libc=musl
   languageName: node
   linkType: hard
 
-"@front-ops/domino-win32-x64-msvc@npm:1.2.3":
-  version: 1.2.3
-  resolution: "@front-ops/domino-win32-x64-msvc@npm:1.2.3"
+"@front-ops/domino-win32-x64-msvc@npm:1.2.4":
+  version: 1.2.4
+  resolution: "@front-ops/domino-win32-x64-msvc@npm:1.2.4"
   conditions: os=win32 & cpu=x64 & libc=musl
   languageName: node
   linkType: hard
@@ -88,13 +88,13 @@ __metadata:
   dependencies:
     "@emnapi/core": "npm:^1.5.0"
     "@emnapi/runtime": "npm:^1.5.0"
-    "@front-ops/domino-darwin-arm64": "npm:1.2.3"
-    "@front-ops/domino-darwin-x64": "npm:1.2.3"
-    "@front-ops/domino-linux-arm64-gnu": "npm:1.2.3"
-    "@front-ops/domino-linux-arm64-musl": "npm:1.2.3"
-    "@front-ops/domino-linux-x64-gnu": "npm:1.2.3"
-    "@front-ops/domino-linux-x64-musl": "npm:1.2.3"
-    "@front-ops/domino-win32-x64-msvc": "npm:1.2.3"
+    "@front-ops/domino-darwin-arm64": "npm:1.2.4"
+    "@front-ops/domino-darwin-x64": "npm:1.2.4"
+    "@front-ops/domino-linux-arm64-gnu": "npm:1.2.4"
+    "@front-ops/domino-linux-arm64-musl": "npm:1.2.4"
+    "@front-ops/domino-linux-x64-gnu": "npm:1.2.4"
+    "@front-ops/domino-linux-x64-musl": "npm:1.2.4"
+    "@front-ops/domino-win32-x64-msvc": "npm:1.2.4"
     "@napi-rs/cli": "npm:^3.2.0"
     "@oxc-node/core": "npm:^0.0.34"
     "@taplo/cli": "npm:^0.7.0"

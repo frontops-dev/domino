@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 static FILE_RE: LazyLock<Regex> =
   LazyLock::new(|| Regex::new(r#"(?:["\s]a/)(.*)(?:["\s]b/)"#).expect("file regex is valid"));
 static LINE_RE: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r"@@ -.* \+(\d+)(?:,\d+)? @@").expect("line regex is valid"));
+  LazyLock::new(|| Regex::new(r"@@ -.* \+(\d+)(?:,(\d+))? @@").expect("line regex is valid"));
 
 /// Detect the default branch (tries origin/main, then origin/master)
 pub fn detect_default_branch(repo_path: &Path) -> String {
@@ -187,11 +187,22 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       let is_rename_or_copy = new_path.is_some();
       let file_path = new_path.unwrap_or(file_path);
 
-      // Extract changed line numbers
+      // Extract changed line numbers. For each hunk header `@@ -X,Y +Z,W @@`
+      // expand to every line in the new-side range `Z..Z+W`, so symbols that
+      // live mid-hunk (not just at the hunk's starting line) are visible to
+      // downstream AST lookups. When `,W` is omitted, git's convention is a
+      // single-line hunk (count = 1).
       let mut changed_lines: Vec<usize> = line_regex
         .captures_iter(file_diff)
-        .filter_map(|caps| caps.get(1))
-        .filter_map(|m| m.as_str().parse::<usize>().ok())
+        .filter_map(|caps| {
+          let start: usize = caps.get(1)?.as_str().parse().ok()?;
+          let count: usize = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(1);
+          Some(start..start + count)
+        })
+        .flatten()
         .collect();
 
       if changed_lines.is_empty() {
@@ -258,7 +269,7 @@ index 9876543..fedcba9 100644
     assert_eq!(result[0].changed_lines, vec![16, 46]);
 
     assert_eq!(result[1].file_path.to_str().unwrap(), "libs/nx/src/cli.ts");
-    assert_eq!(result[1].changed_lines, vec![103]);
+    assert_eq!(result[1].changed_lines, vec![103, 104]);
   }
 
   #[test]
@@ -320,8 +331,8 @@ index 1234567..abcdefg 100644
       result[0].file_path.to_str().unwrap(),
       "src/quote-page/helper.ts"
     );
-    // Should have both hunks' line numbers
-    assert_eq!(result[0].changed_lines, vec![5, 20]);
+    // Should have every line in each hunk's new-side range
+    assert_eq!(result[0].changed_lines, vec![5, 20, 21, 22]);
   }
 
   #[test]
@@ -444,5 +455,76 @@ copy to src/copied.ts
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/copied.ts");
     assert_eq!(result[0].changed_lines, vec![1]);
+  }
+
+  /// Regression test for https://github.com/frontops-dev/domino/issues/62.
+  /// A multi-line hunk must contribute every line in its new-side range, not
+  /// only the starting line. Otherwise an exported symbol declared mid-hunk
+  /// is invisible to `find_node_at_line`, reference traversal is skipped,
+  /// and downstream consumers are silently dropped from the affected set.
+  #[test]
+  fn test_parse_diff_multi_line_hunk_covers_full_range() {
+    let diff = r#"diff --git a/packages/package-a/src/foo.ts b/packages/package-a/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/packages/package-a/src/foo.ts
++++ b/packages/package-a/src/foo.ts
+@@ -3 +3,7 @@ import { helper } from './helper.js';
+-export const foo = (x: number): number => helper(x) + 1;
++interface FooOptions {
++  offset: number;
++  multiplier: number;
++}
++
++export const foo = (x: number, options: FooOptions = { offset: 1, multiplier: 3 }): number =>
++  helper(x) * options.multiplier + options.offset;
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].changed_lines, vec![3, 4, 5, 6, 7, 8, 9]);
+  }
+
+  /// When the hunk header omits `,W` (single-line hunk), git emits
+  /// `@@ -N +M @@` rather than `@@ -N +M,1 @@`. The regex's count group is
+  /// optional and must fall back to 1 so these hunks still produce a single
+  /// line number.
+  #[test]
+  fn test_parse_diff_shorthand_count_defaults_to_one() {
+    let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -1 +1 @@
+-export const foo = 1;
++export const foo = 2;
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].changed_lines, vec![1]);
+  }
+
+  /// A pure-deletion hunk (`+Z,0`) has no new-side lines to scan and must
+  /// contribute zero entries to `changed_lines`. Pair it with a normal hunk
+  /// so the file-skip branch (which triggers on a fully empty result) is not
+  /// what's actually being tested.
+  #[test]
+  fn test_parse_diff_pure_deletion_hunk_contributes_zero() {
+    let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -5,3 +5,0 @@ prefix
+-  deleted one
+-  deleted two
+-  deleted three
+@@ -20,0 +21,2 @@ suffix
++  added one
++  added two
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].changed_lines, vec![21, 22]);
   }
 }

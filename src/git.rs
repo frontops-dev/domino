@@ -197,10 +197,19 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       let ranges: Vec<std::ops::Range<usize>> = line_regex
         .captures_iter(file_diff)
         .filter_map(|caps| {
-          let start: usize = caps.get(1)?.as_str().parse().ok()?;
+          let start_str = caps.get(1)?.as_str();
+          let start: usize = start_str
+            .parse()
+            .inspect_err(|e| warn!("Failed to parse hunk start line '{}': {}", start_str, e))
+            .ok()?;
           let count: usize = caps
             .get(2)
-            .and_then(|m| m.as_str().parse().ok())
+            .and_then(|m| {
+              m.as_str()
+                .parse()
+                .inspect_err(|e| warn!("Failed to parse hunk count '{}': {}", m.as_str(), e))
+                .ok()
+            })
             .unwrap_or(1);
           Some(start..start + count)
         })
@@ -559,5 +568,30 @@ index 1234567..abcdefg 100644
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/foo.ts");
     assert!(result[0].changed_lines.is_empty());
+  }
+
+  /// Symmetric hunk header — old and new sides both carry a count. Common in
+  /// diffs with non-zero context (`--unified=N` for N > 0) or when an edit
+  /// replaces a block with another block of the same size. The greedy `.*`
+  /// in `LINE_RE` already handles this; the test locks it in against future
+  /// regex tweaks.
+  #[test]
+  fn test_parse_diff_symmetric_hunk_with_old_and_new_counts() {
+    let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -3,3 +3,3 @@ import { helper } from './helper.js';
+-old line 3
+-old line 4
+-old line 5
++new line 3
++new line 4
++new line 5
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].changed_lines, vec![3, 4, 5]);
   }
 }

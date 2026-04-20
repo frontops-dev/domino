@@ -4,7 +4,6 @@ env:
   APP_NAME: domino
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
-  RUST_TOOLCHAIN: '1.95'
 'on':
   push:
     branches:
@@ -37,10 +36,13 @@ jobs:
         with:
           node-version: 24
           cache: yarn
-      - name: Install
-        uses: dtolnay/rust-toolchain@stable
+      - name: Read Rust toolchain version
+        id: rust-toolchain
+        run: echo "channel=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: clippy, rustfmt
       - name: Install dependencies
         run: yarn install --frozen-lockfile
@@ -114,10 +116,13 @@ jobs:
         with:
           node-version: 24
           cache: yarn
-      - name: Install
-        uses: dtolnay/rust-toolchain@stable
+      - name: Read Rust toolchain version
+        id: rust-toolchain
+        run: echo "channel=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.settings.target }}
       - name: Cache cargo
         uses: actions/cache@v4

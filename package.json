@@ -1,6 +1,6 @@
 {
   "name": "@front-ops/domino",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "True Affected - Semantic change detection for monorepos",
   "main": "index.js",
   "repository": {
@@ -80,13 +80,13 @@
     "typescript": "^5.9.2"
   },
   "optionalDependencies": {
-    "@front-ops/domino-darwin-arm64": "1.2.2",
-    "@front-ops/domino-darwin-x64": "1.2.2",
-    "@front-ops/domino-linux-arm64-gnu": "1.2.2",
-    "@front-ops/domino-linux-arm64-musl": "1.2.2",
-    "@front-ops/domino-linux-x64-gnu": "1.2.2",
-    "@front-ops/domino-linux-x64-musl": "1.2.2",
-    "@front-ops/domino-win32-x64-msvc": "1.2.2"
+    "@front-ops/domino-darwin-arm64": "1.2.3",
+    "@front-ops/domino-darwin-x64": "1.2.3",
+    "@front-ops/domino-linux-arm64-gnu": "1.2.3",
+    "@front-ops/domino-linux-arm64-musl": "1.2.3",
+    "@front-ops/domino-linux-x64-gnu": "1.2.3",
+    "@front-ops/domino-linux-x64-musl": "1.2.3",
+    "@front-ops/domino-win32-x64-msvc": "1.2.3"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [

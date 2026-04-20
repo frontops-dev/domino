@@ -4,6 +4,7 @@ env:
   APP_NAME: domino
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
+  RUST_TOOLCHAIN: '1.95'
 'on':
   push:
     branches:
@@ -39,6 +40,7 @@ jobs:
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
       - name: Install dependencies
         run: yarn install --frozen-lockfile
@@ -115,7 +117,7 @@ jobs:
       - name: Install
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.settings.target }}
       - name: Cache cargo
         uses: actions/cache@v4

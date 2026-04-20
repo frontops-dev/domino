@@ -617,33 +617,33 @@ impl WorkspaceAnalyzer {
 
     for node in file_data.semantic.nodes().iter() {
       match node.kind() {
-        AstKind::StaticMemberExpression(member_expr) => {
-          if member_expr.property.name.as_str() == property_name {
-            if let Expression::Identifier(ident) = &member_expr.object {
-              if ident.name.as_str() == namespace_name {
-                let span = member_expr.span;
-                let (line, column) = self.span_to_line_col(&file_data.source, span);
-                references.push(Reference {
-                  file_path: file_path.to_path_buf(),
-                  line,
-                  column,
-                });
-              }
+        AstKind::StaticMemberExpression(member_expr)
+          if member_expr.property.name.as_str() == property_name =>
+        {
+          if let Expression::Identifier(ident) = &member_expr.object {
+            if ident.name.as_str() == namespace_name {
+              let span = member_expr.span;
+              let (line, column) = self.span_to_line_col(&file_data.source, span);
+              references.push(Reference {
+                file_path: file_path.to_path_buf(),
+                line,
+                column,
+              });
             }
           }
         }
-        AstKind::TSQualifiedName(qualified_name) => {
-          if qualified_name.right.name.as_str() == property_name {
-            if let oxc_ast::ast::TSTypeName::IdentifierReference(ident) = &qualified_name.left {
-              if ident.name.as_str() == namespace_name {
-                let span = qualified_name.span;
-                let (line, column) = self.span_to_line_col(&file_data.source, span);
-                references.push(Reference {
-                  file_path: file_path.to_path_buf(),
-                  line,
-                  column,
-                });
-              }
+        AstKind::TSQualifiedName(qualified_name)
+          if qualified_name.right.name.as_str() == property_name =>
+        {
+          if let oxc_ast::ast::TSTypeName::IdentifierReference(ident) = &qualified_name.left {
+            if ident.name.as_str() == namespace_name {
+              let span = qualified_name.span;
+              let (line, column) = self.span_to_line_col(&file_data.source, span);
+              references.push(Reference {
+                file_path: file_path.to_path_buf(),
+                line,
+                column,
+              });
             }
           }
         }
@@ -977,50 +977,38 @@ impl WorkspaceAnalyzer {
           top_level_name = Some("default".to_string());
         }
         // Top-level declarations that can be exported
-        AstKind::Function(func) => {
-          if !found_export_wrapper {
-            if let Some(id) = &func.id {
-              top_level_name = Some(id.name.to_string());
-            }
+        AstKind::Function(func) if !found_export_wrapper => {
+          if let Some(id) = &func.id {
+            top_level_name = Some(id.name.to_string());
           }
         }
-        AstKind::Class(class) => {
-          if !found_export_wrapper {
-            if let Some(id) = &class.id {
-              top_level_name = Some(id.name.to_string());
-            }
+        AstKind::Class(class) if !found_export_wrapper => {
+          if let Some(id) = &class.id {
+            top_level_name = Some(id.name.to_string());
           }
         }
-        AstKind::TSInterfaceDeclaration(interface) => {
-          if !found_export_wrapper {
-            top_level_name = Some(interface.id.name.to_string());
-          }
+        AstKind::TSInterfaceDeclaration(interface) if !found_export_wrapper => {
+          top_level_name = Some(interface.id.name.to_string());
         }
-        AstKind::TSTypeAliasDeclaration(type_alias) => {
-          if !found_export_wrapper {
-            top_level_name = Some(type_alias.id.name.to_string());
-          }
+        AstKind::TSTypeAliasDeclaration(type_alias) if !found_export_wrapper => {
+          top_level_name = Some(type_alias.id.name.to_string());
         }
-        AstKind::TSEnumDeclaration(enum_decl) => {
-          if !found_export_wrapper {
-            top_level_name = Some(enum_decl.id.name.to_string());
-          }
+        AstKind::TSEnumDeclaration(enum_decl) if !found_export_wrapper => {
+          top_level_name = Some(enum_decl.id.name.to_string());
         }
-        AstKind::VariableDeclarator(var_decl) => {
+        AstKind::VariableDeclarator(var_decl) if !found_export_wrapper => {
           // For const/let declarations, get the binding name
-          if !found_export_wrapper {
-            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
-              top_level_name = Some(ident.name.to_string());
-            }
+          if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(ident) = &var_decl.id.kind {
+            top_level_name = Some(ident.name.to_string());
           }
         }
-        AstKind::VariableDeclaration(var_decl) => {
+        AstKind::VariableDeclaration(var_decl)
+          if !found_export_wrapper && top_level_name.is_none() =>
+        {
           // Same rationale as the initial-node check: when walking up from a position
           // inside the `const`/`let`/`var` keyword we hit VariableDeclaration before
           // VariableDeclarator (its child).
-          if !found_export_wrapper && top_level_name.is_none() {
-            top_level_name = Self::first_binding_name_from_var_decl(var_decl);
-          }
+          top_level_name = Self::first_binding_name_from_var_decl(var_decl);
         }
         _ => {}
       }

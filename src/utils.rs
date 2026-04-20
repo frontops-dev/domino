@@ -90,14 +90,38 @@ impl ProjectIndex {
   /// sourceRoot (e.g. config files like project.json, jest.config.js).
   pub fn get_package_names_by_path(&self, file_path: &Path) -> Vec<String> {
     let mut result = Vec::new();
+    // Fast path: no root entries means every project has root == sourceRoot,
+    // so there's no fallback to run — skip the hashset allocation entirely.
+    // This is the common case for non-Nx workspaces.
+    if self.root_entries.is_empty() {
+      for (root, names) in &self.entries {
+        if file_path.starts_with(root) {
+          for name in names {
+            if let Some(excl) = self.excludes.get(name) {
+              if excl.is_excluded(file_path) {
+                debug!(
+                  "File {:?} excluded by tsconfig for project '{}'",
+                  file_path, name
+                );
+                continue;
+              }
+            }
+            result.push(name.clone());
+          }
+        }
+      }
+      return result;
+    }
+
     // Track which projects were already considered via sourceRoot (even if excluded
-    // by tsconfig) so that the root fallback doesn't re-add them.
-    let mut seen_via_source_root = FxHashSet::default();
+    // by tsconfig) so that the root fallback doesn't re-add them. Borrow &str from
+    // self.entries — no allocation needed.
+    let mut seen_via_source_root: FxHashSet<&str> = FxHashSet::default();
     // Primary: match against sourceRoot (with tsconfig exclude filtering)
     for (root, names) in &self.entries {
       if file_path.starts_with(root) {
         for name in names {
-          seen_via_source_root.insert(name.clone());
+          seen_via_source_root.insert(name.as_str());
           if let Some(excl) = self.excludes.get(name) {
             if excl.is_excluded(file_path) {
               debug!(
@@ -119,7 +143,7 @@ impl ProjectIndex {
     for (root, names) in &self.root_entries {
       if file_path.starts_with(root) {
         for name in names {
-          if !seen_via_source_root.contains(name) {
+          if !seen_via_source_root.contains(name.as_str()) {
             result.push(name.clone());
           }
         }
@@ -449,6 +473,16 @@ mod tests {
       vec!["ui-widgets"],
       "config files in root should match even with tsconfig excludes"
     );
+
+    // Spec file at root level (outside sourceRoot) also matches via fallback
+    // by design — tsconfig exclude patterns are intentionally bypassed for the
+    // root fallback since a file's presence in the project root means it belongs
+    // to that project regardless of tsconfig source-compilation rules.
+    assert_eq!(
+      index.get_package_names_by_path(Path::new("libs/ui-widgets/utils.spec.ts")),
+      vec!["ui-widgets"],
+      "root-level spec files match via fallback (tsconfig excludes do NOT apply)"
+    );
   }
 
   #[test]
@@ -491,6 +525,15 @@ mod tests {
       result,
       vec!["child", "parent"],
       "child's project.json must attribute to child via root fallback even when parent's sourceRoot matches"
+    );
+
+    // File inside parent but outside child must attribute ONLY to parent.
+    // Guards against the root fallback over-attributing to nested projects.
+    let result = index.get_package_names_by_path(Path::new("apps/parent/parent-only.ts"));
+    assert_eq!(
+      result,
+      vec!["parent"],
+      "file inside parent only must not attribute to child"
     );
   }
 }

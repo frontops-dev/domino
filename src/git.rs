@@ -191,8 +191,10 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       // expand to every line in the new-side range `Z..Z+W`, so symbols that
       // live mid-hunk (not just at the hunk's starting line) are visible to
       // downstream AST lookups. When `,W` is omitted, git's convention is a
-      // single-line hunk (count = 1).
-      let mut changed_lines: Vec<usize> = line_regex
+      // single-line hunk (count = 1). Pure deletion hunks (`W == 0`) produce
+      // an empty range — see the `has_hunks` branch below for how those are
+      // preserved.
+      let ranges: Vec<std::ops::Range<usize>> = line_regex
         .captures_iter(file_diff)
         .filter_map(|caps| {
           let start: usize = caps.get(1)?.as_str().parse().ok()?;
@@ -202,12 +204,19 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
             .unwrap_or(1);
           Some(start..start + count)
         })
-        .flatten()
         .collect();
+      let has_hunks = !ranges.is_empty();
+      let mut changed_lines: Vec<usize> = ranges.into_iter().flatten().collect();
 
       if changed_lines.is_empty() {
         if is_rename_or_copy {
           changed_lines.push(1);
+        } else if has_hunks {
+          // Deletion-only file (every hunk is `+Z,0`). Keep the file entry
+          // with no line numbers so its owning package is still marked as
+          // affected — deleting an exported symbol is a real change even
+          // though there's nothing in the new file to AST-lookup.
+          debug!("Only deletion hunks for file: {}", file_path);
         } else if file_diff
           .lines()
           .any(|line| line.starts_with("Binary files"))
@@ -457,11 +466,11 @@ copy to src/copied.ts
     assert_eq!(result[0].changed_lines, vec![1]);
   }
 
-  /// Regression test for https://github.com/frontops-dev/domino/issues/62.
-  /// A multi-line hunk must contribute every line in its new-side range, not
-  /// only the starting line. Otherwise an exported symbol declared mid-hunk
-  /// is invisible to `find_node_at_line`, reference traversal is skipped,
-  /// and downstream consumers are silently dropped from the affected set.
+  /// Regression test for issue #62. A multi-line hunk must contribute every
+  /// line in its new-side range, not only the starting line. Otherwise an
+  /// exported symbol declared mid-hunk is invisible to `find_node_at_line`,
+  /// reference traversal is skipped, and downstream consumers are silently
+  /// dropped from the affected set.
   #[test]
   fn test_parse_diff_multi_line_hunk_covers_full_range() {
     let diff = r#"diff --git a/packages/package-a/src/foo.ts b/packages/package-a/src/foo.ts
@@ -526,5 +535,29 @@ index 1234567..abcdefg 100644
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].changed_lines, vec![21, 22]);
+  }
+
+  /// A file whose only hunks are deletions (`+Z,0`) must still be kept in
+  /// the result with an empty `changed_lines`. Dropping it would hide real
+  /// source changes — deleting an exported symbol is a meaningful change
+  /// even though there are no new-file lines to AST-lookup. Downstream in
+  /// `core.rs`, the file's owning package is still marked affected because
+  /// the file path is present.
+  #[test]
+  fn test_parse_diff_deletion_only_file_kept_with_empty_lines() {
+    let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -5,3 +5,0 @@ export function foo() {
+-  deleted one
+-  deleted two
+-  deleted three
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/foo.ts");
+    assert!(result[0].changed_lines.is_empty());
   }
 }

@@ -53,8 +53,18 @@ impl ProjectIndex {
         map.push((project.source_root.clone(), vec![project.name.clone()]));
       }
 
-      // Index by root (fallback) — only when root differs from sourceRoot
-      if project.root != project.source_root {
+      // Index by root (fallback) — only when root differs from sourceRoot.
+      // Skip workspace-root projects (root == "" or "."): their root is a
+      // prefix of every path in the repo, so they'd match every fallback
+      // lookup and cause massive false positives on asset/config changes.
+      // The Nx loader produces `root = ""` via `strip_prefix(cwd)` when the
+      // project lives at the workspace root; guard against "." too for
+      // loaders that preserve it literally or when paths come in with a
+      // `./` prefix.
+      if project.root != project.source_root
+        && !project.root.as_os_str().is_empty()
+        && project.root != Path::new(".")
+      {
         if let Some(entry) = root_map.iter_mut().find(|(root, _)| *root == project.root) {
           entry.1.push(project.name.clone());
         } else {
@@ -534,6 +544,98 @@ mod tests {
       result,
       vec!["parent"],
       "file inside parent only must not attribute to child"
+    );
+  }
+
+  #[test]
+  fn test_project_index_workspace_root_project_excluded_from_fallback() {
+    // Nx workspaces commonly have a root-level project with `root: "."`.
+    // Such a project must NOT be added to `root_entries` — otherwise every
+    // file that falls through the sourceRoot check would match it (since
+    // every path `starts_with(".")`), producing massive false positives
+    // on asset and source-file changes.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let projects = vec![
+      Project {
+        name: "workspace".to_string(),
+        root: PathBuf::from("."),
+        source_root: PathBuf::from("src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "my-lib".to_string(),
+        root: "libs/my-lib".into(),
+        source_root: "libs/my-lib/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ];
+
+    let index = ProjectIndex::new(&projects, tmp.path());
+
+    // A config file at a nested project root (outside its sourceRoot) must
+    // resolve ONLY to that project — not to the workspace-root project.
+    let mut result = index.get_package_names_by_path(Path::new("libs/my-lib/jest.config.js"));
+    result.sort();
+    assert_eq!(
+      result,
+      vec!["my-lib"],
+      "config file inside nested project must NOT also attribute to root workspace project"
+    );
+
+    // Likewise for a file inside the nested project's sourceRoot.
+    let mut result = index.get_package_names_by_path(Path::new("libs/my-lib/src/index.ts"));
+    result.sort();
+    assert_eq!(
+      result,
+      vec!["my-lib"],
+      "source file inside nested project must NOT also attribute to root workspace project"
+    );
+
+    // Workspace-root sourceRoot still resolves normally — the filter only
+    // affects root_entries, not entries.
+    let result = index.get_package_names_by_path(Path::new("src/main.ts"));
+    assert_eq!(
+      result,
+      vec!["workspace"],
+      "file inside workspace sourceRoot must still attribute to workspace"
+    );
+  }
+
+  #[test]
+  fn test_project_index_empty_root_excluded_from_fallback() {
+    // Defensive: an empty-path root would also match everything via
+    // `starts_with(Path::new(""))`. Treat empty the same as ".".
+    let tmp = tempfile::TempDir::new().unwrap();
+    let projects = vec![
+      Project {
+        name: "workspace".to_string(),
+        root: PathBuf::new(),
+        source_root: PathBuf::from("src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "my-lib".to_string(),
+        root: "libs/my-lib".into(),
+        source_root: "libs/my-lib/src".into(),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ];
+
+    let index = ProjectIndex::new(&projects, tmp.path());
+
+    let result = index.get_package_names_by_path(Path::new("libs/my-lib/jest.config.js"));
+    assert_eq!(
+      result,
+      vec!["my-lib"],
+      "empty-path root must not over-attribute"
     );
   }
 }

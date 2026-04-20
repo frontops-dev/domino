@@ -22,6 +22,39 @@ struct AffectedState<'a> {
   visited: &'a mut FxHashSet<(PathBuf, String)>,
 }
 
+/// Record a `DirectChange` cause for `pkg` for each changed line (or a
+/// single line-0 cause when no lines are known). Shared by both the source
+/// root-fallback path (Step 6a) and the asset path (Step 6b), which
+/// otherwise had identical inlined blocks.
+fn record_direct_change_causes(
+  project_causes: &mut FxHashMap<String, Vec<AffectCause>>,
+  pkg: &str,
+  file: &Path,
+  changed_lines: &[usize],
+) {
+  if changed_lines.is_empty() {
+    project_causes
+      .entry(pkg.to_string())
+      .or_default()
+      .push(AffectCause::DirectChange {
+        file: file.to_path_buf(),
+        symbol: None,
+        line: 0,
+      });
+  } else {
+    for &line in changed_lines {
+      project_causes
+        .entry(pkg.to_string())
+        .or_default()
+        .push(AffectCause::DirectChange {
+          file: file.to_path_buf(),
+          symbol: None,
+          line,
+        });
+    }
+  }
+}
+
 /// Main true-affected algorithm implementation
 pub fn find_affected(
   config: TrueAffectedConfig,
@@ -155,27 +188,12 @@ fn find_affected_internal(
         affected_packages.insert(pkg.clone());
 
         if generate_report {
-          if changed_file.changed_lines.is_empty() {
-            project_causes
-              .entry(pkg.clone())
-              .or_default()
-              .push(AffectCause::DirectChange {
-                file: file_path.clone(),
-                symbol: None,
-                line: 0,
-              });
-          } else {
-            for &line in &changed_file.changed_lines {
-              project_causes
-                .entry(pkg.clone())
-                .or_default()
-                .push(AffectCause::DirectChange {
-                  file: file_path.clone(),
-                  symbol: None,
-                  line,
-                });
-            }
-          }
+          record_direct_change_causes(
+            &mut project_causes,
+            pkg,
+            file_path,
+            &changed_file.changed_lines,
+          );
         }
       }
       continue;
@@ -304,29 +322,13 @@ fn find_affected_internal(
         debug!("Asset {:?} belongs to package '{}'", asset_path, pkg);
         affected_packages.insert(pkg.clone());
 
-        // Record direct change cause if generating report
         if generate_report {
-          if asset_file.changed_lines.is_empty() {
-            project_causes
-              .entry(pkg.clone())
-              .or_default()
-              .push(AffectCause::DirectChange {
-                file: asset_path.clone(),
-                symbol: None,
-                line: 0,
-              });
-          } else {
-            for &line in &asset_file.changed_lines {
-              project_causes
-                .entry(pkg.clone())
-                .or_default()
-                .push(AffectCause::DirectChange {
-                  file: asset_path.clone(),
-                  symbol: None,
-                  line,
-                });
-            }
-          }
+          record_direct_change_causes(
+            &mut project_causes,
+            pkg,
+            asset_path,
+            &asset_file.changed_lines,
+          );
         }
       }
 

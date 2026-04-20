@@ -3307,12 +3307,93 @@ fn test_source_file_outside_sourceroot_affects_owning_project() {
     "module.exports = { workerIdleMemoryLimit: '2048MB' };\n",
   );
 
-  let affected = repo.get_affected();
+  let mut affected = repo.get_affected();
+  affected.sort();
 
-  assert!(
-    affected.contains(&"lib-a".to_string()),
-    "lib-a should be affected (jest.config.js at project root, outside sourceRoot). Got: {:?}",
-    affected
+  // Exact match — guards against the root-fallback over-attributing. lib-b
+  // owns nothing at this path and must not appear; a workspace-root project
+  // (if one existed) must not appear either.
+  assert_eq!(
+    affected,
+    vec!["lib-a".to_string()],
+    "Only lib-a should be affected by its own jest.config.js"
+  );
+}
+
+#[test]
+fn test_workspace_root_project_not_over_attributed() {
+  // Nx workspaces commonly have a root-level project (e.g. the workspace itself
+  // registered with `root: ""` when loaded via strip_prefix(cwd)). Without the
+  // root==""/"." guard in ProjectIndex::new(), its root would prefix-match every
+  // path in the repo and a change to any nested project's config file would
+  // incorrectly cascade to the workspace project.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let root = tmp.path();
+
+  git_in(root, &["init", "-q"]);
+  git_in(root, &["config", "user.email", "test@example.com"]);
+  git_in(root, &["config", "user.name", "Test"]);
+  git_in(root, &["branch", "-M", "main"]);
+
+  fs::write(root.join("nx.json"), r#"{}"#).unwrap();
+
+  // Workspace-root project (root == cwd)
+  fs::write(
+    root.join("project.json"),
+    r#"{ "name": "workspace", "sourceRoot": "src" }"#,
+  )
+  .unwrap();
+  fs::create_dir_all(root.join("src")).unwrap();
+  fs::write(root.join("src/main.ts"), "export const a = 1;\n").unwrap();
+
+  // Nested project with sourceRoot != root
+  fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
+  fs::write(
+    root.join("libs/lib-a/project.json"),
+    r#"{ "name": "lib-a", "sourceRoot": "libs/lib-a/src" }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("libs/lib-a/src/index.ts"),
+    "export const b = 2;\n",
+  )
+  .unwrap();
+
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "init"]);
+  git_in(root, &["checkout", "-q", "-b", "test-branch"]);
+
+  // Change a config file inside lib-a's root but outside lib-a's sourceRoot.
+  fs::write(
+    root.join("libs/lib-a/jest.config.js"),
+    "module.exports = {};\n",
+  )
+  .unwrap();
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "change jest config"]);
+
+  let projects = domino::workspace::discover_projects(root).unwrap();
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects,
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let mut affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+
+  assert_eq!(
+    affected,
+    vec!["lib-a".to_string()],
+    "Only lib-a should be affected — workspace-root project must not match via root fallback"
   );
 }
 

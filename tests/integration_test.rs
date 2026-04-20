@@ -3294,6 +3294,29 @@ fn test_named_inputs_negation_with_root_differs_from_source_root() {
 }
 
 #[test]
+fn test_source_file_outside_sourceroot_affects_owning_project() {
+  // lib-a has sourceRoot = "libs/lib-a/src" but project root = "libs/lib-a".
+  // A source-typed config file (jest.config.js) at project root lives OUTSIDE
+  // sourceRoot, so the semantic analyzer never parses it. It must still mark
+  // its owning project as affected via the root fallback — otherwise changes
+  // to project-level config files would be silently ignored.
+  let repo = TempNxRepo::new(r#"{}"#);
+
+  repo.change_and_commit(
+    "libs/lib-a/jest.config.js",
+    "module.exports = { workerIdleMemoryLimit: '2048MB' };\n",
+  );
+
+  let affected = repo.get_affected();
+
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a should be affected (jest.config.js at project root, outside sourceRoot). Got: {:?}",
+    affected
+  );
+}
+
+#[test]
 fn test_head_flag_commit_to_commit_diff() {
   let branch = TestBranch::new("test-head-flag");
 

@@ -179,7 +179,7 @@ fn find_affected_internal(
         "Source file not in analyzer.files, using root fallback: {:?}",
         file_path
       );
-      let owning_packages = project_index.get_package_names_by_path(file_path);
+      let owning_packages = project_index.get_owning_packages_by_path(file_path);
       for pkg in &owning_packages {
         debug!(
           "File {:?} belongs to package '{}' (via root fallback)",
@@ -218,8 +218,10 @@ fn find_affected_internal(
       )
       .collect();
 
-    // Add all packages that own this file (multiple projects can share the same sourceRoot)
-    let owning_packages = project_index.get_package_names_by_path(file_path);
+    // Add all packages that own this file (multiple projects can share the same sourceRoot).
+    // Uses the unfiltered lookup — a directly changed file always belongs to its project
+    // regardless of tsconfig excludes (spec files, stories, config files all count).
+    let owning_packages = project_index.get_owning_packages_by_path(file_path);
     for pkg in &owning_packages {
       debug!("File {:?} belongs to package '{}'", file_path, pkg);
       affected_packages.insert(pkg.clone());
@@ -316,8 +318,8 @@ fn find_affected_internal(
     for asset_file in &asset_files {
       let asset_path = &asset_file.file_path;
 
-      // Mark all owning projects as affected (multiple projects can share the same sourceRoot)
-      let owning_packages = project_index.get_package_names_by_path(asset_path);
+      // Mark all owning projects as affected — uses unfiltered lookup (direct change).
+      let owning_packages = project_index.get_owning_packages_by_path(asset_path);
       for pkg in &owning_packages {
         debug!("Asset {:?} belongs to package '{}'", asset_path, pkg);
         affected_packages.insert(pkg.clone());

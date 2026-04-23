@@ -161,6 +161,45 @@ impl ProjectIndex {
     }
     result
   }
+
+  /// Like `get_package_names_by_path` but skips tsconfig exclude filtering.
+  ///
+  /// Use for **direct changes**: a file that was modified in the diff always
+  /// belongs to its project regardless of whether tsconfig compiles it (spec
+  /// files, stories, config files all count). The filtered variant should
+  /// only be used for reference traversal where cascade through excluded
+  /// files is undesirable.
+  pub fn get_owning_packages_by_path(&self, file_path: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    if self.root_entries.is_empty() {
+      for (root, names) in &self.entries {
+        if file_path.starts_with(root) {
+          result.extend(names.iter().cloned());
+        }
+      }
+      return result;
+    }
+
+    let mut seen_via_source_root: FxHashSet<&str> = FxHashSet::default();
+    for (root, names) in &self.entries {
+      if file_path.starts_with(root) {
+        for name in names {
+          seen_via_source_root.insert(name.as_str());
+          result.push(name.clone());
+        }
+      }
+    }
+    for (root, names) in &self.root_entries {
+      if file_path.starts_with(root) {
+        for name in names {
+          if !seen_via_source_root.contains(name.as_str()) {
+            result.push(name.clone());
+          }
+        }
+      }
+    }
+    result
+  }
 }
 
 /// Convert line number to byte offset in source text
@@ -367,6 +406,56 @@ mod tests {
         .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
         .is_empty(),
       "spec files should be excluded"
+    );
+  }
+
+  #[test]
+  fn test_get_owning_packages_skips_tsconfig_excludes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let lib_dir = cwd.join("libs/ui-widgets");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{ "exclude": ["**/*.spec.ts", "**/*.stories.tsx"] }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "ui-widgets".to_string(),
+      root: "libs/ui-widgets".into(),
+      source_root: "libs/ui-widgets/src".into(),
+      ts_config: Some(lib_dir.join("tsconfig.lib.json")),
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let index = ProjectIndex::new(&projects, cwd);
+
+    // get_package_names_by_path excludes spec/stories (for reference traversal)
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
+        .is_empty(),
+      "filtered method should exclude spec files"
+    );
+
+    // get_owning_packages_by_path includes them (for direct changes)
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts")),
+      vec!["ui-widgets"],
+      "direct-change method should include spec files"
+    );
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/Grid.stories.tsx")),
+      vec!["ui-widgets"],
+      "direct-change method should include stories files"
+    );
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/index.ts")),
+      vec!["ui-widgets"],
+      "normal files work with both methods"
     );
   }
 

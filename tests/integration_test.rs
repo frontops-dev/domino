@@ -3398,6 +3398,81 @@ fn test_workspace_root_project_not_over_attributed() {
 }
 
 #[test]
+fn test_spec_file_change_affects_owning_project() {
+  // lib-a has sourceRoot = "libs/lib-a/src" and its tsconfig.lib.json
+  // excludes *.spec.ts. A direct change to a spec file must still mark
+  // lib-a as affected — tsconfig excludes define compilation scope, not
+  // project ownership.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let root = tmp.path();
+
+  git_in(root, &["init", "-q"]);
+  git_in(root, &["config", "user.email", "test@example.com"]);
+  git_in(root, &["config", "user.name", "Test"]);
+  git_in(root, &["branch", "-M", "main"]);
+
+  fs::write(root.join("nx.json"), r#"{}"#).unwrap();
+
+  fs::create_dir_all(root.join("libs/lib-a/src")).unwrap();
+  fs::write(
+    root.join("libs/lib-a/project.json"),
+    r#"{ "name": "lib-a", "sourceRoot": "libs/lib-a/src" }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("libs/lib-a/tsconfig.lib.json"),
+    r#"{ "exclude": ["**/*.spec.ts", "**/*.stories.tsx"] }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("libs/lib-a/src/index.ts"),
+    "export const a = 1;\n",
+  )
+  .unwrap();
+  fs::write(
+    root.join("libs/lib-a/src/utils.spec.ts"),
+    "import { a } from './index';\n",
+  )
+  .unwrap();
+
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "init"]);
+  git_in(root, &["checkout", "-q", "-b", "test-branch"]);
+
+  // Change the spec file
+  fs::write(
+    root.join("libs/lib-a/src/utils.spec.ts"),
+    "import { a } from './index';\n// changed\n",
+  )
+  .unwrap();
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "change spec"]);
+
+  let projects = domino::workspace::discover_projects(root).unwrap();
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects,
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert_eq!(
+    affected,
+    vec!["lib-a".to_string()],
+    "lib-a should be affected even though the changed spec file is tsconfig-excluded"
+  );
+}
+
+#[test]
 fn test_head_flag_commit_to_commit_diff() {
   let branch = TestBranch::new("test-head-flag");
 

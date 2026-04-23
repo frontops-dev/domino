@@ -99,6 +99,21 @@ impl ProjectIndex {
   /// back to root entries for files that live inside a project's root but outside its
   /// sourceRoot (e.g. config files like project.json, jest.config.js).
   pub fn get_package_names_by_path(&self, file_path: &Path) -> Vec<String> {
+    self.resolve_packages(file_path, false)
+  }
+
+  /// Like `get_package_names_by_path` but skips tsconfig exclude filtering.
+  ///
+  /// Use for **direct changes**: a file that was modified in the diff always
+  /// belongs to its project regardless of whether tsconfig compiles it (spec
+  /// files, stories, config files all count). The filtered variant should
+  /// only be used for reference traversal where cascade through excluded
+  /// files is undesirable.
+  pub fn get_owning_packages_by_path(&self, file_path: &Path) -> Vec<String> {
+    self.resolve_packages(file_path, true)
+  }
+
+  fn resolve_packages(&self, file_path: &Path, skip_excludes: bool) -> Vec<String> {
     let mut result = Vec::new();
     // Fast path: no root entries means every project has root == sourceRoot,
     // so there's no fallback to run — skip the hashset allocation entirely.
@@ -107,13 +122,15 @@ impl ProjectIndex {
       for (root, names) in &self.entries {
         if file_path.starts_with(root) {
           for name in names {
-            if let Some(excl) = self.excludes.get(name) {
-              if excl.is_excluded(file_path) {
-                debug!(
-                  "File {:?} excluded by tsconfig for project '{}'",
-                  file_path, name
-                );
-                continue;
+            if !skip_excludes {
+              if let Some(excl) = self.excludes.get(name) {
+                if excl.is_excluded(file_path) {
+                  debug!(
+                    "File {:?} excluded by tsconfig for project '{}'",
+                    file_path, name
+                  );
+                  continue;
+                }
               }
             }
             result.push(name.clone());
@@ -124,21 +141,21 @@ impl ProjectIndex {
     }
 
     // Track which projects were already considered via sourceRoot (even if excluded
-    // by tsconfig) so that the root fallback doesn't re-add them. Borrow &str from
-    // self.entries — no allocation needed.
+    // by tsconfig) so that the root fallback doesn't re-add them.
     let mut seen_via_source_root: FxHashSet<&str> = FxHashSet::default();
-    // Primary: match against sourceRoot (with tsconfig exclude filtering)
     for (root, names) in &self.entries {
       if file_path.starts_with(root) {
         for name in names {
           seen_via_source_root.insert(name.as_str());
-          if let Some(excl) = self.excludes.get(name) {
-            if excl.is_excluded(file_path) {
-              debug!(
-                "File {:?} excluded by tsconfig for project '{}'",
-                file_path, name
-              );
-              continue;
+          if !skip_excludes {
+            if let Some(excl) = self.excludes.get(name) {
+              if excl.is_excluded(file_path) {
+                debug!(
+                  "File {:?} excluded by tsconfig for project '{}'",
+                  file_path, name
+                );
+                continue;
+              }
             }
           }
           result.push(name.clone());
@@ -146,10 +163,8 @@ impl ProjectIndex {
       }
     }
     // Fallback: match against project root for projects not already matched via
-    // sourceRoot. This handles files inside a project's root but outside its
-    // sourceRoot (e.g. config files). Also handles nested projects where the
-    // parent's sourceRoot is a prefix but the child was never checked.
-    // tsconfig excludes are not applied here — config files should always count.
+    // sourceRoot. tsconfig excludes are not applied here — config files should
+    // always count.
     for (root, names) in &self.root_entries {
       if file_path.starts_with(root) {
         for name in names {
@@ -367,6 +382,99 @@ mod tests {
         .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
         .is_empty(),
       "spec files should be excluded"
+    );
+  }
+
+  #[test]
+  fn test_get_owning_packages_skips_tsconfig_excludes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let lib_dir = cwd.join("libs/ui-widgets");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{ "exclude": ["**/*.spec.ts", "**/*.stories.tsx"] }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "ui-widgets".to_string(),
+      root: "libs/ui-widgets".into(),
+      source_root: "libs/ui-widgets/src".into(),
+      ts_config: Some(lib_dir.join("tsconfig.lib.json")),
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let index = ProjectIndex::new(&projects, cwd);
+
+    // get_package_names_by_path excludes spec/stories (for reference traversal)
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts"))
+        .is_empty(),
+      "filtered method should exclude spec files"
+    );
+
+    // get_owning_packages_by_path includes them (for direct changes)
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/utils.spec.ts")),
+      vec!["ui-widgets"],
+      "direct-change method should include spec files"
+    );
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/Grid.stories.tsx")),
+      vec!["ui-widgets"],
+      "direct-change method should include stories files"
+    );
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/ui-widgets/src/index.ts")),
+      vec!["ui-widgets"],
+      "normal files work with both methods"
+    );
+  }
+
+  #[test]
+  fn test_get_owning_packages_fast_path_no_root_entries() {
+    // When root == sourceRoot, root_entries is empty and resolve_packages
+    // takes the fast path (no hashset allocation). This test exercises that
+    // branch with tsconfig excludes active.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let lib_dir = cwd.join("libs/simple");
+    std::fs::create_dir_all(&lib_dir).unwrap();
+    std::fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{ "exclude": ["**/*.spec.ts"] }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "simple".to_string(),
+      root: "libs/simple".into(),
+      source_root: "libs/simple".into(),
+      ts_config: Some(lib_dir.join("tsconfig.lib.json")),
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let index = ProjectIndex::new(&projects, cwd);
+
+    // Filtered: spec excluded
+    assert!(
+      index
+        .get_package_names_by_path(Path::new("libs/simple/utils.spec.ts"))
+        .is_empty(),
+      "fast path: filtered method should exclude spec files"
+    );
+
+    // Unfiltered: spec included
+    assert_eq!(
+      index.get_owning_packages_by_path(Path::new("libs/simple/utils.spec.ts")),
+      vec!["simple"],
+      "fast path: direct-change method should include spec files"
     );
   }
 

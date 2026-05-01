@@ -46,8 +46,20 @@ jobs:
       - name: Read PR metadata
         id: pr
         run: |
-          echo "number=$(jq -r .pr_number pr-metadata.json)" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(jq -r .head_sha pr-metadata.json)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          pr_number=$(jq -r .pr_number pr-metadata.json)
+          head_sha=$(jq -r .head_sha pr-metadata.json)
+          # Defense-in-depth: validate before using in shell/scripts downstream.
+          if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+            echo "Invalid pr_number from pr-metadata.json: $pr_number" >&2
+            exit 1
+          fi
+          if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid head_sha from pr-metadata.json: $head_sha" >&2
+            exit 1
+          fi
+          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -91,7 +103,8 @@ jobs:
             | while read -r tag; do
                 [ -z "$tag" ] && continue
                 echo "Deleting prior preview release ${tag}"
-                gh release delete "${tag}" --yes --cleanup-tag --repo "${GH_REPO}" || true
+                gh release delete "${tag}" --yes --cleanup-tag --repo "${GH_REPO}" \
+                  || echo "WARN: failed to delete ${tag} (continuing; close-time workflow is the backstop)" >&2
               done
 
       - name: Create GitHub Release

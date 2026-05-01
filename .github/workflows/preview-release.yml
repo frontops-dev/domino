@@ -95,17 +95,30 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
+          set -euo pipefail
+          # Capture API output and exit status explicitly. A pipe-into-loop
+          # would mask a gh api failure (network blip, rate limit) as an
+          # empty result — leaving stale previews while the publish step
+          # still creates a new one. Warn-and-continue here because the
+          # close-time workflow is the authoritative backstop.
           # Server-side prefix match; trailing dash disambiguates pr-1- from pr-12-.
-          # Failures here are non-fatal: the close-time workflow is the backstop.
-          gh api "repos/${GH_REPO}/git/matching-refs/tags/pr-${PR_NUMBER}-" \
-            --jq '.[].ref' 2>/dev/null \
-            | sed 's|^refs/tags/||' \
-            | while read -r tag; do
-                [ -z "$tag" ] && continue
-                echo "Deleting prior preview release ${tag}"
-                gh release delete "${tag}" --yes --cleanup-tag --repo "${GH_REPO}" \
-                  || echo "WARN: failed to delete ${tag} (continuing; close-time workflow is the backstop)" >&2
-              done
+          if ! api_refs=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/pr-${PR_NUMBER}-" --jq '.[].ref'); then
+            echo "WARN: failed to query prior preview tags via gh api; skipping in-PR cleanup (close-time workflow will handle it)" >&2
+            exit 0
+          fi
+
+          if [ -z "$api_refs" ]; then
+            echo "No prior previews to delete."
+            exit 0
+          fi
+
+          while IFS= read -r ref; do
+            [ -z "$ref" ] && continue
+            tag="${ref#refs/tags/}"
+            echo "Deleting prior preview release ${tag}"
+            gh release delete "${tag}" --yes --cleanup-tag --repo "${GH_REPO}" \
+              || echo "WARN: failed to delete ${tag} (continuing; close-time workflow is the backstop)" >&2
+          done <<< "$api_refs"
 
       - name: Create GitHub Release
         uses: actions/github-script@v7

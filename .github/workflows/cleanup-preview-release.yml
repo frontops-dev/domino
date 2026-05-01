@@ -46,12 +46,23 @@ jobs:
 
           echo "Scanning for tags matching pr-${PR_NUMBER}-*"
 
-          # Server-side prefix match. Trailing dash disambiguates pr-1- from pr-12-.
-          mapfile -t tags < <(
-            gh api "repos/${GH_REPO}/git/matching-refs/tags/pr-${PR_NUMBER}-" \
-              --jq '.[].ref' 2>/dev/null \
-              | sed 's|^refs/tags/||'
-          )
+          # Capture API output and exit status explicitly. Without this, an API
+          # failure inside `< <(... | sed)` silently produces an empty result
+          # which would be misread as "no matches found" — and the backstop
+          # workflow would falsely report success while leaving releases behind.
+          # Server-side prefix match; trailing dash disambiguates pr-1- from pr-12-.
+          if ! api_refs=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/pr-${PR_NUMBER}-" --jq '.[].ref'); then
+            echo "ERROR: failed to query matching tags via gh api; aborting cleanup" >&2
+            exit 1
+          fi
+
+          tags=()
+          if [ -n "$api_refs" ]; then
+            while IFS= read -r ref; do
+              [ -z "$ref" ] && continue
+              tags+=("${ref#refs/tags/}")
+            done <<< "$api_refs"
+          fi
 
           if [ "${#tags[@]}" -eq 0 ]; then
             echo "Nothing to clean up."

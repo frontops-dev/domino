@@ -796,6 +796,13 @@ export function getTheme() {
 fn test_dynamic_import_detection() {
   let branch = TestBranch::new("test-dynamic-import");
 
+  // Guard: verify the baseline fixture file exists — without it, the negative
+  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  assert!(
+    fixture_path().join("proj2/lazy-loader.tsx").exists(),
+    "Fixture file proj2/lazy-loader.tsx must exist on main for this test to be meaningful"
+  );
+
   // proj2/lazy-loader.tsx already exists in the baseline with a React.lazy dynamic import from proj1.
   // Change proj1 - proj2 should NOT be affected because the dynamic import
   // with a static string specifier acts as an isolation boundary (no conservative cascade)
@@ -833,6 +840,13 @@ export function unusedFn() {
 #[test]
 fn test_multiple_dynamic_imports() {
   let branch = TestBranch::new("test-multiple-dynamic-imports");
+
+  // Guard: verify the baseline fixture file exists — without it, the test
+  // would pass vacuously since there would be no dynamic imports to isolate.
+  assert!(
+    fixture_path().join("proj3/dynamic-loader.tsx").exists(),
+    "Fixture file proj3/dynamic-loader.tsx must exist on main for this test to be meaningful"
+  );
 
   // proj3/dynamic-loader.tsx already exists in the baseline with multiple dynamic imports
   // from proj1 and proj2.
@@ -926,6 +940,13 @@ export class MyClass {
 #[test]
 fn test_dynamic_import_static_specifier_no_cascade() {
   let branch = TestBranch::new("test-dynamic-no-cascade");
+
+  // Guard: verify the baseline fixture file exists — without it, the negative
+  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  assert!(
+    fixture_path().join("proj2/page-wrapper.tsx").exists(),
+    "Fixture file proj2/page-wrapper.tsx must exist on main for this test to be meaningful"
+  );
 
   // proj2/page-wrapper.tsx already exists in baseline with React.lazy(() => import('@monorepo/proj1')).
   // proj3 statically imports from proj2 (baseline index.ts imports anotherFn from proj2).

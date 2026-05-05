@@ -796,25 +796,16 @@ export function getTheme() {
 fn test_dynamic_import_detection() {
   let branch = TestBranch::new("test-dynamic-import");
 
-  // Add a file to proj2 that uses dynamic import from proj1
-  branch.make_change(
-    "proj2/lazy-loader.tsx",
-    r#"import React from 'react';
-
-// Dynamic import using React.lazy
-const LazyProj1Component = React.lazy(
-  () => import('@monorepo/proj1').then(m => ({ default: m.proj1 }))
-);
-
-export function LazyLoader() {
-  return <React.Suspense fallback={<div>Loading...</div>}>
-    <LazyProj1Component />
-  </React.Suspense>;
-}
-"#,
+  // Guard: verify the baseline fixture file exists — without it, the negative
+  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  assert!(
+    fixture_path().join("proj2/lazy-loader.tsx").exists(),
+    "Fixture file proj2/lazy-loader.tsx must exist on main for this test to be meaningful"
   );
 
-  // Now change proj1 - proj2 should be affected due to dynamic import
+  // proj2/lazy-loader.tsx already exists in the baseline with a React.lazy dynamic import from proj1.
+  // Change proj1 - proj2 should NOT be affected because the dynamic import
+  // with a static string specifier acts as an isolation boundary (no conservative cascade)
   branch.make_change(
     "proj1/index.ts",
     r#"export function proj1() {
@@ -829,14 +820,16 @@ export function unusedFn() {
 
   let affected = branch.get_affected();
 
-  // proj1 changed, proj2 has a dynamic import of proj1, proj3 has implicit dependency
+  // proj1 changed, proj3 has implicit dependency on proj1
+  // proj2 has a React.lazy() dynamic import from proj1 with a static string specifier,
+  // so changes do NOT cascade through the lazy boundary
   assert!(
     affected.contains(&"proj1".to_string()),
     "proj1 should be affected (changed)"
   );
   assert!(
-    affected.contains(&"proj2".to_string()),
-    "proj2 should be affected (has dynamic import from proj1)"
+    !affected.contains(&"proj2".to_string()),
+    "proj2 should NOT be affected (React.lazy dynamic import is an isolation boundary)"
   );
   assert!(
     affected.contains(&"proj3".to_string()),
@@ -848,23 +841,15 @@ export function unusedFn() {
 fn test_multiple_dynamic_imports() {
   let branch = TestBranch::new("test-multiple-dynamic-imports");
 
-  // Add a file with multiple dynamic imports
-  branch.make_change(
-    "proj3/dynamic-loader.tsx",
-    r#"import React from 'react';
-
-const Component1 = React.lazy(() => import('@monorepo/proj1'));
-const Component2 = React.lazy(() => import('@monorepo/proj2'));
-
-async function loadModules() {
-  const mod1 = await import('@monorepo/proj1');
-  const mod2 = await import('@monorepo/proj2');
-  return { mod1, mod2 };
-}
-
-export { Component1, Component2, loadModules };
-"#,
+  // Guard: verify the baseline fixture file exists — without it, the test
+  // would pass vacuously since there would be no dynamic imports to isolate.
+  assert!(
+    fixture_path().join("proj3/dynamic-loader.tsx").exists(),
+    "Fixture file proj3/dynamic-loader.tsx must exist on main for this test to be meaningful"
   );
+
+  // proj3/dynamic-loader.tsx already exists in the baseline with multiple dynamic imports
+  // from proj1 and proj2.
 
   // Change proj1
   branch.make_change(
@@ -881,14 +866,16 @@ export function unusedFn() {
 
   let affected = branch.get_affected();
 
-  // proj1 changed, proj3 dynamically imports it
+  // proj1 changed, but proj3's dynamic imports with static string specifiers
+  // do NOT cascade — the lazy boundary acts as isolation.
+  // proj3 IS affected because it has an implicit dependency on proj1.
   assert!(
     affected.contains(&"proj1".to_string()),
     "proj1 should be affected"
   );
   assert!(
     affected.contains(&"proj3".to_string()),
-    "proj3 should be affected (has dynamic imports from proj1)"
+    "proj3 should be affected (implicit dependency on proj1)"
   );
 }
 
@@ -947,6 +934,52 @@ export class MyClass {
   assert!(
     !affected.contains(&"proj1".to_string()),
     "proj1 should NOT be affected (it didn't change)"
+  );
+}
+
+#[test]
+fn test_dynamic_import_static_specifier_no_cascade() {
+  let branch = TestBranch::new("test-dynamic-no-cascade");
+
+  // Guard: verify the baseline fixture file exists — without it, the negative
+  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  assert!(
+    fixture_path().join("proj2/page-wrapper.tsx").exists(),
+    "Fixture file proj2/page-wrapper.tsx must exist on main for this test to be meaningful"
+  );
+
+  // proj2/page-wrapper.tsx already exists in baseline with React.lazy(() => import('@monorepo/proj1')).
+  // proj3 statically imports from proj2 (baseline index.ts imports anotherFn from proj2).
+  // When proj1 changes, the cascade should stop at the lazy boundary:
+  // proj1 is affected (changed), but proj2 is NOT (lazy boundary).
+
+  // Change proj1 — should NOT cascade through the lazy boundary to proj2
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-changed-deep';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (changed)"
+  );
+  assert!(
+    !affected.contains(&"proj2".to_string()),
+    "proj2 should NOT be affected (React.lazy is an isolation boundary)"
+  );
+  // proj3 has implicit dep on proj1, so it IS affected through that path
+  assert!(
+    affected.contains(&"proj3".to_string()),
+    "proj3 should be affected (implicit dependency on proj1)"
   );
 }
 

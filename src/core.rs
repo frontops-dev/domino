@@ -756,7 +756,7 @@ fn process_changed_symbol(
       }
     }
 
-    // Special case: line=0,column=0 is a sentinel for "entire file affected" (from dynamic imports)
+    // Special case: line=0,column=0 is a sentinel for "entire file affected"
     // In this case, we need to process all exports from that file
     if reference.line == 0 && reference.column == 0 {
       debug!(

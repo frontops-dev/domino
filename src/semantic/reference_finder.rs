@@ -170,24 +170,23 @@ impl<'a> ReferenceFinder<'a> {
               );
               all_refs.extend(member_refs);
             } else if *is_dynamic {
-              // Dynamic imports (from import() expressions) get conservative treatment:
-              // Even if we can't find local references to the synthetic namespace identifier
-              // (like __dynamic_import_0), we still mark the file as affected because
-              // the dynamic import likely uses the module in ways we can't statically analyze
-              // (e.g., import('module').then(m => m.Component))
+              // Dynamic imports with string literal specifiers (which is all tracked dynamic
+              // imports — non-string-literal ones are skipped during extraction) are treated
+              // like static namespace imports: if we can't find member access to the specific
+              // changed symbol, we don't mark the file as affected.
+              //
+              // This prevents React.lazy(() => import('./SomePage')) from cascading all
+              // exports when a deep dependency of SomePage changes. The lazy boundary
+              // acts as an isolation point — only explicit member access propagates.
               debug!(
-                "No local references to dynamic namespace '{}', but marking file {:?} as affected (conservative)",
-                local_name, importing_file
+                "No local references to dynamic namespace '{}' for symbol '{}' in {:?} — \
+                 specifier is a static string literal, treating like static namespace import (no cascade)",
+                local_name, symbol_name, importing_file
               );
-              all_refs.push(Reference {
-                file_path: importing_file.clone(),
-                line: 0,   // Sentinel value: line 0 indicates "entire file affected"
-                column: 0, // Sentinel value: column 0 with line 0
-              });
             }
-            // For static namespace imports (import * as foo), if we don't find any references
-            // to 'foo.symbol', we don't mark the file as affected (strict behavior) since the
-            // namespace either doesn't use this specific symbol or is dead code.
+            // For both static and dynamic namespace imports, if we don't find any references
+            // to 'namespace.symbol', we don't mark the file as affected (strict behavior)
+            // since the namespace either doesn't use this specific symbol or is dead code.
           }
           Err(e) => {
             // Propagate the error instead of silently marking as affected

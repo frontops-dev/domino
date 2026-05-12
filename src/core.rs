@@ -760,7 +760,7 @@ fn process_changed_symbol(
     // In this case, we need to process all exports from that file
     if reference.line == 0 && reference.column == 0 {
       debug!(
-        "File {:?} is conservatively affected (dynamic import). Processing all its exports.",
+        "File {:?} is conservatively affected (entire-file sentinel). Processing all its exports.",
         reference.file_path
       );
 

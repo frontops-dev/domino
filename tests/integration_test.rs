@@ -793,14 +793,20 @@ export function getTheme() {
 }
 
 #[test]
-fn test_dynamic_import_detection() {
+fn test_react_lazy_no_cascade() {
   let branch = TestBranch::new("test-dynamic-import");
 
-  // Guard: verify the baseline fixture file exists — without it, the negative
-  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  // Guard: verify the baseline fixture exists and contains the expected dynamic import.
+  // Without it, the negative assertion below would pass vacuously.
+  let lazy_loader = fixture_path().join("proj2/lazy-loader.tsx");
   assert!(
-    fixture_path().join("proj2/lazy-loader.tsx").exists(),
+    lazy_loader.exists(),
     "Fixture file proj2/lazy-loader.tsx must exist on main for this test to be meaningful"
+  );
+  let content = fs::read_to_string(&lazy_loader).unwrap();
+  assert!(
+    content.contains("import('@monorepo/proj1')"),
+    "proj2/lazy-loader.tsx must contain a dynamic import from proj1"
   );
 
   // proj2/lazy-loader.tsx already exists in the baseline with a React.lazy dynamic import from proj1.
@@ -841,11 +847,20 @@ export function unusedFn() {
 fn test_multiple_dynamic_imports() {
   let branch = TestBranch::new("test-multiple-dynamic-imports");
 
-  // Guard: verify the baseline fixture file exists — without it, the test
-  // would pass vacuously since there would be no dynamic imports to isolate.
+  // Guard: verify the baseline fixture exists and contains the expected dynamic imports.
+  let dynamic_loader = fixture_path().join("proj3/dynamic-loader.tsx");
   assert!(
-    fixture_path().join("proj3/dynamic-loader.tsx").exists(),
+    dynamic_loader.exists(),
     "Fixture file proj3/dynamic-loader.tsx must exist on main for this test to be meaningful"
+  );
+  let content = fs::read_to_string(&dynamic_loader).unwrap();
+  assert!(
+    content.contains("import('@monorepo/proj1')"),
+    "proj3/dynamic-loader.tsx must contain a dynamic import from proj1"
+  );
+  assert!(
+    content.contains("import('@monorepo/proj2')"),
+    "proj3/dynamic-loader.tsx must contain a dynamic import from proj2"
   );
 
   // proj3/dynamic-loader.tsx already exists in the baseline with multiple dynamic imports
@@ -868,10 +883,14 @@ export function unusedFn() {
 
   // proj1 changed, but proj3's dynamic imports with static string specifiers
   // do NOT cascade — the lazy boundary acts as isolation.
-  // proj3 IS affected because it has an implicit dependency on proj1.
+  // proj3 IS affected because it has an implicit dependency on proj1 (see get_affected config).
   assert!(
     affected.contains(&"proj1".to_string()),
     "proj1 should be affected"
+  );
+  assert!(
+    !affected.contains(&"proj2".to_string()),
+    "proj2 should NOT be affected (only referenced via dynamic imports in proj3)"
   );
   assert!(
     affected.contains(&"proj3".to_string()),
@@ -941,11 +960,16 @@ export class MyClass {
 fn test_dynamic_import_static_specifier_no_cascade() {
   let branch = TestBranch::new("test-dynamic-no-cascade");
 
-  // Guard: verify the baseline fixture file exists — without it, the negative
-  // assertion below would pass vacuously (no dynamic import = no cascade to block).
+  // Guard: verify the baseline fixture exists and contains the expected dynamic import.
+  let page_wrapper = fixture_path().join("proj2/page-wrapper.tsx");
   assert!(
-    fixture_path().join("proj2/page-wrapper.tsx").exists(),
+    page_wrapper.exists(),
     "Fixture file proj2/page-wrapper.tsx must exist on main for this test to be meaningful"
+  );
+  let content = fs::read_to_string(&page_wrapper).unwrap();
+  assert!(
+    content.contains("import('@monorepo/proj1')"),
+    "proj2/page-wrapper.tsx must contain a dynamic import from proj1"
   );
 
   // proj2/page-wrapper.tsx already exists in baseline with React.lazy(() => import('@monorepo/proj1')).
@@ -976,10 +1000,108 @@ export function unusedFn() {
     !affected.contains(&"proj2".to_string()),
     "proj2 should NOT be affected (React.lazy is an isolation boundary)"
   );
-  // proj3 has implicit dep on proj1, so it IS affected through that path
+  // proj3 is affected via implicit_dependencies: ["proj1"] in the test config (see get_affected)
   assert!(
     affected.contains(&"proj3".to_string()),
     "proj3 should be affected (implicit dependency on proj1)"
+  );
+}
+
+#[test]
+fn test_dynamic_import_coexists_with_static_import() {
+  let branch = TestBranch::new("test-dynamic-static-coexist");
+
+  // Add a file in proj2 that has BOTH a static named import and a dynamic import from proj1.
+  // The static import should still cascade when proj1 changes, proving that
+  // the presence of dynamic imports doesn't suppress static import detection.
+  branch.make_change(
+    "proj2/mixed-imports.ts",
+    r#"import { proj1 } from '@monorepo/proj1';
+
+export async function loadLazy() {
+  const mod = await import('@monorepo/proj1');
+  return mod;
+}
+
+export function useStatic() {
+  return proj1();
+}
+"#,
+  );
+
+  // Change proj1
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-coexist-change';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (changed)"
+  );
+  // proj2 is affected: mixed-imports.ts is new on the branch (in the diff) and
+  // its static import of proj1 creates a reference to the changed symbol.
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (mixed-imports.ts has a static import of the changed symbol)"
+  );
+}
+
+#[test]
+fn test_non_string_literal_dynamic_import_no_crash() {
+  let branch = TestBranch::new("test-nonstring-dynamic");
+
+  // Template literal and variable dynamic imports should not crash or mis-cascade.
+  // These are silently skipped during extraction (logged as warnings).
+  branch.make_change(
+    "proj2/variable-import.ts",
+    r#"const moduleName = '@monorepo/proj1';
+
+export async function loadVariable() {
+  const mod = await import(moduleName);
+  return mod;
+}
+
+export async function loadTemplate() {
+  const name = 'proj1';
+  const mod = await import(`@monorepo/${name}`);
+  return mod;
+}
+"#,
+  );
+
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-nonstring-test';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let affected = branch.get_affected();
+
+  // Should not crash. proj1 changed, proj2 has non-string dynamic imports
+  // which are skipped — proj2 is only affected if its own files are in the diff.
+  assert!(
+    affected.contains(&"proj1".to_string()),
+    "proj1 should be affected (changed)"
+  );
+  assert!(
+    affected.contains(&"proj2".to_string()),
+    "proj2 should be affected (variable-import.ts is a new file in the diff)"
   );
 }
 

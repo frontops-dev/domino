@@ -112,8 +112,9 @@ pub struct Import {
   /// Whether this is a type-only import
   #[allow(dead_code)]
   pub is_type_only: bool,
-  /// Whether this import comes from a dynamic import() expression
-  /// Dynamic imports get conservative treatment for namespace resolution
+  /// Whether this import comes from a dynamic import() expression.
+  /// Dynamic imports with string literal specifiers are treated like static
+  /// namespace imports — only explicit member access propagates changes.
   pub is_dynamic: bool,
 }
 

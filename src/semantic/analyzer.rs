@@ -366,8 +366,9 @@ impl<'a> Visit<'a> for DynamicImportVisitor<'a> {
         self.dynamic_count += 1;
       }
       _ => {
-        // Non-string-literal imports (template literals, variables, etc.)
-        // are not currently supported. These would require runtime evaluation.
+        // TODO(#68): non-string-literal specifiers (template literals, variables)
+        // are silently dropped — importers will never be marked affected.
+        // Consider conservative treatment or pattern-matching common forms.
         warn!(
           "Skipping dynamic import with non-string-literal specifier (template literal or variable). \
            Only string literal dynamic imports are currently supported for affected analysis."

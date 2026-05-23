@@ -1,0 +1,94 @@
+name: Cleanup Preview Release
+
+# Triggered when a PR is closed (merged or unmerged). Removes every preview
+# release created for this PR (tags matching pr-{number}-*) along with the
+# underlying git tag refs. Acts as a backstop to the in-PR cleanup that
+# preview-release.yml does on each new publish.
+'on':
+  pull_request:
+    types: [closed]
+
+  # Manual re-run for stragglers: race between PR close and an in-flight
+  # preview publish, or backfilling prior PRs whose previews were never swept.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number whose preview releases should be cleaned up'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Serialize per-PR so close -> reopen -> close doesn't race itself.
+concurrency:
+  group: cleanup-preview-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete preview releases
+    if: github.repository == 'frontops-dev/domino'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+    steps:
+      - name: Delete preview releases for this PR
+        run: |
+          set -euo pipefail
+
+          if ! [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid PR number: ${PR_NUMBER}" >&2
+            exit 1
+          fi
+
+          echo "Scanning for tags matching pr-${PR_NUMBER}-*"
+
+          # Capture API output and exit status explicitly. Without this, an API
+          # failure inside `< <(... | sed)` silently produces an empty result
+          # which would be misread as "no matches found" — and the backstop
+          # workflow would falsely report success while leaving releases behind.
+          # Server-side prefix match; trailing dash disambiguates pr-1- from pr-12-.
+          if ! api_refs=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/pr-${PR_NUMBER}-" --jq '.[].ref'); then
+            echo "ERROR: failed to query matching tags via gh api; aborting cleanup" >&2
+            exit 1
+          fi
+
+          tags=()
+          if [ -n "$api_refs" ]; then
+            while IFS= read -r ref; do
+              [ -z "$ref" ] && continue
+              tags+=("${ref#refs/tags/}")
+            done <<< "$api_refs"
+          fi
+
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "Nothing to clean up."
+            exit 0
+          fi
+
+          echo "Found ${#tags[@]} matching release(s):"
+          printf '  %s\n' "${tags[@]}"
+
+          failures=0
+          for tag in "${tags[@]}"; do
+            echo
+            echo "Deleting $tag..."
+            if gh release delete "$tag" --yes --cleanup-tag --repo "${GH_REPO}"; then
+              echo "  ok: deleted $tag"
+            else
+              echo "  fail: $tag" >&2
+              failures=$((failures + 1))
+            fi
+          done
+
+          echo
+          echo "Summary for PR #${PR_NUMBER}:"
+          echo "  Releases processed: ${#tags[@]}"
+          echo "  Failures:           ${failures}"
+
+          if [ "$failures" -gt 0 ]; then
+            exit 1
+          fi

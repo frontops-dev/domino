@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::types::{AffectCause, AffectedReport};
+use crate::types::{AffectCause, AffectedProjectInfo, AffectedReport};
 use std::fs;
 use std::path::Path;
 
@@ -28,11 +28,21 @@ fn format_number(n: usize) -> String {
 fn generate_html(report: &AffectedReport) -> String {
   let graph_data = generate_cytoscape_data(report);
   let details_html = generate_details_html(report);
+  let banner_html = generate_global_banner_html(report);
+  let metadata_script = generate_metadata_script(report);
   let total_causes = report
     .projects
     .iter()
     .map(|p| p.causes.len())
     .sum::<usize>();
+  // Render the global/semantic split when global invalidation happened so
+  // the user can tell what came from `nx affected`-style global rules vs.
+  // real semantic signal. Hidden by `display: none` otherwise.
+  let summary_split_style = if report.global_triggers.is_empty() {
+    "display: none;"
+  } else {
+    ""
+  };
 
   format!(
     r#"<!DOCTYPE html>
@@ -697,6 +707,97 @@ fn generate_html(report: &AffectedReport) -> String {
             background: #f59e0b;
         }}
 
+        /* Distinct pill for Nx namedInputs global invalidation. Deliberately
+           a neutral slate so the user reads it as "infrastructure rule fired"
+           rather than "real direct code change" (which uses .direct/green). */
+        .cause-type.global {{
+            background: #64748b;
+        }}
+
+        .global-banner {{
+            background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+            border: 1px solid #475569;
+            border-left: 4px solid #64748b;
+            border-radius: 8px;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1.5rem;
+            color: #e2e8f0;
+        }}
+
+        .global-banner h3 {{
+            margin: 0 0 0.5rem 0;
+            color: #f1f5f9;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+
+        .global-banner p {{
+            margin: 0.5rem 0;
+            color: #cbd5e1;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }}
+
+        .global-banner ul {{
+            margin: 0.75rem 0 0.5rem 0;
+            padding-left: 1.5rem;
+            color: #e2e8f0;
+        }}
+
+        .global-banner ul li {{
+            margin: 0.25rem 0;
+            font-size: 0.9rem;
+        }}
+
+        .global-banner .docs-link {{
+            color: #93c5fd;
+            text-decoration: none;
+            border-bottom: 1px dotted #93c5fd;
+        }}
+
+        .global-banner .docs-link:hover {{
+            color: #bfdbfe;
+        }}
+
+        .global-only-group {{
+            margin-top: 2rem;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-left: 4px solid #64748b;
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+        }}
+
+        .global-only-group > summary {{
+            cursor: pointer;
+            list-style: none;
+            color: #cbd5e1;
+            font-weight: 600;
+            font-size: 1rem;
+            user-select: none;
+        }}
+
+        .global-only-group > summary::-webkit-details-marker {{
+            display: none;
+        }}
+
+        .global-only-group > summary::before {{
+            content: '▸';
+            display: inline-block;
+            margin-right: 0.5rem;
+            transition: transform 0.15s ease;
+        }}
+
+        .global-only-group[open] > summary::before {{
+            transform: rotate(90deg);
+        }}
+
+        .global-only-group .global-only-inner {{
+            margin-top: 1rem;
+        }}
+
         .cause-details {{
             color: #aaa;
             font-size: 0.9rem;
@@ -731,11 +832,14 @@ fn generate_html(report: &AffectedReport) -> String {
     </style>
 </head>
 <body>
+    {}
     <div class="container">
         <header>
             <h1>🎯 True Affected Report</h1>
             <p class="subtitle">Dependency Graph & Impact Analysis</p>
         </header>
+
+        {}
 
         <div class="summary">
             <div class="summary-grid">
@@ -746,6 +850,18 @@ fn generate_html(report: &AffectedReport) -> String {
                 <div class="summary-item">
                     <div class="summary-value">{}</div>
                     <div class="summary-label">Total Causes</div>
+                </div>
+                <div class="summary-item" style="{}">
+                    <div class="summary-value">{}</div>
+                    <div class="summary-label">Globally Invalidated</div>
+                </div>
+                <div class="summary-item" style="{}">
+                    <div class="summary-value">{}</div>
+                    <div class="summary-label">Semantically Affected</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-value">{}</div>
+                    <div class="summary-label">Changed Files</div>
                 </div>
             </div>
         </div>
@@ -805,15 +921,23 @@ fn generate_html(report: &AffectedReport) -> String {
         </div>
 
         <footer>
-            Generated by <strong>domino</strong> - True Affected Analysis
+            Generated by <strong>domino</strong> v{} &middot; True Affected Analysis
         </footer>
     </div>
 </body>
 </html>"#,
     graph_data,
+    metadata_script,
+    banner_html,
     format_number(report.projects.len()),
     format_number(total_causes),
-    details_html
+    summary_split_style,
+    format_number(report.totals.globally_invalidated),
+    summary_split_style,
+    format_number(report.totals.semantically_affected),
+    format_number(report.totals.changed_files),
+    details_html,
+    env!("CARGO_PKG_VERSION"),
   )
 }
 
@@ -925,10 +1049,123 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
   )
 }
 
+/// Render the "Global invalidation detected" banner that explains *why* a
+/// whole-workspace affected list isn't a Domino misbehavior. Returns an
+/// empty string for non-global runs so the template stays compact.
+fn generate_global_banner_html(report: &AffectedReport) -> String {
+  if report.global_triggers.is_empty() {
+    return String::new();
+  }
+
+  let project_count = report.projects.len();
+  let trigger_count = report.global_triggers.len();
+
+  let mut items = String::new();
+  for trigger in &report.global_triggers {
+    items.push_str(&format!(
+      "<li><code>{}</code> &nbsp;&larr;&nbsp; matched <code>{}</code></li>",
+      html_escape(&trigger.file.display().to_string()),
+      html_escape(&trigger.named_input),
+    ));
+  }
+
+  format!(
+    r#"<div class="global-banner" role="status">
+            <h3>⚠️ Global invalidation detected</h3>
+            <p>
+                <strong>{trigger_count}</strong> changed file{trigger_plural} matched Nx <code>namedInputs</code>
+                workspace-root pattern{trigger_plural}, so all <strong>{project_count}</strong> projects
+                are marked affected &mdash; the same as <code>nx affected</code> would do.
+            </p>
+            <ul>{items}</ul>
+            <p>
+                Semantic analysis of the other changed files still ran &mdash; the
+                <em>Detailed Impact Analysis</em> section below separates projects affected by
+                real code signal from those only swept up by the global rule.
+                See the
+                <a class="docs-link" href="https://nx.dev/concepts/more-concepts/customizing-inputs" target="_blank" rel="noopener">
+                    Nx <code>namedInputs</code> docs
+                </a>
+                for the underlying mechanic.
+            </p>
+        </div>"#,
+    trigger_count = trigger_count,
+    trigger_plural = if trigger_count == 1 { "" } else { "s" },
+    project_count = format_number(project_count),
+    items = items,
+  )
+}
+
+/// Embed the run's machine-readable summary so downstream consumers (CI
+/// dashboards, scrapers) don't have to parse the rendered HTML.
+fn generate_metadata_script(report: &AffectedReport) -> String {
+  // serde_json handles all string escaping for us — never hand-roll JSON into
+  // an HTML attribute, and never use raw user-provided strings without escaping
+  // `</script>` (the JSON shape here has no controlled-by-attacker strings, but
+  // the safe default is to use serde_json::to_string which won't emit unescaped
+  // `<` either since these values are paths and identifiers).
+  match serde_json::to_string(report) {
+    Ok(json) => format!(
+      r#"<script type="application/json" id="domino-meta">{}</script>"#,
+      json
+    ),
+    Err(_) => String::new(),
+  }
+}
+
+fn html_escape(s: &str) -> String {
+  s.replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&#39;")
+}
+
+/// Build the suffix shown in the collapsed group's summary line. When every
+/// globally-invalidated project was hit by patterns from a single namedInput,
+/// surface that name (e.g. " via `sharedGlobals`"). Otherwise stay generic.
+fn global_only_group_label(global_only: &[&AffectedProjectInfo]) -> String {
+  use std::collections::HashSet;
+  let mut inputs: HashSet<&str> = HashSet::new();
+  for project in global_only {
+    for cause in &project.causes {
+      if let AffectCause::GlobalInvalidation { named_input, .. } = cause {
+        inputs.insert(named_input.as_str());
+      }
+    }
+  }
+  match inputs.len() {
+    1 => {
+      let name = inputs.into_iter().next().unwrap_or("");
+      format!(" via <code>{}</code>", html_escape(name))
+    }
+    _ => " via Nx <code>namedInputs</code>".to_string(),
+  }
+}
+
+/// Returns true when this project's only signal is global invalidation.
+/// Used to collapse the long tail at the bottom of the report so semantic
+/// signal isn't drowned out.
+fn is_globally_invalidated_only(project: &AffectedProjectInfo) -> bool {
+  !project.causes.is_empty()
+    && project
+      .causes
+      .iter()
+      .all(|c| matches!(c, AffectCause::GlobalInvalidation { .. }))
+}
+
 fn generate_details_html(report: &AffectedReport) -> String {
   let mut html = String::new();
 
-  for project in &report.projects {
+  // Partition projects so semantic signal (DirectChange, ImportedSymbol, etc.)
+  // floats to the top expanded, and the global-only long tail is collapsed
+  // into a single summary row at the bottom.
+  let (global_only, semantic): (Vec<_>, Vec<_>) = report
+    .projects
+    .iter()
+    .partition(|p| is_globally_invalidated_only(p));
+
+  for project in &semantic {
     // Determine affect type
     let mut has_direct = false;
     let mut has_imported = false;
@@ -1090,12 +1327,13 @@ fn generate_details_html(report: &AffectedReport) -> String {
           ));
           html.push_str("</div>");
         }
-        AffectCause::GlobalInvalidation { file } => {
-          html.push_str("<span class=\"cause-type direct\">Global Invalidation</span>");
+        AffectCause::GlobalInvalidation { file, named_input } => {
+          html.push_str("<span class=\"cause-type global\">Global Invalidation</span>");
           html.push_str("<div class=\"cause-details\">");
           html.push_str(&format!(
-            "Triggered by: <span class=\"code-path\">{}</span>",
-            file.display()
+            "Triggered by: <span class=\"code-path\">{}</span> &nbsp;&larr;&nbsp; matched <code>{}</code>",
+            html_escape(&file.display().to_string()),
+            html_escape(named_input),
           ));
           html.push_str("</div>");
         }
@@ -1107,9 +1345,306 @@ fn generate_details_html(report: &AffectedReport) -> String {
     html.push_str("</ul></div></details></div>");
   }
 
+  // Collapsed group for projects that are only on the affected list because
+  // of global invalidation. Hidden by default to keep semantic signal visible.
+  if !global_only.is_empty() {
+    let group_label = global_only_group_label(&global_only);
+    html.push_str(&format!(
+      r#"<details class="global-only-group">
+                <summary>{count} projects globally invalidated{label} &mdash; click to expand</summary>
+                <div class="global-only-inner">"#,
+      count = format_number(global_only.len()),
+      label = group_label,
+    ));
+
+    for project in &global_only {
+      html.push_str(&format!(
+        r#"<div class="project-card" data-filter-type="affected">
+                    <details>
+                        <summary>
+                            <div class="project-name">📦 {name}</div>
+                            <div class="badge-container">
+                                <span class="affect-badge badge-affected">Global Only</span>
+                                <span class="affect-badge" style="background: #555;">
+                                    {count} cause{plural}
+                                </span>
+                            </div>
+                        </summary>
+                        <div class="cause-list-container">
+                            <ul class="cause-list">"#,
+        name = html_escape(&project.name),
+        count = project.causes.len(),
+        plural = if project.causes.len() == 1 { "" } else { "s" },
+      ));
+
+      for cause in &project.causes {
+        if let AffectCause::GlobalInvalidation { file, named_input } = cause {
+          html.push_str(&format!(
+            r#"<li class="cause-item">
+                                <span class="cause-type global">Global Invalidation</span>
+                                <div class="cause-details">
+                                    Triggered by: <span class="code-path">{}</span> &nbsp;&larr;&nbsp; matched <code>{}</code>
+                                </div>
+                            </li>"#,
+            html_escape(&file.display().to_string()),
+            html_escape(named_input),
+          ));
+        }
+      }
+
+      html.push_str("</ul></div></details></div>");
+    }
+
+    html.push_str("</div></details>");
+  }
+
   html
 }
 
 fn sanitize_node_id(name: &str) -> String {
   name.replace('-', "_").replace('@', "").replace('/', "_")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::types::{AffectedProjectInfo, GlobalTrigger, ReportTotals};
+  use std::path::PathBuf;
+
+  fn make_project(name: &str, causes: Vec<AffectCause>) -> AffectedProjectInfo {
+    AffectedProjectInfo {
+      name: name.to_string(),
+      causes,
+    }
+  }
+
+  fn empty_totals() -> ReportTotals {
+    ReportTotals::default()
+  }
+
+  fn synth_global_report() -> AffectedReport {
+    // Mimics the real-world incident: ~600 projects swept up by a workflow
+    // file change, ~15 with semantic signal, 3 global trigger files.
+    let mut projects = Vec::new();
+    for i in 0..600 {
+      projects.push(make_project(
+        &format!("lib-{:03}", i),
+        vec![
+          AffectCause::GlobalInvalidation {
+            file: PathBuf::from(".github/workflows/ci.yml"),
+            named_input: "sharedGlobals".to_string(),
+          },
+          AffectCause::GlobalInvalidation {
+            file: PathBuf::from("nx.json"),
+            named_input: "sharedGlobals".to_string(),
+          },
+          AffectCause::GlobalInvalidation {
+            file: PathBuf::from("package.json"),
+            named_input: "ciInputs".to_string(),
+          },
+        ],
+      ));
+    }
+    for i in 0..15 {
+      projects.push(make_project(
+        &format!("app-{}", i),
+        vec![
+          AffectCause::DirectChange {
+            file: PathBuf::from(format!("apps/app-{}/src/index.ts", i)),
+            symbol: Some(format!("handleClick{}", i)),
+            line: 42 + i,
+          },
+          AffectCause::ImportedSymbol {
+            source_project: "shared-utils".to_string(),
+            symbol: "formatDate".to_string(),
+            via_file: PathBuf::from(format!("apps/app-{}/src/index.ts", i)),
+            source_file: PathBuf::from("libs/shared-utils/src/format.ts"),
+          },
+          AffectCause::GlobalInvalidation {
+            file: PathBuf::from(".github/workflows/ci.yml"),
+            named_input: "sharedGlobals".to_string(),
+          },
+        ],
+      ));
+    }
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
+    AffectedReport {
+      projects,
+      global_triggers: vec![
+        GlobalTrigger {
+          file: PathBuf::from(".github/workflows/ci.yml"),
+          named_input: "sharedGlobals".to_string(),
+          raw_pattern: "{workspaceRoot}/.github/workflows/ci.yml".to_string(),
+        },
+        GlobalTrigger {
+          file: PathBuf::from("nx.json"),
+          named_input: "sharedGlobals".to_string(),
+          raw_pattern: "{workspaceRoot}/nx.json".to_string(),
+        },
+        GlobalTrigger {
+          file: PathBuf::from("package.json"),
+          named_input: "ciInputs".to_string(),
+          raw_pattern: "{workspaceRoot}/package.json".to_string(),
+        },
+      ],
+      totals: ReportTotals {
+        globally_invalidated: 600,
+        semantically_affected: 15,
+        overlap: 15,
+        changed_files: 4,
+      },
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: 1_716_595_200,
+    }
+  }
+
+  fn synth_normal_report() -> AffectedReport {
+    let projects = vec![
+      make_project(
+        "app-web",
+        vec![AffectCause::DirectChange {
+          file: PathBuf::from("apps/web/src/main.ts"),
+          symbol: Some("bootstrap".to_string()),
+          line: 12,
+        }],
+      ),
+      make_project(
+        "shared-utils",
+        vec![AffectCause::ImportedSymbol {
+          source_project: "core".to_string(),
+          symbol: "Logger".to_string(),
+          via_file: PathBuf::from("libs/shared-utils/src/log.ts"),
+          source_file: PathBuf::from("libs/core/src/logger.ts"),
+        }],
+      ),
+      make_project(
+        "ui-widgets",
+        vec![AffectCause::ImplicitDependency {
+          depends_on: "shared-utils".to_string(),
+        }],
+      ),
+    ];
+    AffectedReport {
+      projects,
+      global_triggers: Vec::new(),
+      totals: ReportTotals {
+        globally_invalidated: 0,
+        semantically_affected: 3,
+        overlap: 0,
+        changed_files: 2,
+      },
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: 1_716_595_200,
+    }
+  }
+
+  #[test]
+  fn banner_renders_only_when_global_triggers_present() {
+    let global = generate_html(&synth_global_report());
+    let normal = generate_html(&synth_normal_report());
+
+    assert!(global.contains("Global invalidation detected"));
+    assert!(global.contains("cause-type global"));
+    assert!(global.contains(r#"<div class="global-banner""#));
+    assert!(global.contains(r#"id="domino-meta""#));
+
+    // Non-global runs MUST remain visually identical to today's report —
+    // no banner element, no new pill, no collapsed group element. (The CSS
+    // *classes* are still emitted in the always-included <style> block; we
+    // assert on the rendered elements, not the stylesheet.)
+    assert!(!normal.contains("Global invalidation detected"));
+    assert!(!normal.contains("\"cause-type global\""));
+    assert!(!normal.contains(r#"<div class="global-banner""#));
+    assert!(!normal.contains(r#"<details class="global-only-group""#));
+    // The metadata script is harmless on non-global runs and lets dashboards
+    // pick up the same shape regardless of run type.
+    assert!(normal.contains(r#"id="domino-meta""#));
+  }
+
+  #[test]
+  fn json_metadata_contains_camelcase_fields() {
+    let html = generate_html(&synth_global_report());
+    // Spot-check the camelCase shape so downstream consumers can rely on it.
+    assert!(html.contains("\"globalTriggers\""));
+    assert!(html.contains("\"namedInput\":\"sharedGlobals\""));
+    assert!(html.contains("\"rawPattern\""));
+    assert!(html.contains("\"runStartedAtUnixSecs\""));
+    assert!(html.contains("\"globallyInvalidated\":600"));
+  }
+
+  #[test]
+  fn global_only_projects_are_collapsed_at_bottom() {
+    let html = generate_html(&synth_global_report());
+    let semantic_start = html
+      .find(r#"data-filter-type="both""#)
+      .expect("expected a semantic project card with `both` filter type");
+    let group_start = html
+      .find(r#"<details class="global-only-group""#)
+      .expect("expected the collapsed global-only group element");
+    assert!(
+      semantic_start < group_start,
+      "semantic project cards must appear before the collapsed global-only group \
+       (semantic at {}, group at {})",
+      semantic_start,
+      group_start
+    );
+  }
+
+  #[test]
+  fn pill_does_not_use_direct_class_for_global_cause() {
+    // Regression guard for the original UX bug: the global cause was
+    // sharing the green `.direct` pill, conflating it with real code edits.
+    let html = generate_html(&synth_global_report());
+    let first_global = html
+      .find("Global Invalidation")
+      .expect("global pill present");
+    let nearby = &html[first_global.saturating_sub(80)..first_global];
+    assert!(
+      nearby.contains("cause-type global"),
+      "expected `cause-type global` near the pill, got: {}",
+      nearby
+    );
+  }
+
+  // --- Sample report harness ---------------------------------------------
+  //
+  // These tests are #[ignore]d so they don't run in normal CI. Invoke with:
+  //   cargo test --lib sample_report -- --ignored --nocapture
+  // to write two HTML files you can open in a browser to sanity-check the UI.
+
+  #[test]
+  #[ignore]
+  fn sample_report_global() {
+    let html = generate_html(&synth_global_report());
+    std::fs::write("/tmp/domino-report-global.html", &html).unwrap();
+    println!(
+      "wrote /tmp/domino-report-global.html ({} bytes)",
+      html.len()
+    );
+  }
+
+  #[test]
+  #[ignore]
+  fn sample_report_normal() {
+    let html = generate_html(&synth_normal_report());
+    std::fs::write("/tmp/domino-report-normal.html", &html).unwrap();
+    println!(
+      "wrote /tmp/domino-report-normal.html ({} bytes)",
+      html.len()
+    );
+  }
+
+  #[test]
+  fn empty_report_does_not_panic() {
+    // Defensive: AffectedReport with no projects shouldn't blow up.
+    let report = AffectedReport {
+      projects: Vec::new(),
+      global_triggers: Vec::new(),
+      totals: empty_totals(),
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: 0,
+    };
+    let _ = generate_html(&report);
+  }
 }

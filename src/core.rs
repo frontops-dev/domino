@@ -5,14 +5,15 @@ use crate::named_inputs;
 use crate::profiler::Profiler;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
-  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, LockfileStrategy,
-  Project, TrueAffectedConfig,
+  AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, GlobalTrigger,
+  LockfileStrategy, Project, ReportTotals, TrueAffectedConfig,
 };
 use crate::utils::{self, ProjectIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 /// Mutable state for tracking affected symbols during analysis
@@ -80,10 +81,16 @@ fn find_affected_internal(
   debug!("Base: {}", config.base);
   debug!("Projects: {}", config.projects.len());
 
+  let run_started_at_unix_secs = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0);
+
   // Step 1: Get changed files from git (also returns the merge-base SHA)
   let (changed_files, merge_base) =
     git::get_changed_files(&config.cwd, &config.base, config.head.as_deref())?;
   debug!("Found {} changed files", changed_files.len());
+  let total_changed_files = changed_files.len();
 
   if changed_files.is_empty() {
     debug!("No changes detected");
@@ -93,35 +100,32 @@ fn find_affected_internal(
     });
   }
 
-  // Step 1b: Apply Nx namedInputs — global invalidation and negation filtering
+  // Step 1b: Apply Nx namedInputs — collect global-invalidation triggers and
+  // apply negation filtering.
+  //
+  // When --report is NOT requested, a single global trigger lets us match
+  // `nx affected` immediately without running the expensive semantic pipeline.
+  // When --report IS requested, we continue through semantic analysis even on
+  // a global run so the HTML can separate "globally invalidated" from
+  // "semantically affected" projects — the whole point of the report.
   let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
+  let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
+    named_inputs::check_global_invalidation(inputs, &changed_files)
+  } else {
+    Vec::new()
+  };
+
+  if !global_triggers.is_empty() && !generate_report {
+    let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
+    all_projects.sort();
+    profiler.print_report();
+    return Ok(AffectedResult {
+      affected_projects: all_projects,
+      report: None,
+    });
+  }
+
   let changed_files = if let Some(ref inputs) = resolved_inputs {
-    // Check for global invalidation (e.g., babel.config.json, patches/*)
-    if let Some(trigger_file) = named_inputs::check_global_invalidation(inputs, &changed_files) {
-      let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
-      all_projects.sort();
-      profiler.print_report();
-      let report = if generate_report {
-        Some(AffectedReport {
-          projects: all_projects
-            .iter()
-            .map(|name| AffectedProjectInfo {
-              name: name.clone(),
-              causes: vec![AffectCause::GlobalInvalidation {
-                file: trigger_file.clone(),
-              }],
-            })
-            .collect(),
-        })
-      } else {
-        None
-      };
-      return Ok(AffectedResult {
-        affected_projects: all_projects,
-        report,
-      });
-    }
-    // Filter out negated files (e.g., *.figma.tsx)
     named_inputs::filter_negated_files(inputs, changed_files, &config.projects)
   } else {
     changed_files
@@ -596,7 +600,21 @@ fn find_affected_internal(
     },
   );
 
-  // Step 8: Convert to sorted vector
+  // Step 8: Union semantic and global-invalidation results.
+  //
+  // Track the set of projects with semantic causes (used for ReportTotals)
+  // before unioning so we don't lose that distinction once global causes are
+  // mixed in. When global triggers fired, every workspace project is
+  // affected — matching Nx's behavior — but semantic causes are still
+  // recorded for the projects that have them.
+  let semantically_affected_names: FxHashSet<String> = affected_packages.iter().cloned().collect();
+
+  if !global_triggers.is_empty() {
+    for project in &config.projects {
+      affected_packages.insert(project.name.clone());
+    }
+  }
+
   let mut affected_projects: Vec<String> = affected_packages.into_iter().collect();
   affected_projects.sort();
 
@@ -604,6 +622,21 @@ fn find_affected_internal(
 
   // Step 9: Build report if requested
   let report = if generate_report {
+    if !global_triggers.is_empty() {
+      // Attach a GlobalInvalidation cause per trigger to every project so
+      // the report can render the per-project pill, and so the collapsed
+      // group is unambiguous about which file(s) caused the invalidation.
+      for project in &config.projects {
+        let entry = project_causes.entry(project.name.clone()).or_default();
+        for trigger in &global_triggers {
+          entry.push(AffectCause::GlobalInvalidation {
+            file: trigger.file.clone(),
+            named_input: trigger.named_input.clone(),
+          });
+        }
+      }
+    }
+
     let mut projects_info: Vec<AffectedProjectInfo> = project_causes
       .into_iter()
       .map(|(name, mut causes)| {
@@ -615,8 +648,28 @@ fn find_affected_internal(
       .collect();
     projects_info.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let globally_invalidated_names: FxHashSet<String> = if global_triggers.is_empty() {
+      FxHashSet::default()
+    } else {
+      config.projects.iter().map(|p| p.name.clone()).collect()
+    };
+
+    let overlap = globally_invalidated_names
+      .intersection(&semantically_affected_names)
+      .count();
+    let totals = ReportTotals {
+      globally_invalidated: globally_invalidated_names.len().saturating_sub(overlap),
+      semantically_affected: semantically_affected_names.len(),
+      overlap,
+      changed_files: total_changed_files,
+    };
+
     Some(AffectedReport {
       projects: projects_info,
+      global_triggers,
+      totals,
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs,
     })
   } else {
     None

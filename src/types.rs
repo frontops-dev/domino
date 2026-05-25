@@ -165,9 +165,49 @@ pub struct AffectedResult {
 
 /// Detailed report of affected projects with causality information
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AffectedReport {
   /// Information about each affected project
   pub projects: Vec<AffectedProjectInfo>,
+  /// Changed files that triggered Nx `namedInputs` global invalidation.
+  /// Empty for non-global runs.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub global_triggers: Vec<GlobalTrigger>,
+  /// Aggregate counts for at-a-glance interpretation of the run.
+  pub totals: ReportTotals,
+  /// domino crate version that produced this report.
+  pub version: &'static str,
+  /// When the run started (seconds since Unix epoch). Integer chosen over
+  /// ISO-8601 to avoid pulling in a new date-time dependency just for this.
+  pub run_started_at_unix_secs: i64,
+}
+
+/// A changed file that matched a `{workspaceRoot}/...` pattern in nx.json's
+/// `namedInputs`, triggering global invalidation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalTrigger {
+  /// File that matched (relative to workspace root).
+  pub file: PathBuf,
+  /// Name of the `namedInputs` entry whose pattern matched, e.g. `sharedGlobals`.
+  pub named_input: String,
+  /// Original pattern string from nx.json, e.g. `{workspaceRoot}/nx.json`.
+  pub raw_pattern: String,
+}
+
+/// Aggregate counts surfaced at the top of the HTML report.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportTotals {
+  /// Projects affected purely via global invalidation.
+  pub globally_invalidated: usize,
+  /// Projects affected via real semantic analysis (DirectChange,
+  /// ImportedSymbol, AssetChange, LockfileChange, ...).
+  pub semantically_affected: usize,
+  /// Projects affected via both global and semantic causes.
+  pub overlap: usize,
+  /// Total number of files changed in the diff (pre-filtering).
+  pub changed_files: usize,
 }
 
 /// Information about why a project is affected
@@ -245,6 +285,9 @@ pub enum AffectCause {
   GlobalInvalidation {
     /// The file that triggered global invalidation
     file: PathBuf,
+    /// The `namedInputs` entry whose pattern matched (e.g. `sharedGlobals`).
+    /// Surfaced in the report so the user recognizes the term from their nx.json.
+    named_input: String,
   },
 }
 

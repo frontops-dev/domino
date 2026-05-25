@@ -3495,7 +3495,7 @@ fn test_global_invalidation_html_report_contains_banner_and_metadata() {
     "banner heading missing"
   );
   assert!(
-    html.contains(r#"<div class="global-banner""#),
+    html.contains(r#"<section class="global-banner""#),
     "banner element missing"
   );
   assert!(
@@ -3525,7 +3525,7 @@ fn test_non_global_run_does_not_emit_new_global_markers() {
   let html = repo.get_html_report();
 
   assert!(!html.contains("Global invalidation detected"));
-  assert!(!html.contains(r#"<div class="global-banner""#));
+  assert!(!html.contains(r#"<section class="global-banner""#));
   assert!(!html.contains(r#"<span class="cause-type global">"#));
   assert!(!html.contains(r#"<details class="global-only-group""#));
 }

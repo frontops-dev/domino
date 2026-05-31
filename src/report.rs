@@ -1550,8 +1550,10 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
 
     let node_id = sanitize_node_id(&project.name);
     nodes.push(format!(
-      r#"{{ data: {{ id: "{}", label: "{}", type: "{}" }} }}"#,
-      node_id, project.name, node_type
+      r#"{{ data: {{ id: {}, label: {}, type: {} }} }}"#,
+      js_str(&node_id),
+      js_str(&project.name),
+      js_str(node_type)
     ));
     node_ids.insert(node_id);
   }
@@ -1578,8 +1580,9 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
 
       if implicit_count > 0 {
         edges.push(format!(
-          r#"{{ data: {{ source: "{}", target: "{}", label: "implicit", type: "implicit" }} }}"#,
-          source_id, target_id
+          r#"{{ data: {{ source: {}, target: {}, label: "implicit", type: "implicit" }} }}"#,
+          js_str(&source_id),
+          js_str(&target_id)
         ));
       } else if import_count > 0 {
         let label = if import_count == 1 {
@@ -1588,8 +1591,10 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
           format!("{} imports", import_count)
         };
         edges.push(format!(
-          r#"{{ data: {{ source: "{}", target: "{}", label: "{}" }} }}"#,
-          source_id, target_id, label
+          r#"{{ data: {{ source: {}, target: {}, label: {} }} }}"#,
+          js_str(&source_id),
+          js_str(&target_id),
+          js_str(&label)
         ));
       }
     }
@@ -1662,18 +1667,37 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
 /// Embed the run's machine-readable summary so downstream consumers (CI
 /// dashboards, scrapers) don't have to parse the rendered HTML.
 fn generate_metadata_script(report: &AffectedReport) -> String {
-  // serde_json handles all string escaping for us — never hand-roll JSON into
-  // an HTML attribute, and never use raw user-provided strings without escaping
-  // `</script>` (the JSON shape here has no controlled-by-attacker strings, but
-  // the safe default is to use serde_json::to_string which won't emit unescaped
-  // `<` either since these values are paths and identifiers).
+  // serde_json handles quote/backslash/control-char escaping, but it leaves
+  // `<` and `/` untouched — so a project name containing `</script>` would
+  // close this block early. escape_script_close neutralizes that sequence
+  // while keeping the payload valid JSON for JSON.parse consumers.
   match serde_json::to_string(report) {
     Ok(json) => format!(
       r#"<script type="application/json" id="domino-meta">{}</script>"#,
-      json
+      escape_script_close(&json)
     ),
     Err(_) => String::new(),
   }
+}
+
+/// Produce a JS/JSON string literal (including surrounding quotes) safe to
+/// drop into an inline `<script>`. `serde_json` handles quote, backslash,
+/// and control-character escaping; we additionally neutralize the `</`
+/// sequence (serde_json leaves `<` and `/` unescaped) so a project name like
+/// `</script><img onerror=…>` can't break out of the script element. The
+/// `\/` escape is valid in both JSON and JS, so consumers still parse it as
+/// a plain `/`.
+fn js_str(s: &str) -> String {
+  serde_json::to_string(s)
+    .unwrap_or_else(|_| "\"\"".to_string())
+    .replace("</", "<\\/")
+}
+
+/// Neutralize the `</` sequence in a serialized JSON blob so it can't close
+/// an enclosing `<script>` element. `\/` is a valid JSON escape, so
+/// `JSON.parse` on the consumer side is unaffected.
+fn escape_script_close(json: &str) -> String {
+  json.replace("</", "<\\/")
 }
 
 fn html_escape(s: &str) -> String {
@@ -2250,6 +2274,51 @@ mod tests {
     assert!(
       !html.contains(r#"href="data:image/svg+xml,<svg"#),
       "favicon data URI must url-encode `<`, otherwise some browsers/validators reject it"
+    );
+  }
+
+  #[test]
+  fn inline_scripts_escape_unsafe_project_names() {
+    // Project names flow into two inline-script contexts — the cytoscape
+    // `graphData` literal and the JSON metadata block. A name containing
+    // `</script>` or a quote must not break out of either, otherwise a
+    // maliciously-named project (e.g. introduced on a CI branch) becomes
+    // stored XSS when a reviewer opens the report. Identified by cubic.
+    let report = AffectedReport {
+      projects: vec![make_project(
+        r#"evil"</script><img src=x onerror=alert(1)>"#,
+        vec![AffectCause::DirectChange {
+          file: PathBuf::from("libs/evil/src/a.ts"),
+          symbol: None,
+          line: 1,
+        }],
+      )],
+      global_triggers: Vec::new(),
+      totals: empty_totals(),
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: 0,
+    };
+
+    let graph = generate_cytoscape_data(&report);
+    // The raw closing-script sequence must never survive into the literal.
+    assert!(
+      !graph.contains("</script"),
+      "graph data leaked a raw </script: {}",
+      graph
+    );
+    // The embedded double-quote must be backslash-escaped, not raw, or it
+    // would terminate the JS string and corrupt the object literal.
+    assert!(
+      !graph.contains(r#"evil""#),
+      "unescaped quote in graph: {}",
+      graph
+    );
+
+    // Full document: neither inline-script context may contain the breakout.
+    let html = generate_html(&report);
+    assert!(
+      !html.contains("</script><img"),
+      "script breakout survived into rendered HTML"
     );
   }
 

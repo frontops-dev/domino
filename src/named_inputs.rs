@@ -1,17 +1,27 @@
-use crate::types::{ChangedFile, Project};
+use crate::types::{ChangedFile, GlobalTrigger, Project};
 use glob::Pattern;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{debug, warn};
+
+/// A compiled global-invalidation pattern that retains the name of the
+/// `namedInput` it originated from (e.g. `sharedGlobals`), so the report can
+/// surface a term the user wrote in their `nx.json`.
+#[derive(Debug, Clone)]
+pub struct GlobalPattern {
+  pub named_input: String,
+  pub raw_pattern: String,
+  pub pattern: Pattern,
+}
 
 /// Resolved named inputs configuration from nx.json
 #[derive(Debug, Default)]
 pub struct ResolvedNamedInputs {
   /// Glob patterns for workspace-root files that invalidate all projects
   /// e.g., "babel.config.json", "patches/*"
-  pub global_patterns: Vec<Pattern>,
+  pub global_patterns: Vec<GlobalPattern>,
   /// Pre-compiled negation glob patterns for project-root files to exclude
   /// e.g., "**/*.figma.tsx"
   pub negation_patterns: Vec<Pattern>,
@@ -40,10 +50,12 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
     nx_json.named_inputs.len()
   );
 
-  // Resolve the "default" named input recursively
-  let mut resolved_patterns = Vec::new();
+  // Resolve the "default" named input recursively, tracking the named-input
+  // each pattern originated from so the report can show it back to the user.
+  let mut resolved_patterns: Vec<(String, String)> = Vec::new();
   let mut visited = std::collections::HashSet::new();
   resolve_named_input(
+    "default",
     "default",
     &nx_json.named_inputs,
     &mut resolved_patterns,
@@ -55,10 +67,10 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
     return None;
   }
 
-  let mut global_patterns = Vec::new();
+  let mut global_patterns: Vec<GlobalPattern> = Vec::new();
   let mut negation_patterns = Vec::new();
 
-  for pattern_str in &resolved_patterns {
+  for (origin, pattern_str) in &resolved_patterns {
     if let Some(negated) = pattern_str.strip_prefix('!') {
       // Negation pattern
       if let Some(suffix) = negated.strip_prefix("{projectRoot}/") {
@@ -81,8 +93,12 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
       // Global workspace-root pattern
       match Pattern::new(suffix) {
         Ok(pat) => {
-          debug!("Global pattern: {}", suffix);
-          global_patterns.push(pat);
+          debug!("Global pattern from '{}': {}", origin, suffix);
+          global_patterns.push(GlobalPattern {
+            named_input: origin.clone(),
+            raw_pattern: pattern_str.clone(),
+            pattern: pat,
+          });
         }
         Err(e) => {
           warn!("Invalid glob pattern '{}': {}", suffix, e);
@@ -110,10 +126,17 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
 }
 
 /// Recursively resolve a named input, following references to other named inputs.
+///
+/// `origin` is the user-facing namedInput name attributed to literal patterns
+/// at this level (i.e. the most recent named input the user wrote in nx.json
+/// along this recursion path). When `default` references `sharedGlobals`, the
+/// recursive call passes `origin = "sharedGlobals"` so patterns surfaced from
+/// there carry the term the user recognizes.
 fn resolve_named_input(
   name: &str,
+  origin: &str,
   all_inputs: &HashMap<String, Vec<serde_json::Value>>,
-  resolved: &mut Vec<String>,
+  resolved: &mut Vec<(String, String)>,
   visited: &mut std::collections::HashSet<String>,
 ) {
   if !visited.insert(name.to_string()) {
@@ -134,10 +157,12 @@ fn resolve_named_input(
       serde_json::Value::String(s) => {
         if s.starts_with('{') || s.starts_with('!') {
           // It's a file pattern (e.g., "{projectRoot}/**/*" or "!{projectRoot}/**/*.spec.ts")
-          resolved.push(s.clone());
+          resolved.push((origin.to_string(), s.clone()));
         } else {
-          // It's a reference to another named input (e.g., "sharedGlobals")
-          resolve_named_input(s, all_inputs, resolved, visited);
+          // It's a reference to another named input (e.g., "sharedGlobals").
+          // The referenced name becomes the new origin so leaf patterns are
+          // attributed to it, not to the input that referenced it.
+          resolve_named_input(s, s, all_inputs, resolved, visited);
         }
       }
       serde_json::Value::Object(_) => {
@@ -154,12 +179,10 @@ fn resolve_named_input(
 
 impl ResolvedNamedInputs {
   /// Check if a changed file matches any global invalidation pattern.
-  /// `file_path` should be relative to workspace root.
-  pub fn matches_global_pattern(&self, file_path: &Path) -> bool {
-    let path_str = match file_path.to_str() {
-      Some(s) => s,
-      None => return false,
-    };
+  /// `file_path` should be relative to workspace root. Returns the matching
+  /// `GlobalPattern` so callers learn *which* namedInput triggered.
+  pub fn matches_global_pattern(&self, file_path: &Path) -> Option<&GlobalPattern> {
+    let path_str = file_path.to_str()?;
 
     let opts = glob::MatchOptions {
       case_sensitive: true,
@@ -167,17 +190,18 @@ impl ResolvedNamedInputs {
       require_literal_leading_dot: false,
     };
 
-    for pattern in &self.global_patterns {
-      if pattern.matches_with(path_str, opts) {
+    for gp in &self.global_patterns {
+      if gp.pattern.matches_with(path_str, opts) {
         debug!(
-          "File '{}' matches global pattern '{}'",
+          "File '{}' matches global pattern '{}' from namedInput '{}'",
           path_str,
-          pattern.as_str()
+          gp.pattern.as_str(),
+          gp.named_input
         );
-        return true;
+        return Some(gp);
       }
     }
-    false
+    None
   }
 
   /// Check if a changed file should be excluded by negation patterns.
@@ -230,22 +254,32 @@ impl ResolvedNamedInputs {
   }
 }
 
-/// Check if any changed file triggers global invalidation.
-/// Returns `Some(file_path)` of the triggering file, or `None`.
+/// Collect every changed file that triggers global invalidation along with the
+/// namedInput it matched. Returns an empty vec when no file matches.
+///
+/// Note: a previous version of this function returned only the first match,
+/// which was enough to short-circuit the affected-projects calculation but
+/// hid information from the report. The report now lists every trigger so
+/// users can see at a glance *why* a run was globally invalidated.
 pub fn check_global_invalidation(
   inputs: &ResolvedNamedInputs,
   changed_files: &[ChangedFile],
-) -> Option<PathBuf> {
+) -> Vec<GlobalTrigger> {
+  let mut triggers = Vec::new();
   for changed_file in changed_files {
-    if inputs.matches_global_pattern(&changed_file.file_path) {
+    if let Some(gp) = inputs.matches_global_pattern(&changed_file.file_path) {
       debug!(
-        "Global invalidation triggered by {:?}",
-        changed_file.file_path
+        "Global invalidation triggered by {:?} (namedInput: {})",
+        changed_file.file_path, gp.named_input
       );
-      return Some(changed_file.file_path.clone());
+      triggers.push(GlobalTrigger {
+        file: changed_file.file_path.clone(),
+        named_input: gp.named_input.clone(),
+        raw_pattern: gp.raw_pattern.clone(),
+      });
     }
   }
-  None
+  triggers
 }
 
 /// Filter out changed files that match negation patterns from namedInputs.
@@ -308,9 +342,20 @@ mod tests {
 
     let resolved = resolve_from_nx_json(root).unwrap();
     assert_eq!(resolved.global_patterns.len(), 2);
-    assert!(resolved.matches_global_pattern(&PathBuf::from("babel.config.json")));
-    assert!(resolved.matches_global_pattern(&PathBuf::from("patches/some-patch.patch")));
-    assert!(!resolved.matches_global_pattern(&PathBuf::from("src/index.ts")));
+    // Both global patterns should be attributed to the `sharedGlobals`
+    // namedInput, not to `default` (which only referenced it).
+    for gp in &resolved.global_patterns {
+      assert_eq!(gp.named_input, "sharedGlobals");
+    }
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("babel.config.json"))
+      .is_some());
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("patches/some-patch.patch"))
+      .is_some());
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("src/index.ts"))
+      .is_none());
   }
 
   #[test]
@@ -364,8 +409,16 @@ mod tests {
 
     let resolved = resolve_from_nx_json(root).unwrap();
     assert_eq!(resolved.global_patterns.len(), 2);
-    assert!(resolved.matches_global_pattern(&PathBuf::from("babel.config.json")));
-    assert!(resolved.matches_global_pattern(&PathBuf::from("ci/utils.Jenkinsfile")));
+    let babel = resolved
+      .matches_global_pattern(&PathBuf::from("babel.config.json"))
+      .expect("babel.config.json should match");
+    assert_eq!(babel.named_input, "sharedGlobals");
+    let jenkins = resolved
+      .matches_global_pattern(&PathBuf::from("ci/utils.Jenkinsfile"))
+      .expect("ci/utils.Jenkinsfile should match");
+    // Even though the chain is default → sharedGlobals → ciInputs, the leaf
+    // pattern is attributed to its most specific origin (ciInputs).
+    assert_eq!(jenkins.named_input, "ciInputs");
   }
 
   #[test]
@@ -386,7 +439,9 @@ mod tests {
 
     let resolved = resolve_from_nx_json(root).unwrap();
     assert_eq!(resolved.global_patterns.len(), 1);
-    assert!(resolved.matches_global_pattern(&PathBuf::from("file.json")));
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("file.json"))
+      .is_some());
   }
 
   #[test]
@@ -464,5 +519,93 @@ mod tests {
 
     assert!(resolved.is_negated_by_any_project(&PathBuf::from("libs/a/src/foo.spec.ts"), &roots));
     assert!(!resolved.is_negated_by_any_project(&PathBuf::from("libs/a/src/foo.ts"), &roots));
+  }
+
+  #[test]
+  fn test_check_global_invalidation_returns_all_matches() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_nx_json(
+      root,
+      r#"{
+        "namedInputs": {
+          "default": ["{projectRoot}/**/*", "sharedGlobals", "ciInputs"],
+          "sharedGlobals": [
+            "{workspaceRoot}/nx.json",
+            "{workspaceRoot}/package.json"
+          ],
+          "ciInputs": ["{workspaceRoot}/.github/workflows/ci.yml"]
+        }
+      }"#,
+    );
+
+    let resolved = resolve_from_nx_json(root).unwrap();
+    let changed = vec![
+      ChangedFile {
+        file_path: PathBuf::from(".github/workflows/ci.yml"),
+        changed_lines: vec![],
+      },
+      ChangedFile {
+        file_path: PathBuf::from("nx.json"),
+        changed_lines: vec![],
+      },
+      ChangedFile {
+        file_path: PathBuf::from("package.json"),
+        changed_lines: vec![],
+      },
+      ChangedFile {
+        file_path: PathBuf::from("libs/foo/src/index.ts"),
+        changed_lines: vec![],
+      },
+    ];
+
+    let triggers = check_global_invalidation(&resolved, &changed);
+    assert_eq!(
+      triggers.len(),
+      3,
+      "all three workspace-root files should be reported as triggers"
+    );
+
+    let by_file: HashMap<_, _> = triggers
+      .iter()
+      .map(|t| (t.file.clone(), t.named_input.clone()))
+      .collect();
+    assert_eq!(
+      by_file.get(&PathBuf::from(".github/workflows/ci.yml")),
+      Some(&"ciInputs".to_string())
+    );
+    assert_eq!(
+      by_file.get(&PathBuf::from("nx.json")),
+      Some(&"sharedGlobals".to_string())
+    );
+    assert_eq!(
+      by_file.get(&PathBuf::from("package.json")),
+      Some(&"sharedGlobals".to_string())
+    );
+  }
+
+  #[test]
+  fn test_check_global_invalidation_empty_when_no_match() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_nx_json(
+      root,
+      r#"{
+        "namedInputs": {
+          "default": ["{projectRoot}/**/*", "sharedGlobals"],
+          "sharedGlobals": ["{workspaceRoot}/nx.json"]
+        }
+      }"#,
+    );
+
+    let resolved = resolve_from_nx_json(root).unwrap();
+    let changed = vec![ChangedFile {
+      file_path: PathBuf::from("libs/foo/src/index.ts"),
+      changed_lines: vec![],
+    }];
+
+    assert!(check_global_invalidation(&resolved, &changed).is_empty());
   }
 }

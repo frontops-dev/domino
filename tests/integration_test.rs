@@ -1,5 +1,6 @@
-use domino::core::find_affected;
+use domino::core::{find_affected, find_affected_with_report};
 use domino::profiler::Profiler;
+use domino::report::generate_html_report;
 use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
 use std::fs;
 use std::path::PathBuf;
@@ -3247,6 +3248,29 @@ impl TempNxRepo {
       .expect("find_affected failed")
       .affected_projects
   }
+
+  fn get_html_report(&self) -> String {
+    let projects = domino::workspace::discover_projects(self.root()).unwrap();
+    let config = TrueAffectedConfig {
+      cwd: self.root().to_path_buf(),
+      base: "main".to_string(),
+      head: None,
+      root_ts_config: None,
+      projects,
+      include: vec![],
+      ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
+    };
+
+    let profiler = Arc::new(Profiler::new(false));
+    let result =
+      find_affected_with_report(config, profiler).expect("find_affected_with_report failed");
+    let report = result
+      .report
+      .expect("expected a report when --report is on");
+    let out = self.root().join("report.html");
+    generate_html_report(&report, &out).expect("generate_html_report failed")
+  }
 }
 
 #[test]
@@ -3446,6 +3470,64 @@ fn test_named_inputs_negation_with_root_differs_from_source_root() {
     "lib-a should NOT be affected (.figma.tsx matched by negation pattern against project root). Got: {:?}",
     affected
   );
+}
+
+#[test]
+fn test_global_invalidation_html_report_contains_banner_and_metadata() {
+  // End-to-end check: a real global-invalidation run produces an HTML
+  // report that (1) opens with a self-explaining banner, (2) emits a
+  // structured JSON metadata block, (3) tags the cause pill with the new
+  // `cause-type global` class — not the misleading `direct` class.
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/babel.config.json"]
+      }
+    }"#,
+  );
+  repo.change_and_commit("babel.config.json", r#"{"presets": []}"#);
+
+  let html = repo.get_html_report();
+
+  assert!(
+    html.contains("Global invalidation detected"),
+    "banner heading missing"
+  );
+  assert!(
+    html.contains(r#"<section class="global-banner""#),
+    "banner element missing"
+  );
+  assert!(
+    html.contains(r#"<script type="application/json" id="domino-meta">"#),
+    "structured metadata block missing"
+  );
+  assert!(
+    html.contains("\"namedInput\":\"sharedGlobals\""),
+    "metadata should attribute the trigger to its sharedGlobals namedInput"
+  );
+  // The per-project pill must use the new `global` class, not `direct` —
+  // this is the regression guard for the original UX bug.
+  assert!(
+    html.contains(r#"<span class="cause-type global">Global Invalidation</span>"#),
+    "Global Invalidation pill must use the new `cause-type global` class"
+  );
+}
+
+#[test]
+fn test_non_global_run_does_not_emit_new_global_markers() {
+  // Additive guarantee: a normal (non-global) run must look identical to
+  // today's report — no banner element, no `cause-type global` pill, no
+  // collapsed group at the bottom.
+  let repo = TempNxRepo::new(r#"{}"#);
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 99;\n");
+
+  let html = repo.get_html_report();
+
+  assert!(!html.contains("Global invalidation detected"));
+  assert!(!html.contains(r#"<section class="global-banner""#));
+  assert!(!html.contains(r#"<span class="cause-type global">"#));
+  assert!(!html.contains(r#"<details class="global-only-group""#));
 }
 
 #[test]

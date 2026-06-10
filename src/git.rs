@@ -191,9 +191,9 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       // expand to every line in the new-side range `Z..Z+W`, so symbols that
       // live mid-hunk (not just at the hunk's starting line) are visible to
       // downstream AST lookups. When `,W` is omitted, git's convention is a
-      // single-line hunk (count = 1). Pure deletion hunks (`W == 0`) produce
-      // an empty range — see the `has_hunks` branch below for how those are
-      // preserved.
+      // single-line hunk (count = 1). Pure deletion hunks (`W == 0`) have no
+      // new-side lines, so they anchor to line `Z` (the line just before the
+      // deletion) — see the `count == 0` branch below.
       let ranges: Vec<std::ops::Range<usize>> = line_regex
         .captures_iter(file_diff)
         .filter_map(|caps| {
@@ -211,6 +211,18 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
                 .ok()
             })
             .unwrap_or(1);
+          if count == 0 {
+            // Deletion-only hunk (`+Z,0`). The removed lines are gone from the
+            // new file, but whatever top-level symbol *enclosed* them (e.g. an
+            // exported object losing a property, a switch losing a case) is still
+            // changed, and its dependents are affected. Anchor to the new-side
+            // line `Z` — the line just before the deletion point, still inside
+            // the enclosing symbol — so the downstream AST lookup can resolve
+            // that symbol and trace its references. Clamp to 1 for deletions at
+            // the top of the file (git emits `+0,0`).
+            let anchor = start.max(1);
+            return Some(anchor..anchor + 1);
+          }
           Some(start..start + count)
         })
         .collect();
@@ -522,12 +534,12 @@ index 1234567..abcdefg 100644
     assert_eq!(result[0].changed_lines, vec![1]);
   }
 
-  /// A pure-deletion hunk (`+Z,0`) has no new-side lines to scan and must
-  /// contribute zero entries to `changed_lines`. Pair it with a normal hunk
-  /// so the file-skip branch (which triggers on a fully empty result) is not
-  /// what's actually being tested.
+  /// A deletion hunk (`+Z,0`) anchors to its new-side line `Z` so the enclosing
+  /// symbol stays traceable, even when paired with a normal addition hunk. Here
+  /// the deletion at `+5,0` contributes anchor line 5, alongside the addition
+  /// hunk's lines 21 and 22.
   #[test]
-  fn test_parse_diff_pure_deletion_hunk_contributes_zero() {
+  fn test_parse_diff_deletion_hunk_anchors_alongside_addition() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
 index 1234567..abcdefg 100644
 --- a/src/foo.ts
@@ -543,17 +555,17 @@ index 1234567..abcdefg 100644
 
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].changed_lines, vec![21, 22]);
+    assert_eq!(result[0].changed_lines, vec![5, 21, 22]);
   }
 
-  /// A file whose only hunks are deletions (`+Z,0`) must still be kept in
-  /// the result with an empty `changed_lines`. Dropping it would hide real
-  /// source changes — deleting an exported symbol is a meaningful change
-  /// even though there are no new-file lines to AST-lookup. Downstream in
-  /// `core.rs`, the file's owning package is still marked affected because
-  /// the file path is present.
+  /// A file whose only hunks are deletions (`+Z,0`) is kept in the result and
+  /// anchors to the new-side line of each deletion (line `Z`), so the symbol
+  /// that enclosed the removed lines — and therefore the deleted symbol's
+  /// dependents — can be traced downstream. Previously such files were kept with
+  /// an empty `changed_lines`, which left the file's owning package marked but
+  /// caused the reference cascade to be skipped, under-reporting dependents.
   #[test]
-  fn test_parse_diff_deletion_only_file_kept_with_empty_lines() {
+  fn test_parse_diff_deletion_only_file_anchors_to_enclosing_symbol_line() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
 index 1234567..abcdefg 100644
 --- a/src/foo.ts
@@ -567,7 +579,7 @@ index 1234567..abcdefg 100644
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/foo.ts");
-    assert!(result[0].changed_lines.is_empty());
+    assert_eq!(result[0].changed_lines, vec![5]);
   }
 
   /// Symmetric hunk header — old and new sides both carry a count. Common in
@@ -593,5 +605,33 @@ index 1234567..abcdefg 100644
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].changed_lines, vec![3, 4, 5]);
+  }
+
+  /// Regression for the deletion-only under-detection bug.
+  ///
+  /// `git diff --unified=0` emits a `+Z,0` hunk when a line is removed. The
+  /// removed content no longer exists in the new file, but the *enclosing*
+  /// top-level symbol (here the exported `declarativeCalculations` object) is
+  /// still meaningfully changed, and every project that consumes that symbol is
+  /// affected. To trace them, the deletion must anchor to the new-side line `Z`
+  /// — the line immediately before the deletion point, which is still inside the
+  /// enclosing symbol — so the downstream AST lookup can resolve the symbol.
+  ///
+  /// Before the fix, deletion hunks contributed nothing to `changed_lines`, so
+  /// symbol extraction found nothing and the reference cascade was skipped,
+  /// under-reporting the deleted symbol's dependents.
+  #[test]
+  fn test_parse_diff_deletion_only_hunk_anchors_to_new_side_line() {
+    let diff = r#"diff --git a/src/attrs.ts b/src/attrs.ts
+index 1234567..abcdefg 100644
+--- a/src/attrs.ts
++++ b/src/attrs.ts
+@@ -495 +494,0 @@ export const declarativeCalculations = {
+-  'Commissions & Fees': { alternative: ['Bank Charges'] },
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].changed_lines, vec![494]);
   }
 }

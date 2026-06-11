@@ -128,14 +128,10 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
     .parent()
     .ok_or_else(|| DominoError::Other("Invalid package path".to_string()))?;
 
-  let source_root = if cwd.is_absolute() {
-    project_dir.to_path_buf()
-  } else {
-    project_dir
-      .strip_prefix(cwd)
-      .unwrap_or(project_dir)
-      .to_path_buf()
-  };
+  let source_root = project_dir
+    .strip_prefix(cwd)
+    .unwrap_or(project_dir)
+    .to_path_buf();
 
   Ok(Project {
     name: pkg_json.name,
@@ -325,6 +321,9 @@ mod tests {
     let projects = get_projects(root).unwrap();
 
     assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].source_root, root.join("packages/utils"));
+    assert_eq!(
+      projects[0].source_root,
+      std::path::PathBuf::from("packages/utils")
+    );
   }
 }

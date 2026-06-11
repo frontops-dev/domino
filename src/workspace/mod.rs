@@ -46,7 +46,24 @@ pub(crate) fn build_walker(
 pub fn discover_projects(cwd: &Path) -> Result<Vec<Project>> {
   // Try Nx first
   if nx::is_nx_workspace(cwd) {
-    return nx::get_projects(cwd);
+    let mut projects = nx::get_projects(cwd)?;
+    // Merge package-manager workspace members that have no project.json —
+    // Nx itself infers these from package.json scripts, so an Nx workspace's
+    // project set is a superset of its project.json files.
+    if workspaces::is_workspace(cwd) {
+      if let Ok(ws_projects) = workspaces::get_projects(cwd) {
+        let known_roots: std::collections::HashSet<std::path::PathBuf> =
+          projects.iter().map(|p| p.root.clone()).collect();
+        let known_names: std::collections::HashSet<String> =
+          projects.iter().map(|p| p.name.clone()).collect();
+        projects.extend(
+          ws_projects
+            .into_iter()
+            .filter(|p| !known_roots.contains(&p.root) && !known_names.contains(&p.name)),
+        );
+      }
+    }
+    return Ok(projects);
   }
 
   // Try Turbo (turbo.json)

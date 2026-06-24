@@ -558,6 +558,30 @@ mod tests {
   }
 
   #[test]
+  fn test_simple_resolve_cjs_to_cts_remapping() {
+    // CommonJS TS counterpart: .cjs specifiers resolve to .cts sources.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    fs::write(src_dir.join("legacy.cts"), "export const schema = 1;")
+      .expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    let resolved = reference_finder.simple_resolve(src_dir.as_path(), "./legacy.cjs");
+    assert_eq!(
+      resolved,
+      Some(PathBuf::from("src/legacy.cts")),
+      "Expected ./legacy.cjs to resolve to legacy.cts"
+    );
+  }
+
+  #[test]
   fn test_simple_resolve_index_mts() {
     // A bare directory specifier should find index.mts (ESM package entry).
     let temp_dir = TempDir::new().expect("Failed to create temp dir");

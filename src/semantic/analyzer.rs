@@ -238,19 +238,9 @@ impl WorkspaceAnalyzer {
         e.map_err(|err| warn!("Failed to read directory entry: {}", err))
           .ok()
       })
-      .filter(|e| {
-        e.file_type().is_file()
-          && e
-            .path()
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-              matches!(
-                ext,
-                "ts" | "tsx" | "js" | "jsx" | "mts" | "mjs" | "cts" | "cjs"
-              )
-            })
-      })
+      // Reuse the shared source-file predicate (single source of truth for the
+      // extension set) so the walk can't drift from `SOURCE_EXTENSIONS`.
+      .filter(|e| e.file_type().is_file() && crate::utils::is_source_file(e.path()))
       .map(|e| {
         let abs_path = e.into_path();
         let rel_path = abs_path

@@ -13,7 +13,8 @@ pub(crate) use resolve_options::is_workspace_specifier;
 pub(crate) use resolve_options::parse_tsconfig_path_prefixes;
 
 /// Shared fallback resolution for relative imports when oxc_resolver fails.
-/// Handles .js/.jsx → .ts/.tsx remapping and standard extension probing.
+/// Handles .js/.jsx/.mjs/.cjs → .ts/.tsx/.mts/.cts remapping and standard
+/// extension probing.
 pub(crate) fn simple_resolve_relative(
   cwd: &Path,
   context: &Path,
@@ -31,24 +32,27 @@ pub(crate) fn simple_resolve_relative(
     }
   };
 
-  // 1. .js/.jsx → .ts/.tsx remapping (ESM convention)
-  if let Some(stem) = specifier.strip_suffix(".js") {
-    let stem_path = context.join(stem);
-    let stem_str = stem_path.to_string_lossy();
-    for ext in &[".ts", ".tsx", ".js"] {
-      let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
-      if let Some(p) = try_candidate(&candidate) {
-        return Some(p);
+  // 1. .js/.jsx/.mjs/.cjs → .ts/.tsx/.mts/.cts remapping (ESM convention).
+  // TypeScript ESM emits `.mjs` specifiers for `.mts` sources (and `.cjs` for
+  // `.cts`), so a barrel doing `export * from "./foo.mjs"` must resolve to
+  // `foo.mts`.
+  let ext_remap: &[(&str, &[&str])] = &[
+    (".js", &[".ts", ".tsx", ".js"]),
+    (".jsx", &[".tsx", ".jsx"]),
+    (".mjs", &[".mts", ".mjs"]),
+    (".cjs", &[".cts", ".cjs"]),
+  ];
+  for (suffix, candidates) in ext_remap {
+    if let Some(stem) = specifier.strip_suffix(suffix) {
+      let stem_path = context.join(stem);
+      let stem_str = stem_path.to_string_lossy();
+      for ext in *candidates {
+        let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
+        if let Some(p) = try_candidate(&candidate) {
+          return Some(p);
+        }
       }
-    }
-  } else if let Some(stem) = specifier.strip_suffix(".jsx") {
-    let stem_path = context.join(stem);
-    let stem_str = stem_path.to_string_lossy();
-    for ext in &[".tsx", ".jsx"] {
-      let candidate = PathBuf::from(format!("{}{}", stem_str, ext));
-      if let Some(p) = try_candidate(&candidate) {
-        return Some(p);
-      }
+      break;
     }
   }
 
@@ -60,10 +64,18 @@ pub(crate) fn simple_resolve_relative(
     ".tsx",
     ".js",
     ".jsx",
+    ".mts",
+    ".mjs",
+    ".cts",
+    ".cjs",
     "/index.ts",
     "/index.tsx",
     "/index.js",
     "/index.jsx",
+    "/index.mts",
+    "/index.mjs",
+    "/index.cts",
+    "/index.cjs",
   ] {
     let candidate = if let Some(stripped) = suffix.strip_prefix('/') {
       base.join(stripped)

@@ -244,7 +244,12 @@ impl WorkspaceAnalyzer {
             .path()
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| matches!(ext, "ts" | "tsx" | "js" | "jsx"))
+            .is_some_and(|ext| {
+              matches!(
+                ext,
+                "ts" | "tsx" | "js" | "jsx" | "mts" | "mjs" | "cts" | "cjs"
+              )
+            })
       })
       .map(|e| {
         let abs_path = e.into_path();

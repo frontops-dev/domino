@@ -533,6 +533,55 @@ mod tests {
   }
 
   #[test]
+  fn test_simple_resolve_mjs_to_mts_remapping() {
+    // TypeScript ESM emits .mjs specifiers for .mts sources, e.g.
+    // `export * from './contract.mjs'` where the actual file is contract.mts.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    fs::write(src_dir.join("contract.mts"), "export const schema = 1;")
+      .expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    let resolved = reference_finder.simple_resolve(src_dir.as_path(), "./contract.mjs");
+    assert_eq!(
+      resolved,
+      Some(PathBuf::from("src/contract.mts")),
+      "Expected ./contract.mjs to resolve to contract.mts"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_index_mts() {
+    // A bare directory specifier should find index.mts (ESM package entry).
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    let pkg_src = cwd.join("packages").join("contract").join("src");
+    fs::create_dir_all(&pkg_src).expect("Failed to create pkg dir");
+    fs::write(pkg_src.join("index.mts"), "export const x = 1;").expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    let context = cwd.join("packages").join("contract");
+    let resolved = reference_finder.simple_resolve(context.as_path(), "./src");
+    assert_eq!(
+      resolved,
+      Some(PathBuf::from("packages/contract/src/index.mts")),
+      "Expected ./src to resolve to src/index.mts"
+    );
+  }
+
+  #[test]
   fn test_simple_resolve_js_to_tsx_remapping() {
     // Test that .js imports can resolve to .tsx files
 

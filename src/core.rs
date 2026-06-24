@@ -172,8 +172,9 @@ fn find_affected_internal(
   for changed_file in &source_files {
     let file_path = &changed_file.file_path;
 
-    // Check if file exists in our analyzed files. A source-typed file (.ts/.tsx/.js/.jsx)
-    // can live inside a project's root but outside its sourceRoot (e.g. jest.config.js,
+    // Check if file exists in our analyzed files. A source-typed file
+    // (.ts/.tsx/.js/.jsx/.mts/.mjs/.cts/.cjs) can live inside a project's root
+    // but outside its sourceRoot (e.g. jest.config.js,
     // webpack.config.js at project root when sourceRoot = "<proj>/src"). The semantic
     // analyzer only walks sourceRoot, so such files never reach it — but they still
     // belong to the project and changing them must mark it affected. Fall back to the

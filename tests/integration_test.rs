@@ -3913,3 +3913,65 @@ fn test_non_manifest_shared_global_still_globally_invalidates() {
     );
   }
 }
+
+/// A `package.json` change with NO corresponding lockfile change has nothing for
+/// the lockfile analyzer to resolve, so it must stay a global trigger (safe
+/// fallback) rather than silently under-including. Only `package.json` + lockfile
+/// together (a real dependency update) is exempted.
+#[test]
+fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  fs::write(
+    root.join("nx.json"),
+    r#"{
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/package-lock.json"
+    ]
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(
+    &root,
+    &["commit", "-m", "add nx.json with manifest in sharedGlobals"],
+  );
+
+  // Edit package.json (bump lib-a range) WITHOUT touching the lockfile.
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("package.json"),
+    r#"{"dependencies": {"lib-a": "^2.0.0"}}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a range (no install)"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  for proj in ["proj-a", "proj-b", "proj-c"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: a package.json change with no lockfile update \
+       has nothing to analyze, so it must globally invalidate. Got: {:?}",
+      affected
+    );
+  }
+}

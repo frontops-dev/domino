@@ -115,16 +115,23 @@ fn find_affected_internal(
   // exempted from global invalidation below.
   let detected_pm = lockfile::detect_package_manager(&config.cwd);
   let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
+  let lockfile_changed = detected_pm
+    .as_ref()
+    .is_some_and(|pm| lockfile::has_lockfile_changed(&changed_files, pm));
 
   // A dependency update touches the lockfile and package.json together. When
   // those are listed in `sharedGlobals` they would short-circuit to "all
   // projects" before the lockfile analysis (Step 5c) runs, making it dead code.
-  // Exempt them so the lockfile + semantic pipeline computes the real affected
-  // set; any *other* global trigger (e.g. .nvmrc, nx.json) still invalidates all.
+  // Exempt the lockfile (always) and package.json (only when the lockfile also
+  // changed, so the analysis has something to resolve) from global invalidation.
+  // A package.json-only change and any *other* global trigger (.nvmrc, nx.json,
+  // ...) still invalidate every project.
   let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
     named_inputs::check_global_invalidation(inputs, &changed_files)
       .into_iter()
-      .filter(|t| !lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref()))
+      .filter(|t| {
+        !lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref(), lockfile_changed)
+      })
       .collect()
   } else {
     Vec::new()
@@ -163,11 +170,9 @@ fn find_affected_internal(
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
-  // Step 5: Partition changed files into source and non-source (excluding
-  // lockfiles). `detected_pm` / `lockfile_filename` are computed above so the
+  // Step 6: Partition changed files into source and non-source (excluding the
+  // lockfile). `detected_pm` / `lockfile_filename` were computed above so the
   // dependency-manifest exemption and this partition share one detection.
-
-  // Step 6: Partition changed files into source and non-source
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
     .iter()
     .filter(|f| {

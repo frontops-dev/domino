@@ -97,19 +97,31 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
 }
 
 /// Whether `file_path` (relative to the workspace root) is a dependency manifest
-/// handled by the lockfile/semantic pipeline rather than by global invalidation:
-/// the workspace-root `package.json` or the detected package manager's lockfile.
+/// that should be exempt from `sharedGlobals` global invalidation because the
+/// lockfile/semantic pipeline will analyze it instead. Without this, listing the
+/// lockfile in `sharedGlobals` short-circuits to "all projects" before that
+/// analysis ever runs (see `core`'s Step 1b), making it dead code.
 ///
-/// A dependency update touches both together, so both must be exempt from
-/// `sharedGlobals` global invalidation for the lockfile analysis in `core` to
-/// take effect — otherwise listing the lockfile in `sharedGlobals` short-circuits
-/// to "all projects" before that analysis ever runs, making it dead code.
-pub fn is_dependency_manifest(file_path: &Path, pm: Option<&PackageManager>) -> bool {
-  match file_path.to_str() {
-    Some("package.json") => true,
-    Some(name) => pm.map(|pm| name == lockfile_name(pm)).unwrap_or(false),
-    None => false,
+/// - The detected package manager's **lockfile** is always exempt — lockfile
+///   analysis owns it.
+/// - The workspace-root **`package.json`** is exempt only when the lockfile also
+///   changed (`lockfile_changed`). A dependency update touches both together, so
+///   lockfile analysis can resolve the affected importers. A `package.json`-only
+///   change (e.g. an uninstalled version-range edit, or a repo with no lockfile)
+///   has nothing to analyze, so it stays a global trigger rather than silently
+///   under-including.
+pub fn is_dependency_manifest(
+  file_path: &Path,
+  pm: Option<&PackageManager>,
+  lockfile_changed: bool,
+) -> bool {
+  let Some(name) = file_path.to_str() else {
+    return false;
+  };
+  if pm.is_some_and(|pm| name == lockfile_name(pm)) {
+    return true;
   }
+  name == "package.json" && lockfile_changed
 }
 
 /// Read a file at `file_path` from the given git revision.
@@ -2238,42 +2250,62 @@ lib-a@^1.0.0:
   fn test_is_dependency_manifest() {
     use std::path::Path;
 
-    // package.json is always a dependency manifest, regardless of package manager.
-    assert!(is_dependency_manifest(Path::new("package.json"), None));
-    assert!(is_dependency_manifest(
-      Path::new("package.json"),
-      Some(&PackageManager::Pnpm)
-    ));
-
-    // The detected package manager's lockfile is a dependency manifest.
+    // The detected package manager's lockfile is always exempt, regardless of
+    // whether `lockfile_changed` was computed true (the lockfile file being
+    // present in the diff is itself what makes lockfile_changed true).
     assert!(is_dependency_manifest(
       Path::new("pnpm-lock.yaml"),
-      Some(&PackageManager::Pnpm)
+      Some(&PackageManager::Pnpm),
+      true
     ));
     assert!(is_dependency_manifest(
       Path::new("package-lock.json"),
-      Some(&PackageManager::Npm)
+      Some(&PackageManager::Npm),
+      false
     ));
 
     // A lockfile for a *different* package manager than detected is not exempt.
     assert!(!is_dependency_manifest(
       Path::new("pnpm-lock.yaml"),
-      Some(&PackageManager::Npm)
+      Some(&PackageManager::Npm),
+      true
     ));
-    // Without a detected package manager, only package.json qualifies.
-    assert!(!is_dependency_manifest(Path::new("pnpm-lock.yaml"), None));
+
+    // package.json is exempt ONLY when the lockfile also changed (a real
+    // dependency update touches both) — lockfile analysis resolves the importers.
+    assert!(is_dependency_manifest(
+      Path::new("package.json"),
+      Some(&PackageManager::Pnpm),
+      true
+    ));
+    // package.json alone (no lockfile change) stays a global trigger so an
+    // uninstalled version-range edit can't silently under-include.
+    assert!(!is_dependency_manifest(
+      Path::new("package.json"),
+      Some(&PackageManager::Pnpm),
+      false
+    ));
+    // No package manager detected → lockfile_changed is false in practice →
+    // package.json is not exempt.
+    assert!(!is_dependency_manifest(
+      Path::new("package.json"),
+      None,
+      false
+    ));
 
     // Other workspace-root files (e.g. .nvmrc) are never dependency manifests,
     // so they keep triggering global invalidation.
     assert!(!is_dependency_manifest(
       Path::new(".nvmrc"),
-      Some(&PackageManager::Pnpm)
+      Some(&PackageManager::Pnpm),
+      true
     ));
     // Nested package.json is not the workspace-root manifest (never a global
     // trigger anyway — those match {workspaceRoot}/ only).
     assert!(!is_dependency_manifest(
       Path::new("libs/foo/package.json"),
-      Some(&PackageManager::Pnpm)
+      Some(&PackageManager::Pnpm),
+      true
     ));
   }
 }

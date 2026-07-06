@@ -3788,3 +3788,128 @@ export function unusedFn() {
     affected
   );
 }
+
+/// A lockfile/manifest listed in `sharedGlobals` must NOT globally invalidate:
+/// dependency-manifest changes flow through the lockfile analyzer instead, so
+/// only the importing project is affected. Regression guard for the change that
+/// exempts dependency manifests from `sharedGlobals` global invalidation.
+#[test]
+fn test_dependency_manifest_in_shared_globals_does_not_globally_invalidate() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  // The exact config that would otherwise short-circuit every lockfile bump to
+  // "all projects": lockfile + package.json listed in sharedGlobals.
+  fs::write(
+    root.join("nx.json"),
+    r#"{
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/package-lock.json"
+    ]
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(
+    &root,
+    &["commit", "-m", "add nx.json with lockfile in sharedGlobals"],
+  );
+
+  // Bump lib-a in the lockfile on a feature branch (lockfile is the only change).
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "dependencies": { "lib-a": "^1.0.0" } },
+    "node_modules/lib-a": { "version": "2.0.0", "dependencies": { "lib-nested": "^1.0.0" } },
+    "node_modules/lib-nested": { "version": "1.0.0" }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a imports lib-a and must be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c has no lib-a dependency and must NOT be affected — a lockfile listed \
+     in sharedGlobals must not globally invalidate. Got: {:?}",
+    affected
+  );
+}
+
+/// The manifest exemption must be narrow: a *non-manifest* file in
+/// `sharedGlobals` (e.g. .nvmrc) still globally invalidates every project.
+#[test]
+fn test_non_manifest_shared_global_still_globally_invalidates() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  fs::write(root.join(".nvmrc"), "20\n").unwrap();
+  fs::write(
+    root.join("nx.json"),
+    r#"{
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": ["{workspaceRoot}/.nvmrc"]
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "add nx.json + .nvmrc"]);
+
+  // Change the non-manifest global file on a feature branch.
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(root.join(".nvmrc"), "22\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump node version"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::Direct,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  for proj in ["proj-a", "proj-b", "proj-c"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: a non-manifest sharedGlobals change globally \
+       invalidates. Got: {:?}",
+      affected
+    );
+  }
+}

@@ -96,6 +96,22 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
     .any(|f| f.file_path.to_str() == Some(name))
 }
 
+/// Whether `file_path` (relative to the workspace root) is a dependency manifest
+/// handled by the lockfile/semantic pipeline rather than by global invalidation:
+/// the workspace-root `package.json` or the detected package manager's lockfile.
+///
+/// A dependency update touches both together, so both must be exempt from
+/// `sharedGlobals` global invalidation for the lockfile analysis in `core` to
+/// take effect — otherwise listing the lockfile in `sharedGlobals` short-circuits
+/// to "all projects" before that analysis ever runs, making it dead code.
+pub fn is_dependency_manifest(file_path: &Path, pm: Option<&PackageManager>) -> bool {
+  match file_path.to_str() {
+    Some("package.json") => true,
+    Some(name) => pm.map(|pm| name == lockfile_name(pm)).unwrap_or(false),
+    None => false,
+  }
+}
+
 /// Read a file at `file_path` from the given git revision.
 ///
 /// Returns `Ok(None)` when the object does not exist at the revision (e.g. new
@@ -2216,5 +2232,48 @@ lib-a@^1.0.0:
   fn test_extract_workspace_patterns_invalid_json() {
     let patterns = extract_workspace_patterns("not json");
     assert!(patterns.is_empty());
+  }
+
+  #[test]
+  fn test_is_dependency_manifest() {
+    use std::path::Path;
+
+    // package.json is always a dependency manifest, regardless of package manager.
+    assert!(is_dependency_manifest(Path::new("package.json"), None));
+    assert!(is_dependency_manifest(
+      Path::new("package.json"),
+      Some(&PackageManager::Pnpm)
+    ));
+
+    // The detected package manager's lockfile is a dependency manifest.
+    assert!(is_dependency_manifest(
+      Path::new("pnpm-lock.yaml"),
+      Some(&PackageManager::Pnpm)
+    ));
+    assert!(is_dependency_manifest(
+      Path::new("package-lock.json"),
+      Some(&PackageManager::Npm)
+    ));
+
+    // A lockfile for a *different* package manager than detected is not exempt.
+    assert!(!is_dependency_manifest(
+      Path::new("pnpm-lock.yaml"),
+      Some(&PackageManager::Npm)
+    ));
+    // Without a detected package manager, only package.json qualifies.
+    assert!(!is_dependency_manifest(Path::new("pnpm-lock.yaml"), None));
+
+    // Other workspace-root files (e.g. .nvmrc) are never dependency manifests,
+    // so they keep triggering global invalidation.
+    assert!(!is_dependency_manifest(
+      Path::new(".nvmrc"),
+      Some(&PackageManager::Pnpm)
+    ));
+    // Nested package.json is not the workspace-root manifest (never a global
+    // trigger anyway — those match {workspaceRoot}/ only).
+    assert!(!is_dependency_manifest(
+      Path::new("libs/foo/package.json"),
+      Some(&PackageManager::Pnpm)
+    ));
   }
 }

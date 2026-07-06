@@ -109,8 +109,23 @@ fn find_affected_internal(
   // a global run so the HTML can separate "globally invalidated" from
   // "semantically affected" projects — the whole point of the report.
   let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
+
+  // Detect the package manager up front so dependency-manifest files (the
+  // package manager's lockfile and the workspace-root package.json) can be
+  // exempted from global invalidation below.
+  let detected_pm = lockfile::detect_package_manager(&config.cwd);
+  let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
+
+  // A dependency update touches the lockfile and package.json together. When
+  // those are listed in `sharedGlobals` they would short-circuit to "all
+  // projects" before the lockfile analysis (Step 5c) runs, making it dead code.
+  // Exempt them so the lockfile + semantic pipeline computes the real affected
+  // set; any *other* global trigger (e.g. .nvmrc, nx.json) still invalidates all.
   let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
     named_inputs::check_global_invalidation(inputs, &changed_files)
+      .into_iter()
+      .filter(|t| !lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref()))
+      .collect()
   } else {
     Vec::new()
   };
@@ -148,9 +163,9 @@ fn find_affected_internal(
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
-  // Step 5: Partition changed files into source and non-source (excluding lockfiles)
-  let detected_pm = lockfile::detect_package_manager(&config.cwd);
-  let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
+  // Step 5: Partition changed files into source and non-source (excluding
+  // lockfiles). `detected_pm` / `lockfile_filename` are computed above so the
+  // dependency-manifest exemption and this partition share one detection.
 
   // Step 6: Partition changed files into source and non-source
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files

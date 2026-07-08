@@ -61,13 +61,20 @@ pub struct Project {
 }
 
 /// A file with changed lines
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChangedFile {
   /// Path to the file (relative to workspace root)
   pub file_path: PathBuf,
-  /// Line numbers that changed (1-indexed).
-  /// Empty for binary files (entire file considered changed).
+  /// New-side line numbers that changed (1-indexed).
+  /// Empty for binary files (entire file considered changed) and for
+  /// deletion-only files (all lines were removed — see `deleted_lines`).
   pub changed_lines: Vec<usize>,
+  /// Old-side (base-revision) line numbers removed by pure-deletion hunks
+  /// (`@@ -X,Y +Z,0 @@`), 1-indexed. These lines no longer exist in the
+  /// working tree, so the symbol they belonged to can only be recovered by
+  /// re-parsing the base revision at these lines — which is how dependents of
+  /// deleted code are traced. Empty when the change added or modified lines.
+  pub deleted_lines: Vec<usize>,
 }
 
 /// A reference to a symbol in the code

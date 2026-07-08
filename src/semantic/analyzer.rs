@@ -315,6 +315,51 @@ impl WorkspaceAnalyzer {
       exports,
     })
   }
+
+  /// Parse an in-memory `source` string into a self-contained
+  /// [`FileSemanticData`], picking the source type from `file_path`'s
+  /// extension. Unlike [`parse_single_file`], this reads no file from disk and
+  /// skips import/export extraction — it exists to run [`find_top_level_symbols`]
+  /// against a base-revision snapshot of deleted code, which is never added to
+  /// `self.files`.
+  fn parse_source(file_path: &Path, source: String) -> Result<FileSemanticData> {
+    let source_type = SourceType::from_path(file_path)
+      .unwrap_or_else(|_| SourceType::default().with_typescript(true));
+
+    let allocator = Allocator::default();
+    let parser = Parser::new(&allocator, &source, source_type);
+    let parse_result = parser.parse();
+
+    if !parse_result.errors.is_empty() {
+      debug!(
+        "Parse errors in base revision of {:?}: {} errors",
+        file_path,
+        parse_result.errors.len()
+      );
+      // Continue anyway — a partial AST is still enough to resolve the
+      // enclosing declaration at a deleted line.
+    }
+
+    let semantic_ret = SemanticBuilder::new()
+      .with_cfg(true)
+      .with_check_syntax_error(false)
+      .build(&parse_result.program);
+
+    // Safety: identical to `parse_single_file` — the semantic data borrows from
+    // `allocator`, which is moved into the returned `FileSemanticData` and lives
+    // exactly as long as the semantic data does.
+    let semantic = unsafe {
+      std::mem::transmute::<oxc_semantic::Semantic<'_>, oxc_semantic::Semantic<'static>>(
+        semantic_ret.semantic,
+      )
+    };
+
+    Ok(FileSemanticData {
+      source,
+      allocator,
+      semantic,
+    })
+  }
 }
 
 /// Visitor to collect dynamic imports (import() expressions)
@@ -811,6 +856,28 @@ impl WorkspaceAnalyzer {
       .get(file_path)
       .ok_or_else(|| DominoError::FileNotFound(file_path.display().to_string()))?;
 
+    let result = Self::find_top_level_symbols(file_data, line, column);
+
+    if let Some(start_time) = start {
+      self
+        .profiler
+        .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
+    }
+
+    result
+  }
+
+  /// Resolve the enclosing top-level symbol(s) at `line`/`column` within an
+  /// already-parsed file. Shared by [`WorkspaceAnalyzer::find_node_at_line`]
+  /// (working-tree files) and [`WorkspaceAnalyzer::find_deleted_symbols`]
+  /// (base-revision snapshots of deleted code). Takes `&FileSemanticData`
+  /// rather than `&self` so it can run against a one-off parse that never
+  /// enters `self.files`.
+  fn find_top_level_symbols(
+    file_data: &FileSemanticData,
+    line: usize,
+    column: usize,
+  ) -> Result<Vec<String>> {
     // Get the exact offset using both line and column
     let line_start = crate::utils::line_to_offset(&file_data.source, line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
@@ -905,12 +972,6 @@ impl WorkspaceAnalyzer {
         if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
           let specifier_names = specifier_names_on_line(export_decl);
           if !specifier_names.is_empty() {
-            // Record profiling time
-            if let Some(start_time) = start {
-              self
-                .profiler
-                .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
-            }
             return Ok(specifier_names);
           }
         }
@@ -933,12 +994,6 @@ impl WorkspaceAnalyzer {
     // If we found the symbol at the current node level, return it early
     if found_export_wrapper {
       if let Some(name) = top_level_name.take() {
-        // Record profiling time
-        if let Some(start_time) = start {
-          self
-            .profiler
-            .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
-        }
         return Ok(vec![name]);
       }
     }
@@ -963,12 +1018,6 @@ impl WorkspaceAnalyzer {
           if top_level_name.is_none() && !export_decl.specifiers.is_empty() {
             let specifier_names = specifier_names_on_line(export_decl);
             if !specifier_names.is_empty() {
-              // Record profiling time
-              if let Some(start_time) = start {
-                self
-                  .profiler
-                  .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
-              }
               return Ok(specifier_names);
             }
           }
@@ -1022,17 +1071,66 @@ impl WorkspaceAnalyzer {
       current_id = parent_id;
     }
 
-    // Record profiling time
-    if let Some(start_time) = start {
-      self
-        .profiler
-        .record_symbol_extraction(start_time.elapsed().as_nanos() as u64);
-    }
-
     // Return the top-level declaration if found, otherwise empty
     // When empty is returned, it means the line doesn't contain a trackable symbol
     // (e.g., object literal properties, comments, or code not in a top-level declaration)
     Ok(top_level_name.map(|name| vec![name]).unwrap_or_default())
+  }
+
+  /// Recover the top-level symbols that enclosed a set of *base-revision* lines.
+  ///
+  /// When a change is a pure deletion (`@@ -X,Y +Z,0 @@`), the removed lines no
+  /// longer exist in the working tree, so [`WorkspaceAnalyzer::find_node_at_line`]
+  /// on the current file cannot recover the affected symbol. This parses a
+  /// snapshot of the file as it existed at the base revision and runs the same
+  /// top-level-symbol resolution against the old-side line numbers. It therefore
+  /// handles both shapes of deletion:
+  ///
+  /// - removing a member of a still-present declaration (an object property, a
+  ///   `switch` case) resolves to the enclosing symbol, and
+  /// - removing an entire top-level declaration resolves to that declaration
+  ///   itself.
+  ///
+  /// The returned names are then traced through the *current* import graph —
+  /// consumers still `import { Foo }` from the file even after `Foo` is deleted,
+  /// so their projects are correctly reported affected. Returns de-duplicated
+  /// names, preserving first-seen order; an empty vec if the snapshot fails to
+  /// parse or no line resolves to a symbol.
+  pub fn find_deleted_symbols(
+    &self,
+    file_path: &Path,
+    base_source: &str,
+    deleted_lines: &[usize],
+  ) -> Vec<String> {
+    if deleted_lines.is_empty() {
+      return Vec::new();
+    }
+
+    let file_data = match Self::parse_source(file_path, base_source.to_string()) {
+      Ok(data) => data,
+      Err(e) => {
+        debug!("Failed to parse base revision of {:?}: {}", file_path, e);
+        return Vec::new();
+      }
+    };
+
+    let mut symbols: Vec<String> = Vec::new();
+    for &line in deleted_lines {
+      match Self::find_top_level_symbols(&file_data, line, 0) {
+        Ok(names) => {
+          for name in names {
+            if !symbols.contains(&name) {
+              symbols.push(name);
+            }
+          }
+        }
+        Err(e) => debug!(
+          "Error resolving deleted symbol at base line {} in {:?}: {}",
+          line, file_path, e
+        ),
+      }
+    }
+    symbols
   }
 }
 
@@ -1235,6 +1333,53 @@ const [x, y] = [1, 2]"#;
     let result = analyzer.find_node_at_line(&file_path, 1, 0);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), vec!["a".to_string()]);
+  }
+
+  #[test]
+  fn test_find_deleted_symbols_whole_exported_declaration() {
+    // The base revision no longer needs to be in `analyzer.files`: deletion
+    // recovery parses the passed-in snapshot directly. Deleting the entire
+    // `Removed` const (base lines 1-3) must resolve to "Removed".
+    let base_source = r#"export const Removed = {
+  value: 1,
+};
+
+export const Kept = 2;
+"#;
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), profiler).expect("Failed to create analyzer");
+
+    let symbols = analyzer.find_deleted_symbols(Path::new("gone.ts"), base_source, &[1, 2, 3]);
+    assert_eq!(symbols, vec!["Removed".to_string()]);
+  }
+
+  #[test]
+  fn test_find_deleted_symbols_member_resolves_enclosing_symbol() {
+    // Deleting a member line (base line 3, `beta: 2,`) resolves to the enclosing
+    // top-level symbol `TABLE`, not the member itself — de-duplicated across the
+    // deleted lines.
+    let base_source = r#"export const TABLE = {
+  alpha: 1,
+  beta: 2,
+  gamma: 3,
+};
+"#;
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), profiler).expect("Failed to create analyzer");
+
+    let symbols = analyzer.find_deleted_symbols(Path::new("table.ts"), base_source, &[3]);
+    assert_eq!(symbols, vec!["TABLE".to_string()]);
+  }
+
+  #[test]
+  fn test_find_deleted_symbols_empty_lines_returns_empty() {
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), profiler).expect("Failed to create analyzer");
+    let symbols = analyzer.find_deleted_symbols(Path::new("x.ts"), "export const A = 1;\n", &[]);
+    assert!(symbols.is_empty());
   }
 
   #[test]

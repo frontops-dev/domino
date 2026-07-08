@@ -61,7 +61,7 @@ pub struct Project {
 }
 
 /// A file with changed lines
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ChangedFile {
   /// Path to the file (relative to workspace root)
   pub file_path: PathBuf,

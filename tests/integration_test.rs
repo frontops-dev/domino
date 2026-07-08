@@ -3944,6 +3944,11 @@ fn test_deletion_of_member_affects_dependents_via_enclosing_symbol() {
     .affected_projects;
 
   assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (its file changed). Got: {:?}",
+    affected
+  );
+  assert!(
     affected.contains(&"app".to_string()),
     "app should be affected: `beta` was removed from `widget`, which app imports. Got: {:?}",
     affected

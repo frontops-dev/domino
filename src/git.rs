@@ -626,9 +626,9 @@ index 1234567..abcdefg 100644
 
   /// Symmetric hunk header — old and new sides both carry a count. Common in
   /// diffs with non-zero context (`--unified=N` for N > 0) or when an edit
-  /// replaces a block with another block of the same size. The greedy `.*`
-  /// in `LINE_RE` already handles this; the test locks it in against future
-  /// regex tweaks.
+  /// replaces a block with another block of the same size. `LINE_RE`'s explicit
+  /// old/new capture groups (`-(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?`) handle this;
+  /// the test locks it in against future regex tweaks.
   #[test]
   fn test_parse_diff_symmetric_hunk_with_old_and_new_counts() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts

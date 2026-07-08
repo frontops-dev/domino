@@ -119,18 +119,22 @@ fn find_affected_internal(
     .as_ref()
     .is_some_and(|pm| lockfile::has_lockfile_changed(&changed_files, pm));
 
-  // A dependency update touches the lockfile and package.json together. When
-  // those are listed in `sharedGlobals` they would short-circuit to "all
-  // projects" before the lockfile analysis (Step 5c) runs, making it dead code.
-  // Exempt the lockfile (always) and package.json (only when the lockfile also
-  // changed, so the analysis has something to resolve) from global invalidation.
-  // A package.json-only change and any *other* global trigger (.nvmrc, nx.json,
-  // ...) still invalidate every project.
+  // Dependency manifests (the lockfile, and package.json when the lockfile also
+  // changed) are exempt from global invalidation so the lockfile analysis
+  // (Step 5c) computes the real affected set instead of short-circuiting to "all
+  // projects". The exemption is gated on that analysis actually running: under
+  // `LockfileStrategy::None` there is no Step 5c, so a manifest listed in
+  // `sharedGlobals` stays a global trigger rather than being silently dropped
+  // (which would flip all → 0 — the same under-inclusion the package.json guard
+  // prevents). Any *other* global trigger (.nvmrc, nx.json, ...) always
+  // invalidates every project.
+  let lockfile_analysis_enabled = !matches!(config.lockfile_strategy, LockfileStrategy::None);
   let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
     named_inputs::check_global_invalidation(inputs, &changed_files)
       .into_iter()
       .filter(|t| {
-        !lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref(), lockfile_changed)
+        !(lockfile_analysis_enabled
+          && lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref(), lockfile_changed))
       })
       .collect()
   } else {

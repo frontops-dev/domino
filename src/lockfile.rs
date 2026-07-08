@@ -102,14 +102,18 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
 /// lockfile in `sharedGlobals` short-circuits to "all projects" before that
 /// analysis ever runs (see `core`'s Step 1b), making it dead code.
 ///
-/// - The detected package manager's **lockfile** is always exempt — lockfile
-///   analysis owns it.
-/// - The workspace-root **`package.json`** is exempt only when the lockfile also
-///   changed (`lockfile_changed`). A dependency update touches both together, so
-///   lockfile analysis can resolve the affected importers. A `package.json`-only
-///   change (e.g. an uninstalled version-range edit, or a repo with no lockfile)
-///   has nothing to analyze, so it stays a global trigger rather than silently
-///   under-including.
+/// - The detected package manager's **lockfile** is a dependency manifest —
+///   lockfile analysis owns it.
+/// - The workspace-root **`package.json`** is a dependency manifest only when the
+///   lockfile also changed (`lockfile_changed`). A dependency update touches both
+///   together, so lockfile analysis can resolve the affected importers. A
+///   `package.json`-only change (e.g. an uninstalled version-range edit, or a
+///   repo with no lockfile) has nothing to analyze, so it is not treated as a
+///   manifest and stays a global trigger rather than silently under-including.
+///
+/// The caller must only honor this exemption when lockfile analysis is enabled
+/// (`strategy != none`); with analysis off there is no pipeline to process the
+/// file, so it should remain a global trigger. See `core`'s Step 1b.
 pub fn is_dependency_manifest(
   file_path: &Path,
   pm: Option<&PackageManager>,

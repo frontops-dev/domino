@@ -3975,3 +3975,73 @@ fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
     );
   }
 }
+
+/// Under `LockfileStrategy::None` there is no lockfile analysis (Step 5c), so a
+/// lockfile listed in `sharedGlobals` must fall back to global invalidation
+/// rather than being silently exempted (which would drop all -> 0). The manifest
+/// exemption only applies when analysis is enabled to process the change.
+#[test]
+fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  fs::write(
+    root.join("nx.json"),
+    r#"{
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/package-lock.json"
+    ]
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(
+    &root,
+    &["commit", "-m", "add nx.json with lockfile in sharedGlobals"],
+  );
+
+  // Bump lib-a in the lockfile on a feature branch (lockfile is the only change).
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "dependencies": { "lib-a": "^1.0.0" } },
+    "node_modules/lib-a": { "version": "2.0.0", "dependencies": { "lib-nested": "^1.0.0" } },
+    "node_modules/lib-nested": { "version": "1.0.0" }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: lockfile_projects(),
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  for proj in ["proj-a", "proj-b", "proj-c"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: with strategy=none there is no lockfile analysis, \
+       so a lockfile in sharedGlobals must globally invalidate, not drop to 0. \
+       Got: {:?}",
+      affected
+    );
+  }
+}

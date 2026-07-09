@@ -3788,3 +3788,169 @@ export function unusedFn() {
     affected
   );
 }
+
+/// Scaffold a two-package monorepo where `app` imports `widget` from `lib`, then
+/// return the temp dir (kept alive by the caller), its canonical root, and a
+/// ready `TrueAffectedConfig`. `lib_src` is the initial contents of
+/// `libs/lib/src/index.ts`.
+fn scaffold_lib_app_repo(lib_src: &str) -> (TempDir, PathBuf, TrueAffectedConfig) {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp.path().canonicalize().expect("canonicalize temp dir");
+
+  let lib_dir = root.join("libs/lib/src");
+  let app_dir = root.join("apps/app/src");
+  fs::create_dir_all(&lib_dir).unwrap();
+  fs::create_dir_all(&app_dir).unwrap();
+
+  fs::write(lib_dir.join("index.ts"), lib_src).unwrap();
+  fs::write(
+    app_dir.join("main.ts"),
+    r#"import { widget } from '@scope/lib';
+
+export function run() {
+  return widget();
+}
+"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@scope/lib": ["libs/lib/src/index.ts"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "lib".to_string(),
+        root: PathBuf::from("libs/lib/src"),
+        source_root: PathBuf::from("libs/lib/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app".to_string(),
+        root: PathBuf::from("apps/app/src"),
+        source_root: PathBuf::from("apps/app/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  (tmp, root, config)
+}
+
+/// Regression for #74: deleting an *entire* exported symbol (a pure `+Z,0`
+/// deletion hunk) must still mark its dependents affected. The removed lines no
+/// longer exist in the working tree, so recovery re-parses the base revision at
+/// the old-side line range to recover the deleted symbol, then traces the
+/// current import graph — where `app` still imports it — to `app`.
+///
+/// This is the case the earlier new-side "anchor" heuristic could not solve:
+/// with the whole declaration gone, the anchor line resolves to whatever symbol
+/// now occupies it (or nothing), so `app` was silently dropped.
+#[test]
+fn test_deletion_of_whole_exported_symbol_affects_dependents() {
+  let (_tmp, root, config) = scaffold_lib_app_repo(
+    r#"export const widget = () => 1;
+
+export const obsolete = () => 2;
+"#,
+  );
+
+  // Delete the entire `widget` symbol that `app` imports. `git diff --unified=0`
+  // emits `@@ -1 +0,0 @@` — a pure deletion with no new-side line.
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    r#"export const obsolete = () => 2;
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "delete widget"]);
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (its file changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected: it imports `widget`, which was deleted. Got: {:?}",
+    affected
+  );
+}
+
+/// Deleting a *member* of an exported symbol (a property removed from an object)
+/// is also a pure `+Z,0` deletion. Recovery resolves the enclosing symbol
+/// (`widget`) from the base revision so `app`, which imports `widget`, is
+/// affected.
+#[test]
+fn test_deletion_of_member_affects_dependents_via_enclosing_symbol() {
+  let (_tmp, root, config) = scaffold_lib_app_repo(
+    r#"export const widget = {
+  alpha: 1,
+  beta: 2,
+  gamma: 3,
+};
+"#,
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    r#"export const widget = {
+  alpha: 1,
+  gamma: 3,
+};
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "delete beta"]);
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (its file changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected: `beta` was removed from `widget`, which app imports. Got: {:?}",
+    affected
+  );
+}

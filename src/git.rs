@@ -8,8 +8,13 @@ use tracing::{debug, warn};
 
 static FILE_RE: LazyLock<Regex> =
   LazyLock::new(|| Regex::new(r#"(?:["\s]a/)(.*)(?:["\s]b/)"#).expect("file regex is valid"));
-static LINE_RE: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r"@@ -.* \+(\d+)(?:,(\d+))? @@").expect("line regex is valid"));
+/// Captures both sides of a hunk header `@@ -X,Y +Z,W @@`:
+/// group 1 = old start `X`, group 2 = old count `Y` (optional),
+/// group 3 = new start `Z`, group 4 = new count `W` (optional).
+/// The old side is needed to recover symbols removed by pure-deletion hunks.
+static LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").expect("line regex is valid")
+});
 
 /// Detect the default branch (tries origin/main, then origin/master)
 pub fn detect_default_branch(repo_path: &Path) -> String {
@@ -129,6 +134,39 @@ pub fn get_diff(repo_path: &Path, base: &str, head: Option<&str>) -> Result<Stri
   )
 }
 
+/// Read the contents of a file as it existed at a given revision.
+///
+/// `path` is interpreted relative to `repo_path` (the `./` prefix makes git
+/// resolve it against the working directory rather than the repo top-level),
+/// matching the `--relative` paths produced by [`get_diff`]. Returns
+/// `Ok(None)` when the file does not exist at that revision — e.g. a newly
+/// added file, for which there is no base content to recover — so callers can
+/// treat "no base" as "nothing to trace" without erroring.
+pub fn get_file_at_revision(
+  repo_path: &Path,
+  revision: &str,
+  path: &Path,
+) -> Result<Option<String>> {
+  let spec = format!("{}:./{}", revision, path.display());
+  let output = Command::new("git")
+    .args(["show", &spec])
+    .current_dir(repo_path)
+    .output()
+    .map_err(|e| DominoError::Other(format!("Failed to execute git show: {}", e)))?;
+
+  if !output.status.success() {
+    debug!(
+      "git show {} returned non-zero (file likely absent at base); skipping",
+      spec
+    );
+    return Ok(None);
+  }
+
+  Ok(Some(String::from_utf8(output.stdout).unwrap_or_else(|e| {
+    String::from_utf8_lossy(e.as_bytes()).into_owned()
+  })))
+}
+
 /// Parse git diff output to extract changed files and line numbers.
 /// Returns the changed files along with the computed merge-base SHA.
 ///
@@ -187,44 +225,55 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       let is_rename_or_copy = new_path.is_some();
       let file_path = new_path.unwrap_or(file_path);
 
-      // Extract changed line numbers. For each hunk header `@@ -X,Y +Z,W @@`
-      // expand to every line in the new-side range `Z..Z+W`, so symbols that
-      // live mid-hunk (not just at the hunk's starting line) are visible to
-      // downstream AST lookups. When `,W` is omitted, git's convention is a
-      // single-line hunk (count = 1). Pure deletion hunks (`W == 0`) produce
-      // an empty range — see the `has_hunks` branch below for how those are
-      // preserved.
-      let ranges: Vec<std::ops::Range<usize>> = line_regex
-        .captures_iter(file_diff)
-        .filter_map(|caps| {
-          let start_str = caps.get(1)?.as_str();
-          let start: usize = start_str
+      // Extract line numbers from each hunk header `@@ -X,Y +Z,W @@`.
+      //
+      // A hunk that adds or modifies lines (`W >= 1`) expands to every new-side
+      // line `Z..Z+W`, so symbols living mid-hunk — not just at the hunk's start
+      // — are visible to the downstream AST lookup. When `,W` / `,Y` is omitted,
+      // git's convention is a single line (count = 1).
+      //
+      // A pure-deletion hunk (`W == 0`) has no new-side line to look up: the
+      // removed code is gone from the working tree. But the symbol that enclosed
+      // it (an exported object losing a property, a `switch` losing a case, or an
+      // entire top-level declaration) is still changed, and its dependents are
+      // affected. We record the *old-side* lines `X..X+Y` in `deleted_lines`;
+      // downstream (`core.rs`) re-parses the base revision at those lines to
+      // recover the enclosing symbol and trace its references. Using the old side
+      // — rather than anchoring to a surviving new-side line — is what makes
+      // deleting a whole symbol resolvable and avoids mis-attributing the change
+      // to whichever symbol now happens to occupy the deletion point.
+      let mut changed_lines: Vec<usize> = Vec::new();
+      let mut deleted_lines: Vec<usize> = Vec::new();
+      let parse_group = |caps: &regex::Captures, idx: usize| -> Option<usize> {
+        caps.get(idx).and_then(|m| {
+          m.as_str()
             .parse()
-            .inspect_err(|e| warn!("Failed to parse hunk start line '{}': {}", start_str, e))
-            .ok()?;
-          let count: usize = caps
-            .get(2)
-            .and_then(|m| {
-              m.as_str()
-                .parse()
-                .inspect_err(|e| warn!("Failed to parse hunk count '{}': {}", m.as_str(), e))
-                .ok()
-            })
-            .unwrap_or(1);
-          Some(start..start + count)
+            .inspect_err(|e| warn!("Failed to parse hunk field '{}': {}", m.as_str(), e))
+            .ok()
         })
-        .collect();
-      let has_hunks = !ranges.is_empty();
-      let mut changed_lines: Vec<usize> = ranges.into_iter().flatten().collect();
+      };
+      for caps in line_regex.captures_iter(file_diff) {
+        let (Some(old_start), Some(new_start)) = (parse_group(&caps, 1), parse_group(&caps, 3))
+        else {
+          continue;
+        };
+        let old_count = parse_group(&caps, 2).unwrap_or(1);
+        let new_count = parse_group(&caps, 4).unwrap_or(1);
+        if new_count == 0 {
+          deleted_lines.extend(old_start..old_start + old_count);
+        } else {
+          changed_lines.extend(new_start..new_start + new_count);
+        }
+      }
 
       if changed_lines.is_empty() {
         if is_rename_or_copy {
           changed_lines.push(1);
-        } else if has_hunks {
-          // Deletion-only file (every hunk is `+Z,0`). Keep the file entry
-          // with no line numbers so its owning package is still marked as
-          // affected — deleting an exported symbol is a real change even
-          // though there's nothing in the new file to AST-lookup.
+        } else if !deleted_lines.is_empty() {
+          // Deletion-only file (every hunk is `+Z,0`). It has no new-side lines
+          // to AST-lookup, but `deleted_lines` lets us recover the removed
+          // symbols from the base revision downstream, and the file's owning
+          // package is still marked affected because its path is present.
           debug!("Only deletion hunks for file: {}", file_path);
         } else if file_diff
           .lines()
@@ -240,6 +289,7 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       Some(ChangedFile {
         file_path: file_path.into(),
         changed_lines,
+        deleted_lines,
       })
     })
     .collect();
@@ -522,12 +572,13 @@ index 1234567..abcdefg 100644
     assert_eq!(result[0].changed_lines, vec![1]);
   }
 
-  /// A pure-deletion hunk (`+Z,0`) has no new-side lines to scan and must
-  /// contribute zero entries to `changed_lines`. Pair it with a normal hunk
-  /// so the file-skip branch (which triggers on a fully empty result) is not
-  /// what's actually being tested.
+  /// A pure-deletion hunk (`+Z,0`) records its *old-side* lines in
+  /// `deleted_lines` (never in `changed_lines`), while a paired addition hunk
+  /// contributes its new-side lines to `changed_lines`. Here the deletion at
+  /// `-5,3` removed base lines 5, 6, 7 and the addition at `+21,2` added new
+  /// lines 21, 22.
   #[test]
-  fn test_parse_diff_pure_deletion_hunk_contributes_zero() {
+  fn test_parse_diff_deletion_hunk_records_old_side_alongside_addition() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
 index 1234567..abcdefg 100644
 --- a/src/foo.ts
@@ -544,16 +595,18 @@ index 1234567..abcdefg 100644
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].changed_lines, vec![21, 22]);
+    assert_eq!(result[0].deleted_lines, vec![5, 6, 7]);
   }
 
-  /// A file whose only hunks are deletions (`+Z,0`) must still be kept in
-  /// the result with an empty `changed_lines`. Dropping it would hide real
-  /// source changes — deleting an exported symbol is a meaningful change
-  /// even though there are no new-file lines to AST-lookup. Downstream in
-  /// `core.rs`, the file's owning package is still marked affected because
-  /// the file path is present.
+  /// A file whose only hunks are deletions (`+Z,0`) is kept in the result with
+  /// an empty `changed_lines` but the removed base-revision lines in
+  /// `deleted_lines`. Downstream, those lines re-parse the base revision to
+  /// recover the deleted symbol and trace its dependents — while the file's own
+  /// package is still marked because its path is present. Previously such files
+  /// were kept with empty `changed_lines` and nothing else, so the reference
+  /// cascade was skipped and dependents were under-reported.
   #[test]
-  fn test_parse_diff_deletion_only_file_kept_with_empty_lines() {
+  fn test_parse_diff_deletion_only_file_records_deleted_lines() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
 index 1234567..abcdefg 100644
 --- a/src/foo.ts
@@ -568,13 +621,14 @@ index 1234567..abcdefg 100644
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/foo.ts");
     assert!(result[0].changed_lines.is_empty());
+    assert_eq!(result[0].deleted_lines, vec![5, 6, 7]);
   }
 
   /// Symmetric hunk header — old and new sides both carry a count. Common in
   /// diffs with non-zero context (`--unified=N` for N > 0) or when an edit
-  /// replaces a block with another block of the same size. The greedy `.*`
-  /// in `LINE_RE` already handles this; the test locks it in against future
-  /// regex tweaks.
+  /// replaces a block with another block of the same size. `LINE_RE`'s explicit
+  /// old/new capture groups (`-(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?`) handle this;
+  /// the test locks it in against future regex tweaks.
   #[test]
   fn test_parse_diff_symmetric_hunk_with_old_and_new_counts() {
     let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
@@ -593,5 +647,57 @@ index 1234567..abcdefg 100644
     let result = parse_diff(diff).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].changed_lines, vec![3, 4, 5]);
+  }
+
+  /// Regression for the deletion-only under-detection bug.
+  ///
+  /// `git diff --unified=0` emits a `+Z,0` hunk when a line is removed. The
+  /// removed content no longer exists in the new file, so it contributes
+  /// nothing to `changed_lines`; instead its *old-side* line (the shorthand
+  /// `-495` = base line 495) is recorded in `deleted_lines`. Downstream, that
+  /// line re-parses the base revision, resolves the enclosing top-level symbol
+  /// (here the exported `declarativeCalculations` object), and traces every
+  /// project that consumes it.
+  ///
+  /// Before the fix, deletion hunks contributed nothing at all, so symbol
+  /// extraction found nothing and the reference cascade was skipped,
+  /// under-reporting the deleted symbol's dependents.
+  #[test]
+  fn test_parse_diff_deletion_only_hunk_records_old_side_line() {
+    let diff = r#"diff --git a/src/attrs.ts b/src/attrs.ts
+index 1234567..abcdefg 100644
+--- a/src/attrs.ts
++++ b/src/attrs.ts
+@@ -495 +494,0 @@ export const declarativeCalculations = {
+-  'Commissions & Fees': { alternative: ['Bank Charges'] },
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].changed_lines.is_empty());
+    assert_eq!(result[0].deleted_lines, vec![495]);
+  }
+
+  /// Deleting an entire multi-line top-level symbol at the very top of a file
+  /// produces `@@ -1,N +0,0 @@`. The whole old-side range must land in
+  /// `deleted_lines` so the base revision can be re-parsed to recover the
+  /// deleted declaration — the case the earlier new-side "anchor" heuristic
+  /// could not handle (it would resolve whichever symbol now occupies line 1).
+  #[test]
+  fn test_parse_diff_deletion_of_leading_symbol_records_full_old_range() {
+    let diff = r#"diff --git a/src/foo.ts b/src/foo.ts
+index 1234567..abcdefg 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -1,3 +0,0 @@
+-export const Removed = {
+-  value: 1,
+-};
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].changed_lines.is_empty());
+    assert_eq!(result[0].deleted_lines, vec![1, 2, 3]);
   }
 }

@@ -581,7 +581,12 @@ fn find_affected_internal(
   // Step 5c: Process lockfile changes
   if !matches!(config.lockfile_strategy, LockfileStrategy::None) {
     if let Some(ref pm) = detected_pm {
-      if lockfile::has_lockfile_changed(&changed_files, pm) {
+      // Reuse the single `lockfile_changed` computed above rather than
+      // recomputing on the (post-negation) filtered set. This guarantees the
+      // exemption gate and the analysis agree on whether the lockfile changed —
+      // if they diverged, a lockfile could be dropped from global triggers yet
+      // skipped here, silently under-including (all -> 0).
+      if lockfile_changed {
         debug!("Lockfile changed, strategy: {:?}", config.lockfile_strategy);
         match lockfile::find_affected_dependencies(&config.cwd, &merge_base, pm) {
           Ok(affected_deps) if !affected_deps.is_empty() => {

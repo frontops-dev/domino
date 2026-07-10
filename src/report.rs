@@ -1816,10 +1816,19 @@ fn generate_details_html(report: &AffectedReport) -> String {
         AffectCause::DirectChange { file, symbol, line } => {
           html.push_str("<span class=\"cause-type direct\">Direct Change</span>");
           html.push_str("<div class=\"cause-details\">");
+          // `line == 0` means there is no specific new-side line: either a symbol
+          // recovered from a deletion (base revision) or a whole-file/asset
+          // change. Rendering "(line 0)" reads oddly, so label a deleted symbol
+          // "(deleted)" and omit the locator when there's no symbol either.
+          let location = if *line == 0 {
+            if symbol.is_some() { " (deleted)" } else { "" }.to_string()
+          } else {
+            format!(" (line {})", line)
+          };
           html.push_str(&format!(
-            "File: <span class=\"code-path\">{}</span> (line {})",
+            "File: <span class=\"code-path\">{}</span>{}",
             file.display(),
-            line
+            location
           ));
           if let Some(sym) = symbol {
             html.push_str(&format!(

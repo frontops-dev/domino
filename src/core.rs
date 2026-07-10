@@ -246,6 +246,39 @@ fn find_affected_internal(
       )
       .collect();
 
+    // Recover symbols removed by pure-deletion hunks. Their lines are gone from
+    // the working tree, so `find_node_at_line` above (which reads the current
+    // file) can't see them; instead we re-parse the file at the base revision
+    // and resolve the enclosing top-level symbol at each deleted line. This is
+    // what lets dependents of a deleted symbol — an object property, a `switch`
+    // case, or a whole exported declaration — be traced. Consumers still import
+    // the symbol in the current graph, so the traversal below reaches them.
+    let deleted_symbols: Vec<String> = if changed_file.deleted_lines.is_empty() {
+      Vec::new()
+    } else {
+      match git::get_file_at_revision(&config.cwd, &merge_base, file_path) {
+        Ok(Some(base_source)) => {
+          analyzer.find_deleted_symbols(file_path, &base_source, &changed_file.deleted_lines)
+        }
+        Ok(None) => Vec::new(),
+        Err(e) => {
+          debug!(
+            "Failed to read base revision of {:?} for deleted-symbol recovery: {}",
+            file_path, e
+          );
+          Vec::new()
+        }
+      }
+    };
+    if !deleted_symbols.is_empty() {
+      debug!(
+        "Recovered {} deleted symbol(s) from base revision of {:?}: {:?}",
+        deleted_symbols.len(),
+        file_path,
+        deleted_symbols
+      );
+    }
+
     // Add all packages that own this file (multiple projects can share the same sourceRoot).
     // Uses the unfiltered lookup — a directly changed file always belongs to its project
     // regardless of tsconfig excludes (spec files, stories, config files all count).
@@ -279,16 +312,31 @@ fn find_affected_internal(
             }
           }
         }
+
+        // Deleted symbols have no surviving new-side line; record them at line 0
+        // so the report still explains why the owning package is affected.
+        for symbol in &deleted_symbols {
+          project_causes
+            .entry(pkg.clone())
+            .or_default()
+            .push(AffectCause::DirectChange {
+              file: file_path.clone(),
+              symbol: Some(symbol.clone()),
+              line: 0,
+            });
+        }
       }
     }
 
-    // Pre-deduplicate: collect unique symbols across all changed lines before tracing.
-    // This avoids redundant recursive reference traversals when many changed lines
-    // map to the same symbol (e.g., additions inside a single large exported object).
-    let unique_symbols: FxHashSet<&String> = symbols_by_line
+    // Pre-deduplicate: collect unique symbols across all changed lines (plus any
+    // recovered from deletions) before tracing. This avoids redundant recursive
+    // reference traversals when many changed lines map to the same symbol (e.g.
+    // additions inside a single large exported object).
+    let mut unique_symbols: FxHashSet<&String> = symbols_by_line
       .iter()
       .flat_map(|(_, symbols)| symbols.iter())
       .collect();
+    unique_symbols.extend(deleted_symbols.iter());
 
     if unique_symbols.is_empty() {
       debug!(
@@ -297,9 +345,10 @@ fn find_affected_internal(
       );
     } else {
       debug!(
-        "Found {} unique symbols from {} changed lines in {:?}",
+        "Found {} unique symbols from {} changed and {} deleted lines in {:?}",
         unique_symbols.len(),
         changed_file.changed_lines.len(),
+        changed_file.deleted_lines.len(),
         file_path
       );
 

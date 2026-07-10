@@ -1289,6 +1289,7 @@ mod tests {
     let files = vec![ChangedFile {
       file_path: "package-lock.json".into(),
       changed_lines: vec![1],
+      deleted_lines: vec![],
     }];
     assert!(has_lockfile_changed(&files, &PackageManager::Npm));
   }
@@ -1298,6 +1299,7 @@ mod tests {
     let files = vec![ChangedFile {
       file_path: "src/index.ts".into(),
       changed_lines: vec![1],
+      deleted_lines: vec![],
     }];
     assert!(!has_lockfile_changed(&files, &PackageManager::Npm));
   }
@@ -1307,6 +1309,7 @@ mod tests {
     let files = vec![ChangedFile {
       file_path: "yarn.lock".into(),
       changed_lines: vec![1],
+      deleted_lines: vec![],
     }];
     assert!(has_lockfile_changed(&files, &PackageManager::Yarn));
   }
@@ -1316,6 +1319,7 @@ mod tests {
     let files = vec![ChangedFile {
       file_path: "pnpm-lock.yaml".into(),
       changed_lines: vec![1],
+      deleted_lines: vec![],
     }];
     assert!(has_lockfile_changed(&files, &PackageManager::Pnpm));
   }
@@ -1325,6 +1329,7 @@ mod tests {
     let files = vec![ChangedFile {
       file_path: "bun.lock".into(),
       changed_lines: vec![1],
+      deleted_lines: vec![],
     }];
     assert!(has_lockfile_changed(&files, &PackageManager::Bun));
   }

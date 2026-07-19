@@ -931,10 +931,7 @@ fn is_implicit_dep_glob(pattern: &str) -> bool {
 /// - Literals are kept as-is (even if no project with that name exists).
 /// - Globs (`*`, `?`, `[…]`) are matched against project names only.
 /// - Entries starting with `!` exclude matching names (Nx / minimatch style).
-fn expand_implicit_dependencies(
-  patterns: &[String],
-  project_names: &[String],
-) -> Vec<String> {
+fn expand_implicit_dependencies(patterns: &[String], project_names: &[String]) -> Vec<String> {
   let mut includes: Vec<String> = Vec::new();
   let mut exclude_globs: Vec<glob::Pattern> = Vec::new();
   let mut exclude_literals: FxHashSet<String> = FxHashSet::default();
@@ -1114,10 +1111,8 @@ mod tests {
       "pkg-b".to_string(),
       "other".to_string(),
     ];
-    let expanded = expand_implicit_dependencies(
-      &["pkg-*".to_string(), "!pkg-b".to_string()],
-      &names,
-    );
+    let expanded =
+      expand_implicit_dependencies(&["pkg-*".to_string(), "!pkg-b".to_string()], &names);
     assert_eq!(expanded, vec!["pkg-a".to_string()]);
   }
 
@@ -1132,9 +1127,6 @@ mod tests {
       ],
       &names,
     );
-    assert_eq!(
-      expanded,
-      vec!["app-a".to_string(), "app-b".to_string()]
-    );
+    assert_eq!(expanded, vec!["app-a".to_string(), "app-b".to_string()]);
   }
 }

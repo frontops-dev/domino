@@ -10,7 +10,6 @@ use crate::types::{
 };
 use crate::utils::{self, ProjectIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -982,7 +981,7 @@ fn expand_implicit_dependencies(
     }
   }
 
-  includes
+  let mut result: Vec<String> = includes
     .into_iter()
     .filter(|name| {
       if exclude_literals.contains(name) {
@@ -990,7 +989,10 @@ fn expand_implicit_dependencies(
       }
       !exclude_globs.iter().any(|p| p.matches(name))
     })
-    .collect()
+    .collect();
+  result.sort();
+  result.dedup();
+  result
 }
 
 fn add_implicit_dependencies(
@@ -1001,7 +1003,7 @@ fn add_implicit_dependencies(
   // Build a map of package -> implicit dependents.
   // Expand Nx-style globs against known project names up front so lookups stay O(1).
   let project_names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-  let mut implicit_dep_map: HashMap<String, Vec<String>> = HashMap::new();
+  let mut implicit_dep_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
   for project in projects {
     if project.implicit_dependencies.is_empty() {
@@ -1117,5 +1119,22 @@ mod tests {
       &names,
     );
     assert_eq!(expanded, vec!["pkg-a".to_string()]);
+  }
+
+  #[test]
+  fn test_expand_implicit_dependencies_deduplicates_overlapping_matches() {
+    let names = vec!["app-a".to_string(), "app-b".to_string()];
+    let expanded = expand_implicit_dependencies(
+      &[
+        "app-*".to_string(),
+        "app-a".to_string(),
+        "app-*".to_string(),
+      ],
+      &names,
+    );
+    assert_eq!(
+      expanded,
+      vec!["app-a".to_string(), "app-b".to_string()]
+    );
   }
 }

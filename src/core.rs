@@ -109,8 +109,34 @@ fn find_affected_internal(
   // a global run so the HTML can separate "globally invalidated" from
   // "semantically affected" projects — the whole point of the report.
   let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
+
+  // Detect the package manager up front so dependency-manifest files (the
+  // package manager's lockfile and the workspace-root package.json) can be
+  // exempted from global invalidation below.
+  let detected_pm = lockfile::detect_package_manager(&config.cwd);
+  let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
+  let lockfile_changed = detected_pm
+    .as_ref()
+    .is_some_and(|pm| lockfile::has_lockfile_changed(&changed_files, pm));
+
+  // Dependency manifests (the lockfile, and package.json when the lockfile also
+  // changed) are exempt from global invalidation so the lockfile analysis
+  // (Step 5c) computes the real affected set instead of short-circuiting to "all
+  // projects". The exemption is gated on that analysis actually running: under
+  // `LockfileStrategy::None` there is no Step 5c, so a manifest listed in
+  // `sharedGlobals` stays a global trigger rather than being silently dropped
+  // (which would flip all → 0 — the same under-inclusion the package.json guard
+  // prevents). Any *other* global trigger (.nvmrc, nx.json, ...) always
+  // invalidates every project.
+  let lockfile_analysis_enabled = !matches!(config.lockfile_strategy, LockfileStrategy::None);
   let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
     named_inputs::check_global_invalidation(inputs, &changed_files)
+      .into_iter()
+      .filter(|t| {
+        !(lockfile_analysis_enabled
+          && lockfile::is_dependency_manifest(&t.file, detected_pm.as_ref(), lockfile_changed))
+      })
+      .collect()
   } else {
     Vec::new()
   };
@@ -148,11 +174,9 @@ fn find_affected_internal(
   let mut affected_packages = FxHashSet::default();
   let mut project_causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
 
-  // Step 5: Partition changed files into source and non-source (excluding lockfiles)
-  let detected_pm = lockfile::detect_package_manager(&config.cwd);
-  let lockfile_filename = detected_pm.as_ref().map(|pm| lockfile::lockfile_name(pm));
-
-  // Step 6: Partition changed files into source and non-source
+  // Step 6: Partition changed files into source and non-source (excluding the
+  // lockfile). `detected_pm` / `lockfile_filename` were computed above so the
+  // dependency-manifest exemption and this partition share one detection.
   let (source_files, asset_files): (Vec<&ChangedFile>, Vec<&ChangedFile>) = changed_files
     .iter()
     .filter(|f| {
@@ -557,7 +581,12 @@ fn find_affected_internal(
   // Step 5c: Process lockfile changes
   if !matches!(config.lockfile_strategy, LockfileStrategy::None) {
     if let Some(ref pm) = detected_pm {
-      if lockfile::has_lockfile_changed(&changed_files, pm) {
+      // Reuse the single `lockfile_changed` computed above rather than
+      // recomputing on the (post-negation) filtered set. This guarantees the
+      // exemption gate and the analysis agree on whether the lockfile changed —
+      // if they diverged, a lockfile could be dropped from global triggers yet
+      // skipped here, silently under-including (all -> 0).
+      if lockfile_changed {
         debug!("Lockfile changed, strategy: {:?}", config.lockfile_strategy);
         match lockfile::find_affected_dependencies(&config.cwd, &merge_base, pm) {
           Ok(affected_deps) if !affected_deps.is_empty() => {

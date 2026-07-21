@@ -96,6 +96,38 @@ pub fn has_lockfile_changed(changed_files: &[ChangedFile], pm: &PackageManager) 
     .any(|f| f.file_path.to_str() == Some(name))
 }
 
+/// Whether `file_path` (relative to the workspace root) is a dependency manifest
+/// that should be exempt from `sharedGlobals` global invalidation because the
+/// lockfile/semantic pipeline will analyze it instead. Without this, listing the
+/// lockfile in `sharedGlobals` short-circuits to "all projects" before that
+/// analysis ever runs (see `core`'s Step 1b), making it dead code.
+///
+/// - The detected package manager's **lockfile** is a dependency manifest —
+///   lockfile analysis owns it.
+/// - The workspace-root **`package.json`** is a dependency manifest only when the
+///   lockfile also changed (`lockfile_changed`). A dependency update touches both
+///   together, so lockfile analysis can resolve the affected importers. A
+///   `package.json`-only change (e.g. an uninstalled version-range edit, or a
+///   repo with no lockfile) has nothing to analyze, so it is not treated as a
+///   manifest and stays a global trigger rather than silently under-including.
+///
+/// The caller must only honor this exemption when lockfile analysis is enabled
+/// (`strategy != none`); with analysis off there is no pipeline to process the
+/// file, so it should remain a global trigger. See `core`'s Step 1b.
+pub fn is_dependency_manifest(
+  file_path: &Path,
+  pm: Option<&PackageManager>,
+  lockfile_changed: bool,
+) -> bool {
+  let Some(name) = file_path.to_str() else {
+    return false;
+  };
+  if pm.is_some_and(|pm| name == lockfile_name(pm)) {
+    return true;
+  }
+  name == "package.json" && lockfile_changed
+}
+
 /// Read a file at `file_path` from the given git revision.
 ///
 /// Returns `Ok(None)` when the object does not exist at the revision (e.g. new
@@ -2221,5 +2253,68 @@ lib-a@^1.0.0:
   fn test_extract_workspace_patterns_invalid_json() {
     let patterns = extract_workspace_patterns("not json");
     assert!(patterns.is_empty());
+  }
+
+  #[test]
+  fn test_is_dependency_manifest() {
+    use std::path::Path;
+
+    // The detected package manager's lockfile is always exempt, regardless of
+    // whether `lockfile_changed` was computed true (the lockfile file being
+    // present in the diff is itself what makes lockfile_changed true).
+    assert!(is_dependency_manifest(
+      Path::new("pnpm-lock.yaml"),
+      Some(&PackageManager::Pnpm),
+      true
+    ));
+    assert!(is_dependency_manifest(
+      Path::new("package-lock.json"),
+      Some(&PackageManager::Npm),
+      false
+    ));
+
+    // A lockfile for a *different* package manager than detected is not exempt.
+    assert!(!is_dependency_manifest(
+      Path::new("pnpm-lock.yaml"),
+      Some(&PackageManager::Npm),
+      true
+    ));
+
+    // package.json is exempt ONLY when the lockfile also changed (a real
+    // dependency update touches both) — lockfile analysis resolves the importers.
+    assert!(is_dependency_manifest(
+      Path::new("package.json"),
+      Some(&PackageManager::Pnpm),
+      true
+    ));
+    // package.json alone (no lockfile change) stays a global trigger so an
+    // uninstalled version-range edit can't silently under-include.
+    assert!(!is_dependency_manifest(
+      Path::new("package.json"),
+      Some(&PackageManager::Pnpm),
+      false
+    ));
+    // No package manager detected → lockfile_changed is false in practice →
+    // package.json is not exempt.
+    assert!(!is_dependency_manifest(
+      Path::new("package.json"),
+      None,
+      false
+    ));
+
+    // Other workspace-root files (e.g. .nvmrc) are never dependency manifests,
+    // so they keep triggering global invalidation.
+    assert!(!is_dependency_manifest(
+      Path::new(".nvmrc"),
+      Some(&PackageManager::Pnpm),
+      true
+    ));
+    // Nested package.json is not the workspace-root manifest (never a global
+    // trigger anyway — those match {workspaceRoot}/ only).
+    assert!(!is_dependency_manifest(
+      Path::new("libs/foo/package.json"),
+      Some(&PackageManager::Pnpm),
+      true
+    ));
   }
 }

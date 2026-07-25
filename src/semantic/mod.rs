@@ -82,11 +82,16 @@ pub(crate) fn simple_resolve_relative(
 mod diag_tests {
   use super::*;
   use crate::profiler::Profiler;
-  use crate::types::Project;
-  use oxc_resolver::Resolver;
+  use crate::types::{LockfileStrategy, Project, TrueAffectedConfig};
   use std::fs;
+  use std::process::Command;
   use std::sync::Arc;
   use tempfile::TempDir;
+
+  fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let o = Command::new("git").args(args).current_dir(root).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).to_string()
+  }
 
   #[test]
   fn diag_jsx_resolution() {
@@ -99,11 +104,34 @@ mod diag_tests {
     fs::write(lib_src.join("Widget.tsx"), "export const Widget = () => null;\n").unwrap();
     fs::write(
       app_src.join("index.ts"),
-      "import { Widget } from '../../lib/src/Widget.jsx';\nexport function main() { return Widget; }\n",
+      "import { Widget } from '../../lib/src/Widget.jsx';\n\nexport function main() {\n  return Widget;\n}\n",
     )
     .unwrap();
     fs::write(root.join("lib/package.json"), r#"{"name":"@test/lib","version":"0.0.0"}"#).unwrap();
     fs::write(root.join("app/package.json"), r#"{"name":"@test/app","version":"0.0.0"}"#).unwrap();
+
+    git(&root, &["init"]);
+    git(&root, &["config", "user.email", "t@t.com"]);
+    git(&root, &["config", "user.name", "T"]);
+    git(&root, &["branch", "-M", "main"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+    git(&root, &["checkout", "-b", "feature"]);
+    fs::write(
+      lib_src.join("Widget.tsx"),
+      "export const Widget = () => <div>modified</div>;\n",
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "modify Widget"]);
+
+    let mut out = String::new();
+    out.push_str(&format!("\nROOT={root:?}\n"));
+    out.push_str(&format!("RAW_DIFF:\n{}\n", git(&root, &["diff", "main...HEAD"])));
+    out.push_str(&format!(
+      "CHANGED_FILES: {:?}\n",
+      crate::git::get_changed_files(&root, "main", None)
+    ));
 
     let mk = |n: &str| Project {
       name: n.to_string(),
@@ -113,32 +141,20 @@ mod diag_tests {
       implicit_dependencies: vec![],
       targets: vec![],
     };
-    let projects = vec![mk("lib"), mk("app")];
-
-    let mut out = String::new();
-    out.push_str(&format!("\nROOT={root:?}\n"));
-
-    let resolver = Resolver::new(create_resolve_options(&root, &projects));
-    let ctx = root.join("app/src");
-    let spec = "../../lib/src/Widget.jsx";
-    out.push_str(&format!(
-      "RESOLVER: {:?}\n",
-      resolver.resolve(&ctx, spec).map(|r| r.full_path())
-    ));
-    out.push_str(&format!(
-      "FALLBACK: {:?}\n",
-      simple_resolve_relative(&root, &ctx, spec)
-    ));
-
+    let config = TrueAffectedConfig {
+      cwd: root.clone(),
+      base: "main".to_string(),
+      head: None,
+      root_ts_config: None,
+      projects: vec![mk("lib"), mk("app")],
+      include: vec![],
+      ignored_paths: vec![],
+      lockfile_strategy: LockfileStrategy::None,
+    };
     let profiler = Arc::new(Profiler::new(false));
-    let analyzer = WorkspaceAnalyzer::new(projects, &root, profiler).unwrap();
-    let mut parsed: Vec<_> = analyzer.files.keys().collect();
-    parsed.sort();
-    out.push_str(&format!("PARSED: {parsed:?}\n"));
-    out.push_str(&format!("IMPORTS: {:?}\n", analyzer.imports));
-    let mut idx: Vec<_> = analyzer.import_index.keys().collect();
-    idx.sort();
-    out.push_str(&format!("INDEX_KEYS: {idx:?}\n"));
+    let report = crate::core::find_affected_with_report(config, profiler).unwrap();
+    out.push_str(&format!("AFFECTED: {:?}\n", report.affected_projects));
+    out.push_str(&format!("REPORT: {:#?}\n", report.report));
 
     panic!("DIAGNOSTIC OUTPUT (intentional failure):{out}");
   }

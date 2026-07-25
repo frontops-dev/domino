@@ -108,6 +108,12 @@ docker --context colima run --rm \
 Use the image tag matching `rust-toolchain.toml`. The named volumes cache the
 crate registry and Linux artifacts, so only the first run is slow.
 
+`Cargo.lock` is gitignored, so CI resolves dependencies fresh — rule version drift
+in or out early by comparing `cargo tree` against the CI log's "Locking" lines.
+
+To read one job's log while the run is still in progress (`gh run view --log-failed`
+refuses): `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs`
+
 Three gotchas, each producing failures that look unrelated to your change:
 
 - **Git worktrees**: a worktree's `.git` is a *file* pointing at an absolute host
@@ -245,6 +251,8 @@ specifier" scenario when touching resolution or specifier filtering logic.
   - Must run serially (`--test-threads=1`) due to git state
 - **CLI tests** (`tests/cli_test.rs`): Test CLI interface using `assert_cmd`
 - **JavaScript tests** (`__test__/index.spec.ts`): Test N-API bindings using ava
+- Prefer a per-test `TempDir` repo for new tests (`scaffold_lib_app_repo`, `TempNxRepo`) over the shared `tests/fixtures/monorepo` + `TestBranch` fixture — that shared mutable fixture is why `--test-threads=1` is required
+- To assert on or dump analyzer state: `WorkspaceAnalyzer::new(projects, &cwd, Arc::new(Profiler::new(false)))`; its `files`/`imports`/`exports`/`import_index` fields are `pub`
 
 ## Important Technical Details
 

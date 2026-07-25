@@ -48,6 +48,31 @@ jobs:
         run: cargo clippy
       - name: Test publish-preview script
         run: node --test tests/publish-preview.test.js
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: test-cargo-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'rust-toolchain.toml') }}
+          restore-keys: test-cargo-${{ runner.os }}-
+      # --no-default-features skips the napi-bindings feature: N-API symbols
+      # only resolve inside a Node process, so test binaries can't link with it
+      - name: Run unit tests
+        run: cargo test --lib --no-default-features
+      - name: Run integration tests
+        run: cargo test --no-default-features --test integration_test -- --test-threads=1
+      - name: Run CLI tests
+        run: cargo test --no-default-features --test cli_test -- --test-threads=1
   verify-pr-title:
     name: Verify PR title
     if: github.event_name == 'pull_request'
@@ -347,6 +372,7 @@ jobs:
       id-token: write
     needs:
       - lint
+      - test
       - test-macOS-windows-binding
       - test-linux-binding
     steps:

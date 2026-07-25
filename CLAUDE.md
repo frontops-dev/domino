@@ -26,10 +26,12 @@ cargo build --release
 cargo run -- affected --all
 
 # Run unit tests
-cargo test
+# (--no-default-features skips the napi-bindings feature: N-API symbols only
+# resolve inside a Node process, so test binaries can't link with it)
+cargo test --lib --no-default-features
 
 # Run integration tests (MUST be serial due to git state)
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
 
 # Format code
 cargo fmt
@@ -62,17 +64,25 @@ yarn lint
 
 ### Running Tests
 
-**Important**: Integration tests modify git state and MUST run serially:
+**Important**: Integration tests modify git state and MUST run serially. Test
+binaries must be built with `--no-default-features` (the napi-bindings feature
+references N-API symbols that only resolve inside a Node process, so test
+executables fail to link with it):
 
 ```bash
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
 ```
 
 Unit tests can run in parallel:
 
 ```bash
-cargo test --lib
+cargo test --lib --no-default-features
 ```
+
+The `tests/fixtures/monorepo` fixture is generated from scratch by
+`tests/common/mod.rs` on first use (it is gitignored — it contains its own
+`.git`, so committing it would turn it into a gitlink). Delete the directory
+to force a clean regeneration.
 
 When changing code, always check for related tests and adjust them accordingly.
 
@@ -260,10 +270,11 @@ Ensure all code follows Rust formatting standards.
 
 ```bash
 # Run unit tests
-cargo test --lib
+cargo test --lib --no-default-features
 
 # Run integration tests (must be serial due to git state)
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
+cargo test --no-default-features --test cli_test -- --test-threads=1
 
 # For JavaScript/Node.js bindings
 yarn test

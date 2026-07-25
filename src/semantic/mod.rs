@@ -77,3 +77,69 @@ pub(crate) fn simple_resolve_relative(
 
   None
 }
+
+#[cfg(test)]
+mod diag_tests {
+  use super::*;
+  use crate::profiler::Profiler;
+  use crate::types::Project;
+  use oxc_resolver::Resolver;
+  use std::fs;
+  use std::sync::Arc;
+  use tempfile::TempDir;
+
+  #[test]
+  fn diag_jsx_resolution() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let lib_src = root.join("lib/src");
+    let app_src = root.join("app/src");
+    fs::create_dir_all(&lib_src).unwrap();
+    fs::create_dir_all(&app_src).unwrap();
+    fs::write(lib_src.join("Widget.tsx"), "export const Widget = () => null;\n").unwrap();
+    fs::write(
+      app_src.join("index.ts"),
+      "import { Widget } from '../../lib/src/Widget.jsx';\nexport function main() { return Widget; }\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib/package.json"), r#"{"name":"@test/lib","version":"0.0.0"}"#).unwrap();
+    fs::write(root.join("app/package.json"), r#"{"name":"@test/app","version":"0.0.0"}"#).unwrap();
+
+    let mk = |n: &str| Project {
+      name: n.to_string(),
+      root: n.into(),
+      source_root: n.into(),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    };
+    let projects = vec![mk("lib"), mk("app")];
+
+    let mut out = String::new();
+    out.push_str(&format!("\nROOT={root:?}\n"));
+
+    let resolver = Resolver::new(create_resolve_options(&root, &projects));
+    let ctx = root.join("app/src");
+    let spec = "../../lib/src/Widget.jsx";
+    out.push_str(&format!(
+      "RESOLVER: {:?}\n",
+      resolver.resolve(&ctx, spec).map(|r| r.full_path())
+    ));
+    out.push_str(&format!(
+      "FALLBACK: {:?}\n",
+      simple_resolve_relative(&root, &ctx, spec)
+    ));
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(projects, &root, profiler).unwrap();
+    let mut parsed: Vec<_> = analyzer.files.keys().collect();
+    parsed.sort();
+    out.push_str(&format!("PARSED: {parsed:?}\n"));
+    out.push_str(&format!("IMPORTS: {:?}\n", analyzer.imports));
+    let mut idx: Vec<_> = analyzer.import_index.keys().collect();
+    idx.sort();
+    out.push_str(&format!("INDEX_KEYS: {idx:?}\n"));
+
+    panic!("DIAGNOSTIC OUTPUT (intentional failure):{out}");
+  }
+}

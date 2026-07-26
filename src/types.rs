@@ -145,17 +145,8 @@ pub struct TrueAffectedConfig {
   pub base: String,
   /// Head commit to compare (defaults to working tree)
   pub head: Option<String>,
-  /// Root tsconfig path
-  #[allow(dead_code)]
-  pub root_ts_config: Option<PathBuf>,
   /// Projects in the workspace
   pub projects: Vec<Project>,
-  /// Additional file patterns to include
-  #[allow(dead_code)]
-  pub include: Vec<String>,
-  /// Paths to ignore
-  #[allow(dead_code)]
-  pub ignored_paths: Vec<String>,
   /// Lockfile change detection strategy
   pub lockfile_strategy: LockfileStrategy,
 }

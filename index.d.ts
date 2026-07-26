@@ -15,10 +15,7 @@ export interface FindAffectedOptions {
   base: string
   /** Head commit to compare (defaults to working tree) */
   head?: string
-  rootTsConfig?: string
   projects: Array<NapiProject>
-  include?: Array<string>
-  ignoredPaths?: Array<string>
   enableProfiling?: boolean
   /** Lockfile change detection strategy: "none", "direct", "full" (default: "direct") */
   lockfileStrategy?: string

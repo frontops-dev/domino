@@ -27,18 +27,100 @@ type ImportIndexEntry = Vec<(PathBuf, String, String, bool)>;
 /// Type alias for the import index map: (source_file, symbol_name) -> entries
 type ImportIndexMap = FxHashMap<(PathBuf, String), ImportIndexEntry>;
 
-/// Semantic data for a single file
+/// Semantic data for a single file.
 ///
-/// SAFETY INVARIANT: each instance exclusively owns its `allocator` and all
-/// memory referenced by `semantic`. The `Semantic<'static>` lifetime is
-/// produced via transmute and is only valid as long as the co-located
-/// `allocator` is alive. Do not introduce shared allocators, string interners,
-/// or any cross-file aliasing of the data held here.
+/// # Safety invariant
+///
+/// `semantic` is a [`oxc_semantic::Semantic<'static>`] obtained by transmuting a
+/// shorter, real lifetime. That `'static` is a lie, and it borrows from **two**
+/// owned fields co-located in this struct:
+///
+/// * `allocator` — the arena that owns every AST node `semantic` points at, and
+/// * `source` — the `String` whose heap buffer backs `Semantic::source_text`
+///   (`&'a str`) plus every `Atom<'a>` the parser sliced out of its input.
+///
+/// So the invariant is: `semantic` is only valid while **both** `allocator` and
+/// `source` are alive and have not been moved out of. Moving the struct as a
+/// whole is fine — the arena chunks and the `String`'s buffer are separate heap
+/// allocations whose addresses do not change when their owners move. What is
+/// *not* fine is separating the three fields: dropping (or reassigning) either
+/// `allocator` or `source` while keeping `semantic` is a use-after-free.
+///
+/// Dropping the whole value is safe in any field order: `Semantic` has no custom
+/// `Drop`, and its `'a`-parameterized fields (`source_text: &'a str`,
+/// `AstNodes<'a>`, …) are all borrows whose drop glue never dereferences the
+/// pointee. What must never happen is the three fields being *split apart*.
+///
+/// To make that compiler-enforced instead of merely conventional, all three
+/// fields are **private** and reachable only through the borrowing accessors
+/// [`FileSemanticData::semantic`] and [`FileSemanticData::source`]. To keep it
+/// that way: never expose a field by value, never add a public constructor that
+/// accepts pre-built parts, never derive `Clone` or `Default` (a derived `Clone`
+/// would duplicate `source`/`allocator` while the clone's `semantic` kept
+/// pointing at the *original's* memory, reopening exactly this hole), and do not
+/// introduce shared allocators, string interners, or any cross-file aliasing of
+/// the data held here.
+///
+/// Because the fields are private, the unsound "destructure and let the
+/// allocator drop" pattern no longer compiles outside this module (expected
+/// error: `E0451`, field is private).
+///
+/// Note: verify this guard with `cargo test --doc --no-default-features`. The
+/// `E0451` code above is documentation only — rustdoc does not enforce it on
+/// stable. And should the encapsulation ever regress so that this snippet
+/// compiles again, the default `napi-bindings` feature would hide the
+/// regression: the doctest binary cannot link the host-provided `napi_*`
+/// symbols, and rustdoc counts that link failure as the expected compile
+/// failure, so the test would pass vacuously. Without the feature, rustdoc
+/// correctly reports "Test compiled successfully, but it's marked
+/// `compile_fail`".
+///
+/// ```compile_fail,E0451
+/// use domino::semantic::analyzer::FileSemanticData;
+/// use oxc_semantic::Semantic;
+///
+/// // Would drop `allocator` and `source` while keeping `semantic` alive.
+/// fn escape(data: FileSemanticData) -> Semantic<'static> {
+///   let FileSemanticData { semantic, .. } = data;
+///   semantic
+/// }
+/// ```
+///
+/// Borrowing through the accessors is what callers should do instead — the
+/// returned references cannot outlive the owner:
+///
+/// ```no_run
+/// use domino::semantic::analyzer::FileSemanticData;
+///
+/// fn describe(data: &FileSemanticData) -> (usize, usize) {
+///   (
+///     data.source().len(),
+///     data.semantic().scoping().symbol_ids().count(),
+///   )
+/// }
+/// ```
 pub struct FileSemanticData {
-  pub source: String,
+  source: String,
   #[allow(dead_code)]
-  pub allocator: Allocator,
-  pub semantic: oxc_semantic::Semantic<'static>,
+  allocator: Allocator,
+  semantic: oxc_semantic::Semantic<'static>,
+}
+
+impl FileSemanticData {
+  /// The file's source text.
+  pub fn source(&self) -> &str {
+    &self.source
+  }
+
+  /// The file's semantic model.
+  ///
+  /// The returned reference is deliberately `&Semantic<'_>` rather than
+  /// `&Semantic<'static>`: the inner lifetime is re-tied to the borrow of
+  /// `self`, so callers cannot launder the transmuted `'static` out of this
+  /// struct and hold AST references past the owner's drop.
+  pub fn semantic(&self) -> &oxc_semantic::Semantic<'_> {
+    &self.semantic
+  }
 }
 
 /// Wrapper for parallel parsing results that need to be sent across threads.
@@ -296,8 +378,11 @@ impl WorkspaceAnalyzer {
     let imports = Self::extract_imports(&parse_result.program, &relative_path);
     let exports = Self::extract_exports(&parse_result.program);
 
-    // Safety: We're storing the semantic data with its allocator, which is valid
-    // as long as the FileSemanticData struct exists
+    // SAFETY: `semantic_ret.semantic` borrows only from `allocator` (AST nodes)
+    // and from `source` (source text and atoms). Both are moved into the
+    // `FileSemanticData` built below, where they live exactly as long as the
+    // semantic data does and are never handed back out by value. See the safety
+    // invariant on [`FileSemanticData`].
     let semantic = unsafe {
       std::mem::transmute::<oxc_semantic::Semantic<'_>, oxc_semantic::Semantic<'static>>(
         semantic_ret.semantic,
@@ -345,9 +430,9 @@ impl WorkspaceAnalyzer {
       .with_check_syntax_error(false)
       .build(&parse_result.program);
 
-    // Safety: identical to `parse_single_file` — the semantic data borrows from
-    // `allocator`, which is moved into the returned `FileSemanticData` and lives
-    // exactly as long as the semantic data does.
+    // SAFETY: identical to `parse_single_file` — the semantic data borrows only
+    // from `allocator` and `source`, both of which are moved into the returned
+    // `FileSemanticData` and live exactly as long as the semantic data does.
     let semantic = unsafe {
       std::mem::transmute::<oxc_semantic::Semantic<'_>, oxc_semantic::Semantic<'static>>(
         semantic_ret.semantic,
@@ -613,14 +698,14 @@ impl WorkspaceAnalyzer {
     let mut references = Vec::new();
 
     // Iterate through all symbols in the file
-    for symbol_id in file_data.semantic.scoping().symbol_ids() {
-      let name = file_data.semantic.scoping().symbol_name(symbol_id);
+    for symbol_id in file_data.semantic().scoping().symbol_ids() {
+      let name = file_data.semantic().scoping().symbol_name(symbol_id);
 
       if name == symbol_name {
         // Get all references to this symbol using the Semantic API directly
-        for reference in file_data.semantic.symbol_references(symbol_id) {
-          let span = file_data.semantic.reference_span(reference);
-          let (line, column) = self.span_to_line_col(&file_data.source, span);
+        for reference in file_data.semantic().symbol_references(symbol_id) {
+          let span = file_data.semantic().reference_span(reference);
+          let (line, column) = self.span_to_line_col(file_data.source(), span);
 
           references.push(Reference {
             file_path: file_path.to_path_buf(),
@@ -661,7 +746,7 @@ impl WorkspaceAnalyzer {
 
     let mut references = Vec::new();
 
-    for node in file_data.semantic.nodes().iter() {
+    for node in file_data.semantic().nodes().iter() {
       match node.kind() {
         AstKind::StaticMemberExpression(member_expr)
           if member_expr.property.name.as_str() == property_name =>
@@ -669,7 +754,7 @@ impl WorkspaceAnalyzer {
           if let Expression::Identifier(ident) = &member_expr.object {
             if ident.name.as_str() == namespace_name {
               let span = member_expr.span;
-              let (line, column) = self.span_to_line_col(&file_data.source, span);
+              let (line, column) = self.span_to_line_col(file_data.source(), span);
               references.push(Reference {
                 file_path: file_path.to_path_buf(),
                 line,
@@ -684,7 +769,7 @@ impl WorkspaceAnalyzer {
           if let oxc_ast::ast::TSTypeName::IdentifierReference(ident) = &qualified_name.left {
             if ident.name.as_str() == namespace_name {
               let span = qualified_name.span;
-              let (line, column) = self.span_to_line_col(&file_data.source, span);
+              let (line, column) = self.span_to_line_col(file_data.source(), span);
               references.push(Reference {
                 file_path: file_path.to_path_buf(),
                 line,
@@ -879,11 +964,11 @@ impl WorkspaceAnalyzer {
     column: usize,
   ) -> Result<Vec<String>> {
     // Get the exact offset using both line and column
-    let line_start = crate::utils::line_to_offset(&file_data.source, line)
+    let line_start = crate::utils::line_to_offset(file_data.source(), line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
     let exact_offset = line_start + column;
-    let line_end =
-      crate::utils::line_to_offset(&file_data.source, line + 1).unwrap_or(file_data.source.len());
+    let line_end = crate::utils::line_to_offset(file_data.source(), line + 1)
+      .unwrap_or(file_data.source().len());
     let line_end_inclusive = line_end.saturating_sub(1);
 
     let specifier_names_on_line = |export_decl: &ExportNamedDeclaration| -> Vec<String> {
@@ -904,7 +989,7 @@ impl WorkspaceAnalyzer {
     };
 
     // Find nodes at this position
-    let nodes = file_data.semantic.nodes();
+    let nodes = file_data.semantic().nodes();
 
     // First pass: Find the SMALLEST node that CONTAINS this exact position
     // Using the exact offset (line + column) allows us to pinpoint the specific node

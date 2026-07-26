@@ -265,14 +265,29 @@ pub fn ensure_fixture_git_repo(fixture: &Path) {
   // succeeds) but `main` is missing — environmental failures (git not on
   // PATH, dubious-ownership, permissions) should surface loudly later via
   // run_git instead of silently destroying the fixture.
-  if fixture.join(".git").exists()
+  // A `.git` *file* is linked-worktree or submodule metadata pointing at a
+  // gitdir that need not exist here. The scaffolding below always creates a
+  // real repository, so anything else is a broken fixture, not something to
+  // reuse — and leaving it in place makes every test fail with a confusing
+  // "not a git repository".
+  if fixture.join(".git").is_file() {
+    fs::remove_dir_all(fixture).expect("Failed to remove broken fixture");
+  }
+
+  // `show-ref --verify refs/heads/main` rather than `rev-parse --verify main`:
+  // the latter also resolves a *tag* named `main`, which would let a fixture
+  // with no local `main` branch skip regeneration and then fail on checkout.
+  if fixture.join(".git").is_dir()
     && git_succeeds(fixture, &["rev-parse", "--git-dir"])
-    && !git_succeeds(fixture, &["rev-parse", "--verify", "main"])
+    && !git_succeeds(
+      fixture,
+      &["show-ref", "--verify", "--quiet", "refs/heads/main"],
+    )
   {
     fs::remove_dir_all(fixture).expect("Failed to remove broken fixture");
   }
 
-  if fixture.join(".git").exists() {
+  if fixture.join(".git").is_dir() {
     return;
   }
 

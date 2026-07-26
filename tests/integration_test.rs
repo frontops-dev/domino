@@ -5,7 +5,7 @@ use domino::profiler::Profiler;
 use domino::report::generate_html_report;
 use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -35,6 +35,22 @@ fn git_command(args: &[&str]) -> String {
   }
 
   String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// True when `dir`'s index holds staged changes.
+///
+/// `git commit` fails when nothing is staged, so callers that may run against
+/// an already-up-to-date fixture have to guard it. `git status --porcelain`
+/// cannot be that guard: it also reports untracked and unstaged files, which
+/// other tests routinely leave in the shared fixture, so it would report work
+/// to commit when the index is actually empty.
+fn has_staged_changes(dir: &Path) -> bool {
+  Command::new("git")
+    .args(["diff", "--cached", "--quiet"])
+    .current_dir(dir)
+    .status()
+    .map(|status| status.code() == Some(1))
+    .unwrap_or(false)
 }
 
 /// Ensure the fixture repo exists and is initialized with git
@@ -270,11 +286,7 @@ fn test_three_dot_diff_behavior() {
         common::fixture_file_content("proj2/index.ts"),
       );
       git(&["add", "proj2/index.ts"]);
-      let staged = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&fixture)
-        .output();
-      if staged.map(|o| !o.stdout.is_empty()).unwrap_or(false) {
+      if has_staged_changes(&fixture) {
         git(&["commit", "-m", "Restore proj2/index.ts"]);
       }
     }
@@ -334,12 +346,7 @@ export function anotherFn() {
   git_command(&["add", "proj2/index.ts"]);
   // This commit lands on the fixture's main and persists across runs; on a
   // repeat run the content is already there, so only commit when staged
-  let staged = Command::new("git")
-    .args(["status", "--porcelain"])
-    .current_dir(fixture_path())
-    .output()
-    .expect("Failed to check git status");
-  if !staged.stdout.is_empty() {
+  if has_staged_changes(&fixture_path()) {
     git_command(&["commit", "-m", "Main branch change"]);
   }
 

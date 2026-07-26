@@ -112,10 +112,11 @@ impl WorkspaceAnalyzer {
   /// Resolution (the expensive part — real filesystem work via `oxc_resolver`:
   /// stats, package.json/tsconfig lookups) is parallelized with rayon, mirroring
   /// the parsing phase in `analyze_workspace`. A single shared `Resolver` is used
-  /// for all items: its cache is backed by lock-free concurrent maps (`papaya`)
-  /// and `parking_lot::RwLock`, so it is `Send + Sync` and safe to share by
-  /// reference across threads — this is the same resolver Rolldown uses
-  /// multi-threaded. Constructing one `Resolver` per item would be wasteful,
+  /// for all items: its cache uses concurrent maps and atomics internally, so
+  /// it is `Send + Sync` (compiler-enforced here, since the closure captures
+  /// `&Resolver`) and safe to share by reference across threads — this is the
+  /// same resolver Rolldown uses multi-threaded. Constructing one `Resolver`
+  /// per item would be wasteful,
   /// since construction itself is not free.
   fn build_import_index(&mut self, cwd: &Path) -> Result<()> {
     use oxc_resolver::Resolver;
@@ -182,7 +183,8 @@ impl WorkspaceAnalyzer {
       index.entry(key).or_default().push(value);
     }
 
-    // Rayon may interleave items from different threads in any order, and
+    // Rayon's collect preserves work-item order, but `self.imports` is a
+    // std HashMap whose iteration order varies run to run, and
     // nothing downstream depends on importer order within a value (the final
     // affected-projects list is sorted independently in core.rs). Sort each
     // entry list anyway so the index — and any debug output derived from it —

@@ -2346,6 +2346,10 @@ export function run() {
 /// classified as an "asset" — its owning project (`proj-a`) was still marked affected
 /// via the asset-fallback path, but its exports were never traced through the import
 /// index, so downstream consumers (`proj-b`) were silently missed.
+///
+/// Note: `proj-b`'s import is deliberately extension-less; this relies on domino's
+/// deliberately-permissive extension-less resolution — real TypeScript under
+/// `node16`/`nodenext` module resolution would require the explicit `.mts` extension.
 #[test]
 fn test_mts_source_file_traced_across_projects() {
   let tmp = TempDir::new().expect("Failed to create temp dir");
@@ -2476,6 +2480,10 @@ export function run() {
 ///
 /// Same shape as [`test_mts_source_file_traced_across_projects`] but for plain
 /// JavaScript ESM modules (`.mjs`), common in dual-package (ESM+CJS) libraries.
+///
+/// Note: `proj-b`'s import is deliberately extension-less; this relies on domino's
+/// deliberately-permissive extension-less resolution — real TypeScript under
+/// `node16`/`nodenext` module resolution would require the explicit `.mjs` extension.
 #[test]
 fn test_mjs_source_file_traced_across_projects() {
   let tmp = TempDir::new().expect("Failed to create temp dir");
@@ -2612,8 +2620,10 @@ fn test_mjs_import_resolves_to_mts_source() {
 
   let lib_src = root.join("lib/src");
   let app_src = root.join("app/src");
+  let other_src = root.join("other/src");
   fs::create_dir_all(&lib_src).unwrap();
   fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&other_src).unwrap();
 
   fs::write(
     lib_src.join("utils.mts"),
@@ -2631,6 +2641,15 @@ fn test_mjs_import_resolves_to_mts_source() {
 
 export function main() {
   return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    other_src.join("index.mts"),
+    r#"export function unrelated() {
+  return 'unrelated';
 }
 "#,
   )
@@ -2677,6 +2696,14 @@ export function main() {
         implicit_dependencies: vec![],
         targets: vec![],
       },
+      Project {
+        name: "other".to_string(),
+        root: PathBuf::from("other"),
+        source_root: PathBuf::from("other/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
     ],
     include: vec![],
     ignored_paths: vec![],
@@ -2696,6 +2723,136 @@ export function main() {
     affected.contains(&"app".to_string()),
     "app should be affected (imports lib/src/utils.mts via .mjs output-extension import, \
      which requires extension_alias to resolve). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"other".to_string()),
+    "other is unrelated and must NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+/// Regression test: relative imports using the TypeScript "import with output extension"
+/// convention (`./helper.cjs` on disk as `helper.cts`) must resolve via `extension_alias`,
+/// mirroring [`test_mjs_import_resolves_to_mts_source`] but for the CJS side of the alias.
+#[test]
+fn test_cjs_import_resolves_to_cts_source() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let lib_src = root.join("lib/src");
+  let app_src = root.join("app/src");
+  let other_src = root.join("other/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&other_src).unwrap();
+
+  fs::write(
+    lib_src.join("helper.cts"),
+    r#"export function helper(): string {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  // app imports with the .cjs (output) extension while the source on disk is .cts
+  fs::write(
+    app_src.join("index.cts"),
+    r#"import { helper } from '../../lib/src/helper.cjs';
+
+export function main() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    other_src.join("index.cts"),
+    r#"export function unrelated() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    lib_src.join("helper.cts"),
+    r#"export function helper(): string {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "lib".to_string(),
+        root: PathBuf::from("lib"),
+        source_root: PathBuf::from("lib/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app".to_string(),
+        root: PathBuf::from("app"),
+        source_root: PathBuf::from("app/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "other".to_string(),
+        root: PathBuf::from("other"),
+        source_root: PathBuf::from("other/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (helper.cts was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected (imports lib/src/helper.cts via .cjs output-extension import, \
+     which requires extension_alias to resolve). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"other".to_string()),
+    "other is unrelated and must NOT be affected. Got: {:?}",
     affected
   );
 }

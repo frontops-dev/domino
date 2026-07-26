@@ -26,6 +26,10 @@ use walkdir::WalkDir;
 type ImportIndexEntry = Vec<(PathBuf, String, String, bool)>;
 /// Type alias for the import index map: (source_file, symbol_name) -> entries
 type ImportIndexMap = FxHashMap<(PathBuf, String), ImportIndexEntry>;
+/// Type alias for reverse re-export index entries: (reexporting_file, export)
+type ReexportIndexEntry = Vec<(PathBuf, Export)>;
+/// Type alias for the reverse re-export index map: resolved_source_file -> entries
+type ReexportIndexMap = FxHashMap<PathBuf, ReexportIndexEntry>;
 
 /// Semantic data for a single file
 ///
@@ -73,6 +77,14 @@ pub struct WorkspaceAnalyzer {
   /// This index maps from a file+symbol to all the places that import it
   /// The from_module is kept for re-export checking
   pub import_index: ImportIndexMap,
+  /// Reverse re-export index: resolved_source_file -> [(reexporting_file, export)]
+  ///
+  /// Answers "which barrel files re-export from this file?" in O(1). Built once at
+  /// construction time with the same resolver/normalization as `import_index`, so the
+  /// keys are workspace-relative paths (see `ReferenceFinder::normalize_path`).
+  /// Without this index, every reference lookup had to scan the exports of every file
+  /// in the workspace and resolve each re-export specifier.
+  pub reexport_index: ReexportIndexMap,
   /// tsconfig.base.json path alias keys (e.g. `@scope/my-lib`).
   /// Used alongside project names for the `is_workspace_specifier` check because
   /// Nx project names can differ from the npm package names / tsconfig aliases
@@ -93,6 +105,7 @@ impl WorkspaceAnalyzer {
       exports: HashMap::new(),
       projects,
       import_index: FxHashMap::default(),
+      reexport_index: FxHashMap::default(),
       tsconfig_path_prefixes,
       profiler,
     };
@@ -102,7 +115,81 @@ impl WorkspaceAnalyzer {
     // Build import index
     analyzer.build_import_index(cwd)?;
 
+    // Build reverse re-export index (barrel files)
+    analyzer.build_reexport_index(cwd)?;
+
     Ok(analyzer)
+  }
+
+  /// Resolve an import/export specifier the same way `build_import_index` and
+  /// `ReferenceFinder::resolve_import` do, returning a workspace-relative path.
+  ///
+  /// Returns `None` for specifiers that are not workspace-internal, that fail to
+  /// resolve, or that resolve outside of `cwd`. Keeping this in one place guarantees
+  /// the import index, the re-export index and the on-demand resolution in
+  /// `ReferenceFinder` agree on what a specifier points at.
+  fn resolve_workspace_specifier(
+    &self,
+    resolver: &oxc_resolver::Resolver,
+    cwd: &Path,
+    from_file: &Path,
+    specifier: &str,
+  ) -> Option<PathBuf> {
+    let from_path = cwd.join(from_file);
+    let context = from_path.parent()?;
+
+    if !super::is_workspace_specifier(specifier, &self.projects, &self.tsconfig_path_prefixes) {
+      return None;
+    }
+
+    match resolver.resolve(context, specifier) {
+      Ok(resolution) => resolution
+        .path()
+        .strip_prefix(cwd)
+        .ok()
+        .map(|p| p.to_path_buf()),
+      Err(_) => super::simple_resolve_relative(cwd, context, specifier),
+    }
+  }
+
+  /// Build the reverse re-export index: resolved_source_file -> [(reexporting_file, export)]
+  ///
+  /// This is the mirror image of `build_import_index`: instead of "who imports this
+  /// symbol", it answers "which files re-export from this file" (barrel files such as
+  /// `index.ts`). Must be called after `analyze_workspace`.
+  fn build_reexport_index(&mut self, cwd: &Path) -> Result<()> {
+    use oxc_resolver::Resolver;
+
+    let resolver = Resolver::new(super::create_resolve_options(cwd, &self.projects));
+
+    let mut index: ReexportIndexMap = FxHashMap::default();
+
+    for (reexporting_file, file_exports) in &self.exports {
+      for export in file_exports {
+        let Some(from_module) = export.re_export_from.as_deref() else {
+          continue;
+        };
+
+        let Some(resolved) =
+          self.resolve_workspace_specifier(&resolver, cwd, reexporting_file, from_module)
+        else {
+          continue;
+        };
+
+        index
+          .entry(resolved)
+          .or_default()
+          .push((reexporting_file.clone(), export.clone()));
+      }
+    }
+
+    debug!(
+      "Built re-export index with {} source files re-exported from elsewhere",
+      index.len()
+    );
+    self.reexport_index = index;
+
+    Ok(())
   }
 
   /// Build reverse import index: (source_file, symbol) -> [(importing_file, local_name, from_module)]
@@ -2039,5 +2126,160 @@ type Props = ui.ButtonProps;
       .find_node_at_line(&file_path, 1, 0)
       .expect("Should not error");
     assert_eq!(result, vec!["MyConst".to_string()]);
+  }
+
+  /// Build an analyzer over a real (temporary) workspace containing `files`,
+  /// with a single project rooted at `src`.
+  fn analyzer_over_files(files: &[(&str, &str)]) -> (tempfile::TempDir, WorkspaceAnalyzer) {
+    let tmp = tempfile::TempDir::new().expect("failed to create temp dir");
+    let cwd = tmp
+      .path()
+      .canonicalize()
+      .expect("failed to canonicalize temp dir");
+
+    for (rel, contents) in files {
+      let path = cwd.join(rel);
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+      fs::write(&path, contents).unwrap();
+    }
+
+    let project = Project {
+      name: "lib".to_string(),
+      root: PathBuf::from("src"),
+      source_root: PathBuf::from("src"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    };
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(vec![project], &cwd, profiler)
+      .expect("failed to create workspace analyzer");
+
+    (tmp, analyzer)
+  }
+
+  /// Sorted `(reexporting_file, exported_name, local_name)` triples for a source file.
+  fn reexporters_of(
+    analyzer: &WorkspaceAnalyzer,
+    source: &str,
+  ) -> Vec<(String, String, Option<String>)> {
+    let mut entries: Vec<_> = analyzer
+      .reexport_index
+      .get(Path::new(source))
+      .map(|v| v.as_slice())
+      .unwrap_or(&[])
+      .iter()
+      .map(|(file, export)| {
+        (
+          file.to_string_lossy().replace('\\', "/"),
+          export.exported_name.clone(),
+          export.local_name.clone(),
+        )
+      })
+      .collect();
+    entries.sort();
+    entries
+  }
+
+  #[test]
+  fn test_build_reexport_index_named_wildcard_and_aliased() {
+    let (_tmp, analyzer) = analyzer_over_files(&[
+      (
+        "src/utils.ts",
+        "export function helper() {\n  return 1;\n}\n",
+      ),
+      ("src/other.ts", "export const other = 2;\n"),
+      // Barrel: named re-export of utils, wildcard re-export of other
+      (
+        "src/index.ts",
+        "export { helper } from './utils';\nexport * from './other';\n",
+      ),
+      // Second barrel: aliased re-export, plus a re-export of the first barrel
+      (
+        "src/public-api.ts",
+        "export { helper as publicHelper } from './utils';\nexport * from './index';\n",
+      ),
+      // Plain import (not a re-export) must NOT land in the index
+      (
+        "src/consumer.ts",
+        "import { helper } from './utils';\nexport const used = helper();\n",
+      ),
+      // External re-export must NOT land in the index
+      (
+        "src/external.ts",
+        "export { something } from 'some-external-package';\n",
+      ),
+    ]);
+
+    // utils.ts is re-exported by index.ts (named) and public-api.ts (aliased)
+    assert_eq!(
+      reexporters_of(&analyzer, "src/utils.ts"),
+      vec![
+        (
+          "src/index.ts".to_string(),
+          "helper".to_string(),
+          Some("helper".to_string())
+        ),
+        (
+          "src/public-api.ts".to_string(),
+          "publicHelper".to_string(),
+          Some("helper".to_string())
+        ),
+      ],
+      "index: {:?}",
+      analyzer.reexport_index
+    );
+
+    // other.ts is re-exported by index.ts via a wildcard (exported_name == "*")
+    assert_eq!(
+      reexporters_of(&analyzer, "src/other.ts"),
+      vec![("src/index.ts".to_string(), "*".to_string(), None)]
+    );
+
+    // Barrel-of-barrel: index.ts is re-exported by public-api.ts
+    assert_eq!(
+      reexporters_of(&analyzer, "src/index.ts"),
+      vec![("src/public-api.ts".to_string(), "*".to_string(), None)]
+    );
+
+    // Files that are only imported (never re-exported) are absent
+    assert!(
+      !analyzer
+        .reexport_index
+        .contains_key(Path::new("src/consumer.ts")),
+      "consumer.ts is not re-exported by anyone"
+    );
+
+    // Unresolvable / external specifiers never create entries
+    assert!(
+      analyzer.reexport_index.keys().all(|k| k.starts_with("src")),
+      "index must only contain workspace-relative paths: {:?}",
+      analyzer.reexport_index.keys().collect::<Vec<_>>()
+    );
+  }
+
+  #[test]
+  fn test_build_reexport_index_keys_match_analyzer_paths() {
+    // The index keys must be the same workspace-relative paths used everywhere else
+    // (`exports` / `imports` / `import_index`), otherwise lookups silently miss.
+    let (_tmp, analyzer) = analyzer_over_files(&[
+      ("src/nested/deep/utils.ts", "export const value = 1;\n"),
+      (
+        "src/nested/index.ts",
+        "export { value } from './deep/utils';\n",
+      ),
+    ]);
+
+    let key = PathBuf::from("src/nested/deep/utils.ts");
+    assert!(
+      analyzer.exports.contains_key(&key),
+      "sanity: exports are keyed by workspace-relative paths"
+    );
+    assert!(
+      analyzer.reexport_index.contains_key(&key),
+      "re-export index must use the same keys as `exports`: {:?}",
+      analyzer.reexport_index.keys().collect::<Vec<_>>()
+    );
   }
 }

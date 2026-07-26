@@ -100,15 +100,18 @@ fn find_affected_internal(
     });
   }
 
-  // Step 1b: Apply Nx namedInputs — collect global-invalidation triggers and
-  // apply negation filtering.
+  // Step 1b: Apply the workspace's global-invalidation config — Nx
+  // `namedInputs` or Turborepo `globalDependencies`, whichever the workspace
+  // uses (see `resolve_global_inputs` for precedence) — collecting global
+  // triggers and applying negation filtering.
   //
   // When --report is NOT requested, a single global trigger lets us match
-  // `nx affected` immediately without running the expensive semantic pipeline.
-  // When --report IS requested, we continue through semantic analysis even on
-  // a global run so the HTML can separate "globally invalidated" from
-  // "semantically affected" projects — the whole point of the report.
-  let resolved_inputs = named_inputs::resolve_from_nx_json(&config.cwd);
+  // `nx affected` / `turbo run --filter` immediately without running the
+  // expensive semantic pipeline. When --report IS requested, we continue through
+  // semantic analysis even on a global run so the HTML can separate "globally
+  // invalidated" from "semantically affected" projects — the whole point of the
+  // report.
+  let resolved_inputs = named_inputs::resolve_global_inputs(&config.cwd);
 
   // Detect the package manager up front so dependency-manifest files (the
   // package manager's lockfile and the workspace-root package.json) can be
@@ -124,7 +127,8 @@ fn find_affected_internal(
   // (Step 5c) computes the real affected set instead of short-circuiting to "all
   // projects". The exemption is gated on that analysis actually running: under
   // `LockfileStrategy::None` there is no Step 5c, so a manifest listed in
-  // `sharedGlobals` stays a global trigger rather than being silently dropped
+  // `sharedGlobals` / `globalDependencies` stays a global trigger rather than
+  // being silently dropped
   // (which would flip all → 0 — the same under-inclusion the package.json guard
   // prevents). Any *other* global trigger (.nvmrc, nx.json, ...) always
   // invalidates every project.

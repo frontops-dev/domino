@@ -279,11 +279,20 @@ impl WorkspaceAnalyzer {
       // Continue anyway — partial AST may still be useful
     }
 
+    // Move the `Program` into the arena before building semantic data. The AST
+    // root that `Parser::parse` returns lives in this function's stack frame,
+    // and `SemanticBuilder` records it as the root `AstKind::Program` node — so
+    // building from `&parse_result.program` leaves the returned `Semantic`
+    // holding a reference into a frame that dies on return. Once the stack is
+    // reused, the Program node reads back a garbage span (typically `0..0`),
+    // which silently breaks symbol resolution at the top of a file.
+    let program = &*allocator.alloc(parse_result.program);
+
     let semantic_builder = SemanticBuilder::new()
       .with_cfg(true)
       .with_check_syntax_error(false);
 
-    let semantic_ret = semantic_builder.build(&parse_result.program);
+    let semantic_ret = semantic_builder.build(program);
 
     if !semantic_ret.errors.is_empty() {
       debug!(
@@ -293,8 +302,8 @@ impl WorkspaceAnalyzer {
       );
     }
 
-    let imports = Self::extract_imports(&parse_result.program, &relative_path);
-    let exports = Self::extract_exports(&parse_result.program);
+    let imports = Self::extract_imports(program, &relative_path);
+    let exports = Self::extract_exports(program);
 
     // Safety: We're storing the semantic data with its allocator, which is valid
     // as long as the FileSemanticData struct exists
@@ -340,10 +349,14 @@ impl WorkspaceAnalyzer {
       // enclosing declaration at a deleted line.
     }
 
+    // Arena-allocate the AST root for the same reason as `parse_single_file`:
+    // otherwise the root Program node dangles into this frame after return.
+    let program = &*allocator.alloc(parse_result.program);
+
     let semantic_ret = SemanticBuilder::new()
       .with_cfg(true)
       .with_check_syntax_error(false)
-      .build(&parse_result.program);
+      .build(program);
 
     // Safety: identical to `parse_single_file` — the semantic data borrows from
     // `allocator`, which is moved into the returned `FileSemanticData` and lives
@@ -1138,6 +1151,59 @@ impl WorkspaceAnalyzer {
 mod tests {
   use super::*;
   use std::path::Path;
+
+  /// Overwrite the stack region that `parse_single_file`'s frame occupied, so
+  /// that a Program node still pointing into that frame reads back garbage
+  /// rather than stale-but-intact bytes. Without this the use-after-free is
+  /// invisible most of the time.
+  #[inline(never)]
+  fn clobber_stack() -> u8 {
+    let mut buf = [0xAAu8; 64 * 1024];
+    for (i, b) in buf.iter_mut().enumerate() {
+      *b = (i % 251) as u8;
+    }
+    buf[buf.len() - 1]
+  }
+
+  /// The AST root must live in the arena, not in the stack frame of whichever
+  /// function parsed the file. `SemanticBuilder` records the `Program` as the
+  /// root node, so if it is built from a stack local the node dangles once the
+  /// parsing function returns: the span reads back as `0..0`, which still
+  /// "contains" offset 0 and therefore wins the smallest-enclosing-node search
+  /// in `find_top_level_symbols`, silently yielding no symbol for anything on
+  /// line 1. That surfaced as intermittently missing affected projects.
+  #[test]
+  fn program_node_span_survives_parse_function_return() {
+    let source = "export const Widget = () => <div>modified</div>;\n";
+    let file_data =
+      WorkspaceAnalyzer::parse_source(Path::new("Widget.tsx"), source.to_string()).unwrap();
+
+    std::hint::black_box(clobber_stack());
+
+    let program_span = file_data
+      .semantic
+      .nodes()
+      .iter()
+      .find_map(|node| match node.kind() {
+        AstKind::Program(_) => Some(node.kind().span()),
+        _ => None,
+      })
+      .expect("semantic data should contain a Program node");
+
+    assert_eq!(
+      (program_span.start, program_span.end),
+      (0, source.len() as u32),
+      "Program node span was corrupted after the parsing function returned — \
+       the AST root is not arena-allocated"
+    );
+
+    let symbols = WorkspaceAnalyzer::find_top_level_symbols(&file_data, 1, 0).unwrap();
+    assert_eq!(
+      symbols,
+      vec!["Widget".to_string()],
+      "symbol on line 1 should resolve after the parsing function returned"
+    );
+  }
 
   #[test]
   fn test_find_node_at_line_with_column_offset() {

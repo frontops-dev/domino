@@ -133,6 +133,8 @@ The true-affected detection follows this pipeline (see `src/core.rs`):
 
 ### Critical Data Structures
 
+**Re-export Index** (`WorkspaceAnalyzer::reexport_index`): maps resolved source file → `[(reexporting_file, export)]`, built once at construction alongside the import index. Replaces the per-lookup scan of all workspace exports when tracing barrel-file re-export chains; `find_refs_recursive` does a single map lookup instead.
+
 **Import Index** (`WorkspaceAnalyzer::import_index`):
 
 - Maps `(source_file, symbol_name)` to all locations that import it

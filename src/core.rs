@@ -392,6 +392,19 @@ fn find_affected_internal(
     debug!("Processing {} asset files", asset_files.len());
     let asset_finder = AssetReferenceFinder::new(&config.cwd);
 
+    // Scan the workspace exactly once for the whole batch of changed assets,
+    // instead of once per asset (a full directory walk + re-reading every
+    // source file, per asset, was the dominant cost for PRs touching many
+    // assets).
+    let asset_paths: Vec<PathBuf> = asset_files.iter().map(|f| f.file_path.clone()).collect();
+    let mut asset_references_by_path = match asset_finder.find_references_batch(&asset_paths) {
+      Ok(references) => references,
+      Err(e) => {
+        debug!("Error finding references for asset batch: {}", e);
+        FxHashMap::default()
+      }
+    };
+
     for asset_file in &asset_files {
       let asset_path = &asset_file.file_path;
 
@@ -411,126 +424,90 @@ fn find_affected_internal(
         }
       }
 
-      // Find source files that reference this asset
-      match asset_finder.find_references(asset_path) {
-        Ok(references) => {
-          debug!(
-            "Found {} references to asset {:?}",
-            references.len(),
-            asset_path
-          );
+      // Find source files that reference this asset — looked up from the
+      // single batched scan performed above for all changed assets, rather
+      // than re-scanning the workspace per asset.
+      {
+        let references = asset_references_by_path
+          .remove(asset_path)
+          .unwrap_or_default();
+        debug!(
+          "Found {} references to asset {:?}",
+          references.len(),
+          asset_path
+        );
 
-          for reference in references {
-            let source_file_rel = &reference.source_file;
+        for reference in references {
+          let source_file_rel = &reference.source_file;
 
-            // Mark all referencing projects as affected
-            let ref_packages = project_index.get_package_names_by_path(source_file_rel);
-            for pkg in &ref_packages {
-              affected_packages.insert(pkg.clone());
+          // Mark all referencing projects as affected
+          let ref_packages = project_index.get_package_names_by_path(source_file_rel);
+          for pkg in &ref_packages {
+            affected_packages.insert(pkg.clone());
 
-              // Record asset change cause if generating report
-              if generate_report {
-                project_causes
-                  .entry(pkg.clone())
-                  .or_default()
-                  .push(AffectCause::AssetChange {
-                    asset_file: asset_path.clone(),
-                    referenced_in: source_file_rel.clone(),
-                    line: reference.line,
-                  });
-              }
-            }
-
-            // Find the import binding that references this asset
-            // The asset is referenced via an import like:
-            //   import diamondLottie from '../../../assets/lotties/analysis/diamond.json';
-            // We need to find the local name (diamondLottie) and then trace all exports that use it
-
-            // Get the asset filename to match against import paths
-            let asset_filename = asset_path
-              .file_name()
-              .and_then(|n| n.to_str())
-              .unwrap_or("");
-
-            // Look for an import in this file that matches the asset path
-            let import_local_name =
-              analyzer
-                .imports
-                .get(source_file_rel)
-                .and_then(|file_imports| {
-                  file_imports.iter().find_map(|import| {
-                    // Check if the import's from_module contains the asset filename
-                    if import.from_module.contains(asset_filename) {
-                      debug!(
-                        "Found import '{}' (local: '{}') matching asset '{}'",
-                        import.from_module, import.local_name, asset_filename
-                      );
-                      Some(import.local_name.clone())
-                    } else {
-                      None
-                    }
-                  })
+            // Record asset change cause if generating report
+            if generate_report {
+              project_causes
+                .entry(pkg.clone())
+                .or_default()
+                .push(AffectCause::AssetChange {
+                  asset_file: asset_path.clone(),
+                  referenced_in: source_file_rel.clone(),
+                  line: reference.line,
                 });
+            }
+          }
 
-            if let Some(local_name) = import_local_name {
-              debug!(
-                "Asset import local name: '{}' in {:?}",
-                local_name, source_file_rel
-              );
+          // Find the import binding that references this asset
+          // The asset is referenced via an import like:
+          //   import diamondLottie from '../../../assets/lotties/analysis/diamond.json';
+          // We need to find the local name (diamondLottie) and then trace all exports that use it
 
-              // Find exported symbols that use this import
-              // E.g., if "diamondLottie" is imported and used by "Diamond" export,
-              // we need to trace "Diamond" to find affected projects
-              match analyzer.find_exported_symbols_using(source_file_rel, &local_name) {
-                Ok(exported_symbols) if !exported_symbols.is_empty() => {
+          // Get the asset filename to match against import paths
+          let asset_filename = asset_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+          // Look for an import in this file that matches the asset path
+          let import_local_name = analyzer
+            .imports
+            .get(source_file_rel)
+            .and_then(|file_imports| {
+              file_imports.iter().find_map(|import| {
+                // Check if the import's from_module contains the asset filename
+                if import.from_module.contains(asset_filename) {
                   debug!(
-                    "Found {} exported symbols using '{}': {:?}",
-                    exported_symbols.len(),
-                    local_name,
-                    exported_symbols
+                    "Found import '{}' (local: '{}') matching asset '{}'",
+                    import.from_module, import.local_name, asset_filename
                   );
-
-                  // Trace each exported symbol that uses the import
-                  for export_symbol in exported_symbols {
-                    let mut visited = FxHashSet::default();
-                    let mut state = AffectedState {
-                      affected_packages: &mut affected_packages,
-                      project_causes: if generate_report {
-                        Some(&mut project_causes)
-                      } else {
-                        None
-                      },
-                      visited: &mut visited,
-                    };
-
-                    debug!(
-                      "Tracing exported symbol '{}' from asset reference",
-                      export_symbol
-                    );
-
-                    if let Err(e) = process_changed_symbol(
-                      &analyzer,
-                      &reference_finder,
-                      source_file_rel,
-                      &export_symbol,
-                      &project_index,
-                      &mut state,
-                    ) {
-                      debug!(
-                        "Error processing exported symbol '{}' from asset reference: {}",
-                        export_symbol, e
-                      );
-                    }
-                  }
+                  Some(import.local_name.clone())
+                } else {
+                  None
                 }
-                Ok(_) => {
-                  // No exported symbols use this import - the import is unused or only used internally
-                  // Still try to trace the import symbol itself in case it's directly exported
-                  debug!(
-                    "No exported symbols use '{}', tracing import symbol directly",
-                    local_name
-                  );
+              })
+            });
 
+          if let Some(local_name) = import_local_name {
+            debug!(
+              "Asset import local name: '{}' in {:?}",
+              local_name, source_file_rel
+            );
+
+            // Find exported symbols that use this import
+            // E.g., if "diamondLottie" is imported and used by "Diamond" export,
+            // we need to trace "Diamond" to find affected projects
+            match analyzer.find_exported_symbols_using(source_file_rel, &local_name) {
+              Ok(exported_symbols) if !exported_symbols.is_empty() => {
+                debug!(
+                  "Found {} exported symbols using '{}': {:?}",
+                  exported_symbols.len(),
+                  local_name,
+                  exported_symbols
+                );
+
+                // Trace each exported symbol that uses the import
+                for export_symbol in exported_symbols {
                   let mut visited = FxHashSet::default();
                   let mut state = AffectedState {
                     affected_packages: &mut affected_packages,
@@ -542,37 +519,72 @@ fn find_affected_internal(
                     visited: &mut visited,
                   };
 
+                  debug!(
+                    "Tracing exported symbol '{}' from asset reference",
+                    export_symbol
+                  );
+
                   if let Err(e) = process_changed_symbol(
                     &analyzer,
                     &reference_finder,
                     source_file_rel,
-                    &local_name,
+                    &export_symbol,
                     &project_index,
                     &mut state,
                   ) {
                     debug!(
-                      "Error processing import symbol '{}' from asset reference: {}",
-                      local_name, e
+                      "Error processing exported symbol '{}' from asset reference: {}",
+                      export_symbol, e
                     );
                   }
                 }
-                Err(e) => {
+              }
+              Ok(_) => {
+                // No exported symbols use this import - the import is unused or only used internally
+                // Still try to trace the import symbol itself in case it's directly exported
+                debug!(
+                  "No exported symbols use '{}', tracing import symbol directly",
+                  local_name
+                );
+
+                let mut visited = FxHashSet::default();
+                let mut state = AffectedState {
+                  affected_packages: &mut affected_packages,
+                  project_causes: if generate_report {
+                    Some(&mut project_causes)
+                  } else {
+                    None
+                  },
+                  visited: &mut visited,
+                };
+
+                if let Err(e) = process_changed_symbol(
+                  &analyzer,
+                  &reference_finder,
+                  source_file_rel,
+                  &local_name,
+                  &project_index,
+                  &mut state,
+                ) {
                   debug!(
-                    "Error finding exported symbols using '{}': {}",
+                    "Error processing import symbol '{}' from asset reference: {}",
                     local_name, e
                   );
                 }
               }
-            } else {
-              debug!(
-                "No import found for asset '{}' in {:?}",
-                asset_filename, source_file_rel
-              );
+              Err(e) => {
+                debug!(
+                  "Error finding exported symbols using '{}': {}",
+                  local_name, e
+                );
+              }
             }
+          } else {
+            debug!(
+              "No import found for asset '{}' in {:?}",
+              asset_filename, source_file_rel
+            );
           }
-        }
-        Err(e) => {
-          debug!("Error finding references to asset {:?}: {}", asset_path, e);
         }
       }
     }

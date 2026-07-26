@@ -4330,6 +4330,9 @@ export function run() {
 /// consults project roots, so the globalDependencies tests below can use real
 /// discovery; semantic tracing does, so tests that exercise tracing declare
 /// relative-rooted projects explicitly (as every other test in this file does).
+/// This workaround is expected to go away once the real fix for the
+/// absolute-vs-relative root mismatch lands on branch
+/// `fix/relative-project-roots-generic-workspaces`.
 fn turbo_projects() -> Vec<Project> {
   ["app", "tools", "ui"]
     .iter()
@@ -4587,7 +4590,7 @@ fn test_nx_named_inputs_win_over_turbo_global_dependencies() {
   let config = turbo_config_for(&root, projects, "main");
 
   let profiler = Arc::new(Profiler::new(false));
-  let affected = find_affected(config, profiler)
+  let affected = find_affected(config, profiler.clone())
     .expect("find_affected failed")
     .affected_projects;
 
@@ -4598,6 +4601,31 @@ fn test_nx_named_inputs_win_over_turbo_global_dependencies() {
      Got: {:?}",
     affected
   );
+
+  // Positive control: this test would pass vacuously if the Nx global-invalidation
+  // path were silently broken (e.g. always resolving to `None`), since an empty
+  // global-trigger set also means "tools" isn't affected. Prove the Nx path is
+  // actually wired up by changing a file the Nx `sharedGlobals` DOES list
+  // (`.nvmrc`) and confirming it DOES globally invalidate every project.
+  fs::write(root.join(".nvmrc"), "20\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "bump node version"]);
+
+  let projects_after_nvmrc = domino::workspace::discover_projects(&root).unwrap();
+  let config_after_nvmrc = turbo_config_for(&root, projects_after_nvmrc, "main");
+  let affected_after_nvmrc = find_affected(config_after_nvmrc, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  for project in ["ui", "app", "tools"] {
+    assert!(
+      affected_after_nvmrc.contains(&project.to_string()),
+      "{project} MUST be affected: `.nvmrc` matches nx.json's sharedGlobals \
+       pattern, so the Nx global-invalidation path must mark every project \
+       affected. Got: {:?}",
+      affected_after_nvmrc
+    );
+  }
 }
 
 /// Consistency with the Nx dependency-manifest exemption (see

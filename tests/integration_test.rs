@@ -2451,19 +2451,6 @@ export function run() {
 /// `node16`/`nodenext` module resolution would require the explicit `.mts` extension.
 #[test]
 fn test_mts_source_file_traced_across_projects() {
-/// Regression/characterization test for batching multiple changed assets in a
-/// single diff: each asset's references must still be attributed to the
-/// correct project, and unrelated projects must not be falsely marked
-/// affected.
-///
-/// Reproduces a PR that changes several unrelated assets at once:
-/// - `icon1.svg` is referenced only by `proj-a`
-/// - `icon2.svg` is referenced only by `proj-b`
-/// - `icon3.svg` is referenced by nobody
-///
-/// `proj-c` doesn't reference (or own) any of them and must stay unaffected.
-#[test]
-fn test_batch_asset_scan_attributes_references_per_project() {
   let tmp = TempDir::new().expect("Failed to create temp dir");
   let root = tmp
     .path()
@@ -2473,12 +2460,6 @@ fn test_batch_asset_scan_attributes_references_per_project() {
   let proj_a_src = root.join("proj-a/src");
   let proj_b_src = root.join("proj-b/src");
   let proj_c_src = root.join("proj-c/src");
-  // -- scaffold monorepo ------------------------------------------------
-  let assets_dir = root.join("assets");
-  let proj_a_src = root.join("proj-a/src");
-  let proj_b_src = root.join("proj-b/src");
-  let proj_c_src = root.join("proj-c/src");
-  fs::create_dir_all(&assets_dir).unwrap();
   fs::create_dir_all(&proj_a_src).unwrap();
   fs::create_dir_all(&proj_b_src).unwrap();
   fs::create_dir_all(&proj_c_src).unwrap();
@@ -2487,19 +2468,6 @@ fn test_batch_asset_scan_attributes_references_per_project() {
     proj_a_src.join("utils.mts"),
     r#"export function computeValue(): number {
   return 1;
-  // Assets live outside any project root, so being "affected" here can only
-  // come from the reference scan, not from direct ownership.
-  fs::write(assets_dir.join("icon1.svg"), "<svg>one</svg>").unwrap();
-  fs::write(assets_dir.join("icon2.svg"), "<svg>two</svg>").unwrap();
-  fs::write(assets_dir.join("icon3.svg"), "<svg>three</svg>").unwrap(); // unreferenced
-
-  // proj-a references icon1.svg only
-  fs::write(
-    proj_a_src.join("widget.ts"),
-    r#"import icon1 from '../../assets/icon1.svg';
-
-export function Widget() {
-  return icon1;
 }
 "#,
   )
@@ -2516,13 +2484,6 @@ export function Widget() {
 
 export function run() {
   return computeValue();
-  // proj-b references icon2.svg only
-  fs::write(
-    proj_b_src.join("panel.ts"),
-    r#"import icon2 from '../../assets/icon2.svg';
-
-export function Panel() {
-  return icon2;
 }
 "#,
   )
@@ -2532,17 +2493,11 @@ export function Panel() {
     proj_c_src.join("index.ts"),
     r#"export function unrelated() {
   return 'unrelated';
-  // proj-c references no asset at all
-  fs::write(
-    proj_c_src.join("other.ts"),
-    r#"export function Other() {
-  return 'no asset references here';
 }
 "#,
   )
   .unwrap();
 
-  // -- init git repo & baseline commit -----------------------------------
   git_in(&root, &["init"]);
   git_in(&root, &["config", "user.email", "test@test.com"]);
   git_in(&root, &["config", "user.name", "Test"]);
@@ -2562,16 +2517,6 @@ export function Panel() {
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-m", "modify computeValue"]);
 
-  // -- create feature branch that changes ALL three assets in one commit --
-  git_in(&root, &["checkout", "-b", "feature"]);
-
-  fs::write(assets_dir.join("icon1.svg"), "<svg>one-updated</svg>").unwrap();
-  fs::write(assets_dir.join("icon2.svg"), "<svg>two-updated</svg>").unwrap();
-  fs::write(assets_dir.join("icon3.svg"), "<svg>three-updated</svg>").unwrap();
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "update icons"]);
-
-  // -- run find_affected --------------------------------------------------
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
@@ -2581,7 +2526,6 @@ export function Panel() {
       Project {
         name: "proj-a".to_string(),
         root: PathBuf::from("proj-a"),
-        root: PathBuf::from("proj-a/src"),
         source_root: PathBuf::from("proj-a/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2590,7 +2534,6 @@ export function Panel() {
       Project {
         name: "proj-b".to_string(),
         root: PathBuf::from("proj-b"),
-        root: PathBuf::from("proj-b/src"),
         source_root: PathBuf::from("proj-b/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2599,7 +2542,6 @@ export function Panel() {
       Project {
         name: "proj-c".to_string(),
         root: PathBuf::from("proj-c"),
-        root: PathBuf::from("proj-c/src"),
         source_root: PathBuf::from("proj-c/src"),
         ts_config: None,
         implicit_dependencies: vec![],
@@ -2618,19 +2560,161 @@ export function Panel() {
   assert!(
     affected.contains(&"proj-a".to_string()),
     "proj-a should be affected (utils.mts was changed). Got: {:?}",
-    "proj-a should be affected (references changed icon1.svg). Got: {:?}",
     affected
   );
   assert!(
     affected.contains(&"proj-b".to_string()),
     "proj-b should be affected (imports computeValue from proj-a's utils.mts, which must be \
      traced as a source file, not dropped as an asset). Got: {:?}",
-    "proj-b should be affected (references changed icon2.svg). Got: {:?}",
     affected
   );
   assert!(
     !affected.contains(&"proj-c".to_string()),
     "proj-c is unrelated and must NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+/// Regression/characterization test for batching multiple changed assets in a
+/// single diff: each asset's references must still be attributed to the
+/// correct project, and unrelated projects must not be falsely marked
+/// affected.
+///
+/// Reproduces a PR that changes several unrelated assets at once:
+/// - `icon1.svg` is referenced only by `proj-a`
+/// - `icon2.svg` is referenced only by `proj-b`
+/// - `icon3.svg` is referenced by nobody
+///
+/// `proj-c` doesn't reference (or own) any of them and must stay unaffected.
+#[test]
+fn test_batch_asset_scan_attributes_references_per_project() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo ------------------------------------------------
+  let assets_dir = root.join("assets");
+  let proj_a_src = root.join("proj-a/src");
+  let proj_b_src = root.join("proj-b/src");
+  let proj_c_src = root.join("proj-c/src");
+  fs::create_dir_all(&assets_dir).unwrap();
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  // Assets live outside any project root, so being "affected" here can only
+  // come from the reference scan, not from direct ownership.
+  fs::write(assets_dir.join("icon1.svg"), "<svg>one</svg>").unwrap();
+  fs::write(assets_dir.join("icon2.svg"), "<svg>two</svg>").unwrap();
+  fs::write(assets_dir.join("icon3.svg"), "<svg>three</svg>").unwrap(); // unreferenced
+
+  // proj-a references icon1.svg only
+  fs::write(
+    proj_a_src.join("widget.ts"),
+    r#"import icon1 from '../../assets/icon1.svg';
+
+export function Widget() {
+  return icon1;
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-b references icon2.svg only
+  fs::write(
+    proj_b_src.join("panel.ts"),
+    r#"import icon2 from '../../assets/icon2.svg';
+
+export function Panel() {
+  return icon2;
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-c references no asset at all
+  fs::write(
+    proj_c_src.join("other.ts"),
+    r#"export function Other() {
+  return 'no asset references here';
+}
+"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch that changes ALL three assets in one commit --
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(assets_dir.join("icon1.svg"), "<svg>one-updated</svg>").unwrap();
+  fs::write(assets_dir.join("icon2.svg"), "<svg>two-updated</svg>").unwrap();
+  fs::write(assets_dir.join("icon3.svg"), "<svg>three-updated</svg>").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "update icons"]);
+
+  // -- run find_affected --------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "proj-a".to_string(),
+        root: PathBuf::from("proj-a/src"),
+        source_root: PathBuf::from("proj-a/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-b".to_string(),
+        root: PathBuf::from("proj-b/src"),
+        source_root: PathBuf::from("proj-b/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-c".to_string(),
+        root: PathBuf::from("proj-c/src"),
+        source_root: PathBuf::from("proj-c/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (references changed icon1.svg). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj-b".to_string()),
+    "proj-b should be affected (references changed icon2.svg). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c should NOT be affected (references no changed asset). Got: {:?}",
     affected
   );
 }
@@ -3012,7 +3096,6 @@ export function main() {
   assert!(
     !affected.contains(&"other".to_string()),
     "other is unrelated and must NOT be affected. Got: {:?}",
-    "proj-c should NOT be affected (references no changed asset). Got: {:?}",
     affected
   );
 }

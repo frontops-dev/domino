@@ -68,17 +68,26 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
       ".tsx".into(),
       ".js".into(),
       ".jsx".into(),
+      ".mts".into(),
+      ".mjs".into(),
+      ".cts".into(),
+      ".cjs".into(),
       ".d.ts".into(),
+      ".d.mts".into(),
+      ".d.cts".into(),
     ],
-    // Map .js/.jsx imports to their TypeScript equivalents.
-    // Handles the common ESM pattern where .ts files import with .js extensions
-    // (e.g., import { foo } from './bar.js' where the actual file is bar.ts).
+    // Map .js/.jsx/.mjs/.cjs imports to their TypeScript equivalents.
+    // Handles the ESM pattern where TS files import with runtime extensions
+    // (e.g. `import { foo } from './bar.js'` where the source is bar.ts, or
+    // `'./bar.mjs'` where the source is bar.mts).
     extension_alias: vec![
       (
         ".js".into(),
         vec![".ts".into(), ".tsx".into(), ".js".into()],
       ),
       (".jsx".into(), vec![".tsx".into(), ".jsx".into()]),
+      (".mjs".into(), vec![".mts".into(), ".mjs".into()]),
+      (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
     ],
     // Resolve bare package imports to source roots within the monorepo.
     alias,

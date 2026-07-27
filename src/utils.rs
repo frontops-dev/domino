@@ -4,8 +4,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-/// Extensions considered as source files (analyzed by Oxc parser)
-const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
+/// Extensions considered as source files (analyzed by Oxc parser).
+/// Includes the explicit ESM/CJS TypeScript & JavaScript extensions
+/// (`.mts`/`.mjs`/`.cts`/`.cjs`) — without these, files using them are
+/// misclassified as assets and skip semantic analysis entirely.
+const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "mjs", "cts", "cjs"];
 
 /// Check if a file is a source file (TypeScript/JavaScript)
 /// These are files that can be parsed by the Oxc parser
@@ -230,6 +233,10 @@ mod tests {
     assert!(is_source_file(Path::new("utils.js")));
     assert!(is_source_file(Path::new("app.jsx")));
     assert!(is_source_file(Path::new("path/to/file.ts")));
+    assert!(is_source_file(Path::new("contract.mts")));
+    assert!(is_source_file(Path::new("worker.mjs")));
+    assert!(is_source_file(Path::new("legacy.cts")));
+    assert!(is_source_file(Path::new("legacy.cjs")));
 
     // Non-source files
     assert!(!is_source_file(Path::new("styles.css")));

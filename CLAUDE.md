@@ -425,6 +425,14 @@ cargo test --lib --no-default-features
 cargo test --no-default-features --test integration_test -- --test-threads=1
 cargo test --no-default-features --test cli_test -- --test-threads=1
 
+# Run doc-tests. ALWAYS pass --no-default-features. With `napi-bindings` on, a
+# doctest binary cannot link the host-provided `napi_*` symbols, and rustdoc
+# counts that link failure as the expected compile failure. Any `compile_fail`
+# doctest (e.g. the FileSemanticData soundness guard) therefore still reports
+# "ok" even when the snippet it is supposed to reject compiles again — i.e. the
+# regression it exists to catch is silently masked.
+cargo test --doc --no-default-features
+
 # For JavaScript/Node.js bindings
 yarn test
 

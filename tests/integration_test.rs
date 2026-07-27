@@ -1,3 +1,5 @@
+mod common;
+
 use domino::core::{find_affected, find_affected_with_report};
 use domino::profiler::Profiler;
 use domino::report::generate_html_report;
@@ -35,54 +37,9 @@ fn git_command(args: &[&str]) -> String {
   String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// Ensure the fixture repo is initialized with git
+/// Ensure the fixture repo exists and is initialized with git
 fn ensure_git_repo() {
-  let fixture = fixture_path();
-  let git_dir = fixture.join(".git");
-
-  // If .git directory doesn't exist, initialize the repo
-  if !git_dir.exists() {
-    // Initialize git repo
-    Command::new("git")
-      .args(["init"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to init git repo");
-
-    // Configure git
-    Command::new("git")
-      .args(["config", "user.email", "test@example.com"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to configure git email");
-
-    Command::new("git")
-      .args(["config", "user.name", "Test User"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to configure git name");
-
-    // Rename default branch to main (for consistency)
-    Command::new("git")
-      .args(["branch", "-M", "main"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to rename branch to main");
-
-    // Add all files
-    Command::new("git")
-      .args(["add", "."])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to add files");
-
-    // Create initial commit
-    Command::new("git")
-      .args(["commit", "-m", "Initial commit"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to create initial commit");
-  }
+  common::ensure_fixture_git_repo(&fixture_path());
 }
 
 /// Setup: Create a test branch and reset to main after test
@@ -293,22 +250,59 @@ fn test_three_dot_diff_behavior() {
   // Setup: ensure git repo is initialized
   ensure_git_repo();
 
+  // This test commits directly to the fixture's `main` (unlike TestBranch
+  // tests), so restore everything via Drop — it runs even when an assertion
+  // below panics, keeping `main` at the canonical scaffolded content.
+  struct ThreeDotCleanup;
+  impl Drop for ThreeDotCleanup {
+    fn drop(&mut self) {
+      let fixture = fixture_path();
+      let git = |args: &[&str]| {
+        let _ = Command::new("git")
+          .args(args)
+          .current_dir(&fixture)
+          .output();
+      };
+      git(&["checkout", "main"]);
+      git(&["branch", "-D", "feature-branch"]);
+      let _ = fs::write(
+        fixture.join("proj2/index.ts"),
+        common::fixture_file_content("proj2/index.ts"),
+      );
+      git(&["add", "proj2/index.ts"]);
+      let staged = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&fixture)
+        .output();
+      if staged.map(|o| !o.stdout.is_empty()).unwrap_or(false) {
+        git(&["commit", "-m", "Restore proj2/index.ts"]);
+      }
+    }
+  }
+  let _cleanup = ThreeDotCleanup;
+
   // Start from main branch
   git_command(&["checkout", "main"]);
 
-  // Create a feature branch
+  // Create a feature branch (delete leftover from an interrupted previous run)
+  let _ = Command::new("git")
+    .args(["branch", "-D", "feature-branch"])
+    .current_dir(fixture_path())
+    .output();
   git_command(&["checkout", "-b", "feature-branch"]);
 
-  // Make a change in the feature branch
+  // Make a change in the feature branch. Change `unusedFn` (which nothing
+  // imports) so proj2 can only become affected if main-side changes leak
+  // into the diff — the exact regression this test guards against.
   let file_path = fixture_path().join("proj1/index.ts");
   fs::write(
     &file_path,
     r#"export function proj1() {
-  return 'proj1-feature-change';
+  return 'proj1';
 }
 
 export function unusedFn() {
-  return 'unusedFn';
+  return 'unusedFn-feature-change';
 }
 "#,
   )
@@ -338,7 +332,16 @@ export function anotherFn() {
   )
   .expect("Failed to write file");
   git_command(&["add", "proj2/index.ts"]);
-  git_command(&["commit", "-m", "Main branch change"]);
+  // This commit lands on the fixture's main and persists across runs; on a
+  // repeat run the content is already there, so only commit when staged
+  let staged = Command::new("git")
+    .args(["status", "--porcelain"])
+    .current_dir(fixture_path())
+    .output()
+    .expect("Failed to check git status");
+  if !staged.stdout.is_empty() {
+    git_command(&["commit", "-m", "Main branch change"]);
+  }
 
   // Go back to feature branch
   git_command(&["checkout", "feature-branch"]);
@@ -400,9 +403,7 @@ export function anotherFn() {
     "proj2 should NOT be affected (change is on main, not in feature branch)"
   );
 
-  // Cleanup
-  git_command(&["checkout", "main"]);
-  let _ = git_command(&["branch", "-D", "feature-branch"]);
+  // Cleanup happens in ThreeDotCleanup::drop (panic-safe)
 }
 
 #[test]

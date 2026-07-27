@@ -160,6 +160,7 @@ domino affected --lockfile-strategy full
 4. **Reference Finding**: Recursively finds all cross-file references to those symbols
 5. **Lockfile Analysis**: Detects dependency version changes and traces affected imports
 6. **Project Mapping**: Maps affected files to their owning projects
+7. **Implicit Dependencies**: Expands Nx `implicitDependencies` against known project **names**, including glob patterns (`app-*`, `integration-*-module`) and `!` exclusions — same idea as Nx/minimatch, not path globs
 
 ## Performance
 

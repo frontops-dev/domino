@@ -26,10 +26,12 @@ cargo build --release
 cargo run -- affected --all
 
 # Run unit tests
-cargo test
+# (--no-default-features skips the napi-bindings feature: N-API symbols only
+# resolve inside a Node process, so test binaries can't link with it)
+cargo test --lib --no-default-features
 
 # Run integration tests (MUST be serial due to git state)
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
 
 # Format code
 cargo fmt
@@ -62,19 +64,86 @@ yarn lint
 
 ### Running Tests
 
-**Important**: Integration tests modify git state and MUST run serially:
+**Important**: Integration tests modify git state and MUST run serially. Test
+binaries must be built with `--no-default-features` (the napi-bindings feature
+references N-API symbols that only resolve inside a Node process, so test
+executables fail to link with it):
 
 ```bash
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
 ```
 
 Unit tests can run in parallel:
 
 ```bash
-cargo test --lib
+cargo test --lib --no-default-features
 ```
 
+The `tests/fixtures/monorepo` fixture is generated from scratch by
+`tests/common/mod.rs` on first use (it is gitignored — it contains its own
+`.git`, so committing it would turn it into a gitlink). Delete the directory
+to force a clean regeneration.
+
 When changing code, always check for related tests and adjust them accordingly.
+
+### Reproducing CI Failures Locally
+
+**Default to a local Linux container, not CI.** Pushing diagnostic commits to
+read CI output costs minutes per iteration and pollutes PR history. A container
+reproduces Linux-only and timing-dependent failures in seconds and gives an
+iteration loop you can run hundreds of times.
+
+```bash
+colima start --cpu 6 --memory 10   # once per machine
+unset DOCKER_HOST                  # DOCKER_HOST overrides the colima context
+
+docker --context colima run --rm \
+  -v "$PWD":/src -w /src \
+  -v domino-cargo-reg:/usr/local/cargo/registry \
+  -v domino-target-linux:/tmp/t -e CARGO_TARGET_DIR=/tmp/t \
+  rust:1.95-bookworm \
+  bash -c 'cargo test --lib --no-default-features'
+```
+
+Use the image tag matching `rust-toolchain.toml`. The named volumes cache the
+crate registry and Linux artifacts, so only the first run is slow.
+
+`Cargo.lock` is gitignored, so CI resolves dependencies fresh — rule version drift
+in or out early by comparing `cargo tree` against the CI log's "Locking" lines.
+
+To read one job's log while the run is still in progress (`gh run view --log-failed`
+refuses): `gh api repos/<owner>/<repo>/actions/jobs/<job-id>/logs`
+
+Three gotchas, each producing failures that look unrelated to your change:
+
+- **Git worktrees**: a worktree's `.git` is a *file* pointing at an absolute host
+  path that does not exist in the container, so every fixture-based test fails
+  with `fatal: not a git repository`. Copy the tree and give it a real repo:
+  `cp -a /src/. /work/ && cd /work && rm -f .git && git init -q . && git add -A && git commit -qm base`
+- **`tests/cli_test.rs` ignores `CARGO_TARGET_DIR`** — it resolves the binary at
+  `CARGO_MANIFEST_DIR/target/...`. If a host `target/` is visible in the
+  container it execs the macOS binary and fails with `Exec format error`. Remove
+  `target/` and let Cargo build in-tree for CLI tests.
+- Set `git config --global user.email`/`user.name` in the container. Tests that
+  build their own repos configure themselves, but ad-hoc `git commit` will not.
+
+For a flaky failure, loop the prebuilt test binary instead of `cargo test`:
+
+```bash
+BIN=$(ls -t /tmp/t/debug/deps/integration_test-* | grep -v '\.d$' | head -1)
+for i in $(seq 1 200); do
+  $BIN some_test_name --test-threads=1 >/dev/null 2>&1 || echo "fail on run $i"
+done
+```
+
+**Instrument only inside the failing branch.** Memory-safety and timing bugs are
+often Heisenbugs: adding output before the failure point shifts stack layout or
+timing and makes them vanish. Put diagnostics in the error path only, and
+confirm a fix with the loop, never a single green run.
+
+Reach for CI only when the failure genuinely needs the real runner environment —
+cross-compiled targets (musl, Windows), N-API artifact packaging, the npm
+publish flow, or a failure that survives a clean local Linux reproduction.
 
 ## CLI Usage
 
@@ -184,6 +253,8 @@ specifier" scenario when touching resolution or specifier filtering logic.
   - Must run serially (`--test-threads=1`) due to git state
 - **CLI tests** (`tests/cli_test.rs`): Test CLI interface using `assert_cmd`
 - **JavaScript tests** (`__test__/index.spec.ts`): Test N-API bindings using ava
+- Prefer a per-test `TempDir` repo for new tests (`scaffold_lib_app_repo`, `TempNxRepo`) over the shared `tests/fixtures/monorepo` + `TestBranch` fixture — that shared mutable fixture is why `--test-threads=1` is required
+- To assert on or dump analyzer state: `WorkspaceAnalyzer::new(projects, &cwd, Arc::new(Profiler::new(false)))`; its `files`/`imports`/`exports`/`import_index` fields are `pub`
 
 ## Important Technical Details
 
@@ -203,6 +274,17 @@ The `WorkspaceAnalyzer` uses `'static` lifetimes for Oxc semantic data via memor
 - Allocators are stored alongside their semantic data in `FileSemanticData`
 - Data is never accessed after its allocator is dropped
 - All access is contained within the analyzer's lifetime
+
+**Every parse helper that returns `FileSemanticData` must arena-allocate the AST
+root** — `let program = &*allocator.alloc(parse_result.program);` before
+`SemanticBuilder::build(program)`. `Parser::parse` returns `Program` *by value on
+the stack*, and the builder records it as the root `AstKind::Program` node, so
+building from `&parse_result.program` leaves the root dangling into a dead frame
+once the parsing function returns. The symptom is subtle and intermittent: the
+Program node reads back a garbage span (typically `0..0`), which still contains
+offset 0 with span size 0, so it beats the real declaration in
+`find_top_level_symbols`' smallest-enclosing-node search and symbols on line 1
+silently stop resolving — dependents are then never marked affected.
 
 ### Performance Considerations
 
@@ -262,10 +344,11 @@ Ensure all code follows Rust formatting standards.
 
 ```bash
 # Run unit tests
-cargo test --lib
+cargo test --lib --no-default-features
 
 # Run integration tests (must be serial due to git state)
-cargo test --test integration_test -- --test-threads=1
+cargo test --no-default-features --test integration_test -- --test-threads=1
+cargo test --no-default-features --test cli_test -- --test-threads=1
 
 # For JavaScript/Node.js bindings
 yarn test

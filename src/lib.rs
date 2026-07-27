@@ -76,10 +76,7 @@ mod napi_bindings {
     pub base: String,
     /// Head commit to compare (defaults to working tree)
     pub head: Option<String>,
-    pub root_ts_config: Option<String>,
     pub projects: Vec<NapiProject>,
-    pub include: Option<Vec<String>>,
-    pub ignored_paths: Option<Vec<String>>,
     pub enable_profiling: Option<bool>,
     /// Lockfile change detection strategy: "none", "direct", "full" (default: "direct")
     pub lockfile_strategy: Option<String>,
@@ -109,10 +106,7 @@ mod napi_bindings {
       cwd,
       base: options.base,
       head: options.head,
-      root_ts_config: options.root_ts_config.map(PathBuf::from),
       projects,
-      include: options.include.unwrap_or_default(),
-      ignored_paths: options.ignored_paths.unwrap_or_default(),
       lockfile_strategy,
     };
 

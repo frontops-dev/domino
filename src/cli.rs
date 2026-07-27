@@ -46,10 +46,6 @@ enum Commands {
     #[arg(long)]
     all: bool,
 
-    /// Path to root tsconfig
-    #[arg(long)]
-    ts_config: Option<PathBuf>,
-
     /// Enable performance profiling (also: DOMINO_PROFILE=1)
     #[arg(long)]
     profile: bool,
@@ -99,7 +95,6 @@ pub fn run() -> Result<()> {
       cwd,
       json,
       all,
-      ts_config,
       profile,
       report,
       lockfile_strategy,
@@ -159,15 +154,7 @@ pub fn run() -> Result<()> {
         cwd: cwd.clone(),
         base,
         head,
-        root_ts_config: ts_config,
         projects,
-        include: vec![],
-        ignored_paths: vec![
-          "node_modules".to_string(),
-          "dist".to_string(),
-          "build".to_string(),
-          ".git".to_string(),
-        ],
         lockfile_strategy,
       };
 

@@ -1457,8 +1457,11 @@ console.<span class="t-cmd">log</span>(affected)
                   </tr>
                   <tr>
                     <td><strong>Turborepo</strong></td>
-                    <td>Detects <code>turbo.json</code></td>
-                    <td>Reads workspace config from root <code>package.json</code></td>
+                    <td>Detects <code>turbo.json</code> / <code>turbo.jsonc</code></td>
+                    <td>
+                      Reads workspace config from root <code>package.json</code>; honors
+                      <code>globalDependencies</code> for global invalidation
+                    </td>
                   </tr>
                   <tr>
                     <td><strong>npm / yarn / pnpm / bun</strong></td>

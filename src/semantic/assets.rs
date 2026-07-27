@@ -36,31 +36,65 @@ impl AssetReferenceFinder {
     }
   }
 
-  /// Find all source files that reference the given asset file
+  /// Find all source files that reference any of the given asset files.
+  ///
+  /// This scans the workspace exactly **once** for the entire batch of
+  /// changed assets, instead of doing a full directory walk + re-reading
+  /// every source file once per asset. Each source file's contents are read
+  /// a single time and matched against every asset's pattern before moving
+  /// on to the next file.
   ///
   /// # Arguments
-  /// * `asset_path` - Path to the asset file (relative to workspace root)
+  /// * `asset_paths` - Paths to the asset files (relative to workspace root)
   ///
   /// # Returns
-  /// A vector of `AssetReference` containing source files and line numbers
-  /// where the asset is referenced
-  pub fn find_references(&self, asset_path: &Path) -> Result<Vec<AssetReference>> {
-    let file_name = match asset_path.file_name().and_then(|n| n.to_str()) {
-      Some(name) => name,
-      None => {
-        debug!("Asset path has no filename: {:?}", asset_path);
-        return Ok(vec![]);
+  /// A map from each input asset path to the `AssetReference`s found for it.
+  /// Every path in `asset_paths` is present in the map, even if no
+  /// references were found for it (empty vector).
+  pub fn find_references_batch(
+    &self,
+    asset_paths: &[PathBuf],
+  ) -> Result<rustc_hash::FxHashMap<PathBuf, Vec<AssetReference>>> {
+    let mut results: rustc_hash::FxHashMap<PathBuf, Vec<AssetReference>> =
+      rustc_hash::FxHashMap::default();
+
+    // Build a (asset_path, filename, pattern) matcher for every asset that
+    // has a filename component. Assets without one just get an empty entry.
+    let mut matchers: Vec<(&PathBuf, &str, Regex)> = Vec::new();
+    for asset_path in asset_paths {
+      results.entry(asset_path.clone()).or_default();
+
+      let file_name = match asset_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => {
+          debug!("Asset path has no filename: {:?}", asset_path);
+          continue;
+        }
+      };
+
+      // Build regex pattern: ['"`](?P<path>[^'"`]*{escaped_filename})['"`]
+      match self.get_or_create_pattern(file_name) {
+        Ok(pattern) => matchers.push((asset_path, file_name, pattern)),
+        Err(e) => debug!("Failed to build pattern for asset '{}': {}", file_name, e),
       }
-    };
+    }
 
-    debug!("Searching for references to asset: {}", file_name);
+    if matchers.is_empty() {
+      return Ok(results);
+    }
 
-    // Build regex pattern: ['"`](?P<path>[^'"`]*{escaped_filename})['"`]
-    let pattern = self.get_or_create_pattern(file_name)?;
+    debug!(
+      "Searching workspace once for references to {} asset(s)",
+      matchers.len()
+    );
 
-    let mut references = Vec::new();
-
-    // Walk source files using ignore crate (respects .gitignore)
+    // Walk source files once using the ignore crate (respects .gitignore).
+    // NOTE: This intentionally walks the whole workspace rather than reusing
+    // `WorkspaceAnalyzer::files` (already-parsed sources) — the analyzer only
+    // collects files under each project's declared sourceRoot, while asset
+    // references can legitimately live in source files outside any project's
+    // sourceRoot (e.g. root-level scripts). Reusing `analyzer.files` would
+    // silently narrow coverage compared to the previous per-asset behavior.
     for entry in WalkBuilder::new(&self.cwd)
       .hidden(false) // Include hidden files
       .git_ignore(true) // Respect .gitignore
@@ -75,43 +109,44 @@ impl AssetReferenceFinder {
         continue;
       }
 
-      // Search this file for asset references
-      if let Some(file_refs) = self.search_file(path, &pattern, asset_path)? {
-        references.extend(file_refs);
+      let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => continue, // Skip files we can't read
+      };
+
+      // Match every asset's pattern against this file's content in one read.
+      for (asset_path, file_name, pattern) in &matchers {
+        // Quick check: does the file contain the asset filename at all?
+        if !content.contains(*file_name) {
+          continue;
+        }
+
+        if let Some(file_refs) = self.search_content(path, &content, pattern, asset_path) {
+          results
+            .entry((*asset_path).clone())
+            .or_default()
+            .extend(file_refs);
+        }
       }
     }
 
-    debug!(
-      "Found {} references to asset '{}'",
-      references.len(),
-      file_name
-    );
-    Ok(references)
-  }
-
-  /// Search a single source file for references to the asset
-  fn search_file(
-    &self,
-    source_file: &Path,
-    pattern: &Regex,
-    asset_path: &Path,
-  ) -> Result<Option<Vec<AssetReference>>> {
-    // Quick check: does the file contain the asset filename at all?
-    let file_name = asset_path
-      .file_name()
-      .and_then(|n| n.to_str())
-      .unwrap_or("");
-
-    let content = match fs::read_to_string(source_file) {
-      Ok(c) => c,
-      Err(_) => return Ok(None), // Skip files we can't read
-    };
-
-    // Early exit if filename not found
-    if !content.contains(file_name) {
-      return Ok(None);
+    for (asset_path, refs) in &results {
+      debug!("Found {} references to asset {:?}", refs.len(), asset_path);
     }
 
+    Ok(results)
+  }
+
+  /// Search the already-read `content` of `source_file` for references to
+  /// the asset at `asset_path`, using the precompiled `pattern` for its
+  /// filename.
+  fn search_content(
+    &self,
+    source_file: &Path,
+    content: &str,
+    pattern: &Regex,
+    asset_path: &Path,
+  ) -> Option<Vec<AssetReference>> {
     let mut references = Vec::new();
 
     for (line_num, line) in content.lines().enumerate() {
@@ -143,9 +178,9 @@ impl AssetReferenceFinder {
     }
 
     if references.is_empty() {
-      Ok(None)
+      None
     } else {
-      Ok(Some(references))
+      Some(references)
     }
   }
 
@@ -226,6 +261,16 @@ mod tests {
     temp
   }
 
+  /// Test helper: run the batch API for a single asset and return its
+  /// references, mirroring the old single-asset `find_references` API.
+  fn find_refs_for(finder: &AssetReferenceFinder, asset_path: &Path) -> Vec<AssetReference> {
+    finder
+      .find_references_batch(&[asset_path.to_path_buf()])
+      .unwrap()
+      .remove(asset_path)
+      .unwrap_or_default()
+  }
+
   #[test]
   fn test_find_references_single_quote() {
     let temp = create_test_workspace();
@@ -246,9 +291,7 @@ export class HeroComponent {}
     .unwrap();
 
     let finder = AssetReferenceFinder::new(cwd);
-    let refs = finder
-      .find_references(Path::new("src/components/hero.html"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/components/hero.html"));
 
     assert_eq!(refs.len(), 1);
     assert_eq!(
@@ -275,9 +318,7 @@ export function Button() {}
     .unwrap();
 
     let finder = AssetReferenceFinder::new(cwd);
-    let refs = finder
-      .find_references(Path::new("src/components/styles.css"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/components/styles.css"));
 
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].line, 1);
@@ -297,9 +338,7 @@ export function Button() {}
     .unwrap();
 
     let finder = AssetReferenceFinder::new(cwd);
-    let refs = finder
-      .find_references(Path::new("src/components/config.json"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/components/config.json"));
 
     assert_eq!(refs.len(), 1);
   }
@@ -322,9 +361,7 @@ export function Button() {}
     .unwrap();
 
     let finder = AssetReferenceFinder::new(cwd);
-    let refs = finder
-      .find_references(Path::new("src/assets/logo.png"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/assets/logo.png"));
 
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].matched_path, "../assets/logo.png");
@@ -350,9 +387,7 @@ export function Button() {}
     let finder = AssetReferenceFinder::new(cwd);
 
     // Should NOT find references to other-styles.css
-    let refs = finder
-      .find_references(Path::new("src/components/other-styles.css"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/components/other-styles.css"));
     assert!(refs.is_empty());
   }
 
@@ -372,9 +407,7 @@ require('./theme.css');
     .unwrap();
 
     let finder = AssetReferenceFinder::new(cwd);
-    let refs = finder
-      .find_references(Path::new("src/components/theme.css"))
-      .unwrap();
+    let refs = find_refs_for(&finder, Path::new("src/components/theme.css"));
 
     assert_eq!(refs.len(), 3);
   }
@@ -410,17 +443,80 @@ export class HeroComponent {
     let finder = AssetReferenceFinder::new(cwd);
 
     // Find HTML template references
-    let html_refs = finder
-      .find_references(Path::new("src/components/hero.component.html"))
-      .unwrap();
+    let html_refs = find_refs_for(&finder, Path::new("src/components/hero.component.html"));
     assert_eq!(html_refs.len(), 1);
     assert_eq!(html_refs[0].line, 5);
 
     // Find CSS references
-    let css_refs = finder
-      .find_references(Path::new("src/components/hero.component.css"))
-      .unwrap();
+    let css_refs = find_refs_for(&finder, Path::new("src/components/hero.component.css"));
     assert_eq!(css_refs.len(), 1);
     assert_eq!(css_refs[0].line, 6);
+  }
+
+  #[test]
+  fn test_find_references_batch_attributes_each_asset_separately() {
+    let temp = create_test_workspace();
+    let cwd = temp.path();
+
+    // Two referenced assets plus one unreferenced asset, all scanned in a
+    // single batch call.
+    fs::write(cwd.join("src/components/hero.html"), "<h1>Hero</h1>").unwrap();
+    fs::write(cwd.join("src/components/styles.css"), ".btn {}").unwrap();
+    fs::write(cwd.join("src/components/orphan.json"), "{}").unwrap();
+
+    fs::write(
+      cwd.join("src/components/hero.component.ts"),
+      r#"@Component({
+  templateUrl: './hero.html',
+})
+export class HeroComponent {}
+"#,
+    )
+    .unwrap();
+    fs::write(
+      cwd.join("src/components/button.ts"),
+      r#"import "./styles.css";
+export function Button() {}
+"#,
+    )
+    .unwrap();
+
+    let finder = AssetReferenceFinder::new(cwd);
+    let mut results = finder
+      .find_references_batch(&[
+        PathBuf::from("src/components/hero.html"),
+        PathBuf::from("src/components/styles.css"),
+        PathBuf::from("src/components/orphan.json"),
+      ])
+      .unwrap();
+
+    // Every requested asset must be present in the result map.
+    assert_eq!(results.len(), 3);
+
+    let hero_refs = results
+      .remove(Path::new("src/components/hero.html"))
+      .unwrap();
+    assert_eq!(hero_refs.len(), 1);
+    assert_eq!(
+      hero_refs[0].source_file,
+      PathBuf::from("src/components/hero.component.ts")
+    );
+    assert_eq!(hero_refs[0].matched_path, "./hero.html");
+
+    let css_refs = results
+      .remove(Path::new("src/components/styles.css"))
+      .unwrap();
+    assert_eq!(css_refs.len(), 1);
+    assert_eq!(
+      css_refs[0].source_file,
+      PathBuf::from("src/components/button.ts")
+    );
+    assert_eq!(css_refs[0].matched_path, "./styles.css");
+
+    // The unreferenced asset must still have an (empty) entry, not be missing.
+    let orphan_refs = results
+      .remove(Path::new("src/components/orphan.json"))
+      .unwrap();
+    assert!(orphan_refs.is_empty());
   }
 }

@@ -63,22 +63,41 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
     .collect::<Vec<_>>();
 
   ResolveOptions {
+    // TypeScript variants are listed before their JS counterparts (mirroring the
+    // existing .ts-before-.js ordering) so that when both a TS and a JS file could
+    // satisfy an extension-less specifier, the TypeScript source wins. The explicit
+    // ESM/CJS variants (.mts/.cts/.mjs/.cjs) are common in strict-ESM monorepos and
+    // dual-package (ESM+CJS) libraries; .d.mts/.d.cts fill the same declaration-file
+    // slot as .d.ts.
     extensions: vec![
       ".ts".into(),
       ".tsx".into(),
+      ".mts".into(),
+      ".cts".into(),
       ".js".into(),
       ".jsx".into(),
+      ".mjs".into(),
+      ".cjs".into(),
       ".d.ts".into(),
+      ".d.mts".into(),
+      ".d.cts".into(),
     ],
-    // Map .js/.jsx imports to their TypeScript equivalents.
+    // Map .js/.jsx/.mjs/.cjs imports to their TypeScript equivalents.
     // Handles the common ESM pattern where .ts files import with .js extensions
-    // (e.g., import { foo } from './bar.js' where the actual file is bar.ts).
+    // (e.g., import { foo } from './bar.js' where the actual file is bar.ts), and
+    // the analogous TypeScript "import with output extension" convention where a
+    // .mts/.cts source is imported via its compiled .mjs/.cjs extension.
+    // .mjs/.cjs are kept separate from .js (rather than folded into one shared
+    // alias) so an ESM-explicit specifier can't silently resolve to a CJS-explicit
+    // source or vice versa.
     extension_alias: vec![
       (
         ".js".into(),
         vec![".ts".into(), ".tsx".into(), ".js".into()],
       ),
       (".jsx".into(), vec![".tsx".into(), ".jsx".into()]),
+      (".mjs".into(), vec![".mts".into(), ".mjs".into()]),
+      (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
     ],
     // Resolve bare package imports to source roots within the monorepo.
     alias,

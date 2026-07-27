@@ -4,8 +4,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-/// Extensions considered as source files (analyzed by Oxc parser)
-const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
+/// Extensions considered as source files (analyzed by Oxc parser).
+///
+/// Includes the explicit ESM/CJS variants (`.mts`/`.cts`/`.mjs`/`.cjs`) used by
+/// strict-ESM monorepos and dual-package (ESM+CJS) libraries. `Path::extension()`
+/// only returns the final segment, so this list also covers `.d.mts`/`.d.cts`
+/// (which report as `mts`/`cts`) without needing separate entries.
+const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
 /// Check if a file is a source file (TypeScript/JavaScript)
 /// These are files that can be parsed by the Oxc parser
@@ -230,6 +235,13 @@ mod tests {
     assert!(is_source_file(Path::new("utils.js")));
     assert!(is_source_file(Path::new("app.jsx")));
     assert!(is_source_file(Path::new("path/to/file.ts")));
+
+    // ESM/CJS explicit-extension source files (strict-ESM monorepos, dual-package libs)
+    assert!(is_source_file(Path::new("utils.mts")));
+    assert!(is_source_file(Path::new("utils.cts")));
+    assert!(is_source_file(Path::new("utils.mjs")));
+    assert!(is_source_file(Path::new("utils.cjs")));
+    assert!(is_source_file(Path::new("path/to/file.mts")));
 
     // Non-source files
     assert!(!is_source_file(Path::new("styles.css")));

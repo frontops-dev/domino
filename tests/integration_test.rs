@@ -4,6 +4,7 @@ use domino::core::{find_affected, find_affected_with_report};
 use domino::profiler::Profiler;
 use domino::report::generate_html_report;
 use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
+use domino::workspace;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -4378,6 +4379,149 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
       affected
     );
   }
+}
+
+/// Integration test: generic npm/yarn/pnpm-workspaces repo (root package.json with
+/// "workspaces", NO nx.json/turbo.json/rush.json) must resolve affected projects using
+/// projects discovered via `workspace::discover_projects` (which delegates to
+/// `workspaces::get_projects` for this workspace type).
+///
+/// Regression test for a bug where `parse_package_json` returned ABSOLUTE root/source_root
+/// paths (unlike nx.rs/rush.rs, which always strip the cwd prefix), while `ProjectIndex`
+/// matches projects against git's workspace-RELATIVE changed-file paths via prefix
+/// matching. The mismatch meant a normal source change matched NO project root, so
+/// generic-workspace (and therefore Turborepo, which delegates discovery to
+/// workspaces.rs) repos always reported ZERO affected projects.
+#[test]
+fn test_generic_workspaces_relative_roots_resolve_affected_projects() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold a generic npm-workspaces monorepo (no nx.json/turbo.json/rush.json) --
+  fs::write(
+    root.join("package.json"),
+    r#"{
+  "name": "root",
+  "private": true,
+  "workspaces": ["packages/*"]
+}"#,
+  )
+  .unwrap();
+
+  let proj_a_src = root.join("packages/proj-a/src");
+  let proj_b_src = root.join("packages/proj-b/src");
+  let proj_c_src = root.join("packages/proj-c/src");
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  fs::write(
+    root.join("packages/proj-a/package.json"),
+    r#"{ "name": "@test/proj-a", "version": "1.0.0" }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("packages/proj-b/package.json"),
+    r#"{ "name": "@test/proj-b", "version": "1.0.0", "dependencies": { "@test/proj-a": "1.0.0" } }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("packages/proj-c/package.json"),
+    r#"{ "name": "@test/proj-c", "version": "1.0.0" }"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_a_src.join("index.ts"),
+    r#"export function helperA() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_b_src.join("index.ts"),
+    r#"import { helperA } from '@test/proj-a';
+
+export function run() {
+  return helperA();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_c_src.join("index.ts"),
+    r#"export function helperC() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch with a change to a used export in proj-a -----
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    proj_a_src.join("index.ts"),
+    r#"export function helperA() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helperA"]);
+
+  // -- discover projects exactly as the CLI does --------------------------
+  let projects = workspace::discover_projects(&root).expect("discover_projects failed");
+  assert_eq!(
+    projects.len(),
+    3,
+    "expected 3 discovered workspace projects, got: {:?}",
+    projects
+  );
+
+  // -- run find_affected ---------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects,
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"@test/proj-a".to_string()),
+    "@test/proj-a should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"@test/proj-b".to_string()),
+    "@test/proj-b should be affected (imports the changed, used export from @test/proj-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"@test/proj-c".to_string()),
+    "@test/proj-c is unrelated and should NOT be affected. Got: {:?}",
+    affected
+  );
 }
 
 // ===========================================================================

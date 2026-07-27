@@ -128,14 +128,10 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
     .parent()
     .ok_or_else(|| DominoError::Other("Invalid package path".to_string()))?;
 
-  let source_root = if cwd.is_absolute() {
-    project_dir.to_path_buf()
-  } else {
-    project_dir
-      .strip_prefix(cwd)
-      .unwrap_or(project_dir)
-      .to_path_buf()
-  };
+  let source_root = project_dir
+    .strip_prefix(cwd)
+    .unwrap_or(project_dir)
+    .to_path_buf();
 
   Ok(Project {
     name: pkg_json.name,
@@ -317,14 +313,50 @@ mod tests {
 
   #[test]
   fn test_source_root_with_absolute_cwd() {
+    // `get_projects` is always called with an absolute cwd in practice (the
+    // resolved workspace root), so the source_root/root MUST be stripped of
+    // that prefix and be workspace-relative — just like nx.rs and rush.rs —
+    // otherwise ProjectIndex (which matches against git's workspace-relative
+    // changed-file paths) can never find a matching project.
     let dir = create_workspace_fixture(&["packages/*"]);
     let root = dir.path();
+    assert!(root.is_absolute());
 
     write_package_json(root, "packages/utils", "@myorg/utils");
 
     let projects = get_projects(root).unwrap();
 
     assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].source_root, root.join("packages/utils"));
+    assert_eq!(
+      projects[0].source_root,
+      std::path::Path::new("packages/utils")
+    );
+    assert_eq!(projects[0].root, std::path::Path::new("packages/utils"));
+  }
+
+  #[test]
+  fn test_root_is_relative_for_nested_package() {
+    let dir = create_workspace_fixture(&["apps/*", "libs/*"]);
+    let root = dir.path();
+
+    write_package_json(root, "apps/web", "@myorg/web");
+    write_package_json(root, "libs/shared", "@myorg/shared");
+
+    let projects = get_projects(root).unwrap();
+    let mut by_name: std::collections::HashMap<&str, &Project> = std::collections::HashMap::new();
+    for p in &projects {
+      by_name.insert(p.name.as_str(), p);
+    }
+
+    assert_eq!(
+      by_name["@myorg/web"].source_root,
+      std::path::Path::new("apps/web")
+    );
+    assert_eq!(
+      by_name["@myorg/shared"].source_root,
+      std::path::Path::new("libs/shared")
+    );
+    assert!(!by_name["@myorg/web"].source_root.is_absolute());
+    assert!(!by_name["@myorg/shared"].source_root.is_absolute());
   }
 }

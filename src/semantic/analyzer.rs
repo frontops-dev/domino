@@ -2463,6 +2463,9 @@ type Props = ui.ButtonProps;
       analyzer.reexport_index.contains_key(&key),
       "re-export index must use the same keys as `exports`: {:?}",
       analyzer.reexport_index.keys().collect::<Vec<_>>()
+    );
+  }
+
   /// Characterization test for `build_import_index`: constructs a small real
   /// on-disk workspace with several cross-project imports and asserts on the
   /// resulting `import_index` contents directly. This is intentionally

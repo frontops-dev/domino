@@ -2511,7 +2511,6 @@ export function Panel() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "proj-a".to_string(),
@@ -2538,8 +2537,6 @@ export function Panel() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4393,9 +4390,285 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
 // stay green across refactors of the underlying indexing strategy.
 // ---------------------------------------------------------------------------
 
-/// Scaffold a two-project workspace (lib + app) in a fresh TempDir and return
-/// the canonicalized root. `files` is a list of (relative path, contents).
 fn scaffold_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  for (rel, contents) in files {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, contents).unwrap();
+  }
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  (tmp, root)
+}
+
+fn barrel_project(name: &str, source_root: &str) -> Project {
+  Project {
+    name: name.to_string(),
+    root: PathBuf::from(source_root),
+    source_root: PathBuf::from(source_root),
+    ts_config: None,
+    implicit_dependencies: vec![],
+    targets: vec![],
+  }
+}
+
+fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects,
+    lockfile_strategy: LockfileStrategy::None,
+  };
+  let profiler = Arc::new(Profiler::new(false));
+  find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects
+}
+
+/// (a) Single-hop barrel: symbol changed in utils.ts, re-exported through
+/// `libs/my-lib/src/index.ts`, consumed from the barrel by another project.
+#[test]
+fn test_barrel_named_reexport_affects_consumer() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
+    }
+  }
+}
+"#;
+  let (_tmp, root) = scaffold_repo(&[
+    (
+      "libs/my-lib/src/utils.ts",
+      "export function helper() {\n  return 'original';\n}\n",
+    ),
+    (
+      "libs/my-lib/src/index.ts",
+      "export { helper } from './utils';\n",
+    ),
+    (
+      "apps/my-app/src/main.ts",
+      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ]);
+
+  fs::write(
+    root.join("libs/my-lib/src/utils.ts"),
+    "export function helper() {\n  return 'changed';\n}\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change helper"]);
+
+  let affected = affected_in(
+    &root,
+    vec![
+      barrel_project("my-lib", "libs/my-lib/src"),
+      barrel_project("my-app", "apps/my-app/src"),
+    ],
+  );
+
+  assert!(
+    affected.contains(&"my-lib".to_string()),
+    "my-lib should be affected (file changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "my-app should be affected: it imports 'helper' from the barrel that \
+     re-exports it from utils.ts. Got: {:?}",
+    affected
+  );
+}
+
+/// (b) Multi-hop chain: barrel of barrels
+/// utils.ts -> inner/index.ts -> index.ts -> consumer
+#[test]
+fn test_barrel_of_barrels_multi_hop_reexport() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
+    }
+  }
+}
+"#;
+  let (_tmp, root) = scaffold_repo(&[
+    (
+      "libs/my-lib/src/inner/utils.ts",
+      "export function helper() {\n  return 'original';\n}\n",
+    ),
+    (
+      "libs/my-lib/src/inner/index.ts",
+      "export { helper } from './utils';\n",
+    ),
+    (
+      "libs/my-lib/src/index.ts",
+      "export { helper } from './inner';\n",
+    ),
+    (
+      "apps/my-app/src/main.ts",
+      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ]);
+
+  fs::write(
+    root.join("libs/my-lib/src/inner/utils.ts"),
+    "export function helper() {\n  return 'changed';\n}\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change helper"]);
+
+  let affected = affected_in(
+    &root,
+    vec![
+      barrel_project("my-lib", "libs/my-lib/src"),
+      barrel_project("my-app", "apps/my-app/src"),
+    ],
+  );
+
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "my-app should be affected through a two-hop barrel chain \
+     (utils.ts -> inner/index.ts -> index.ts). Got: {:?}",
+    affected
+  );
+}
+
+/// (c) Wildcard re-export: `export * from './utils'`
+#[test]
+fn test_wildcard_reexport_affects_consumer() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
+    }
+  }
+}
+"#;
+  let (_tmp, root) = scaffold_repo(&[
+    (
+      "libs/my-lib/src/utils.ts",
+      "export function helper() {\n  return 'original';\n}\n",
+    ),
+    ("libs/my-lib/src/index.ts", "export * from './utils';\n"),
+    (
+      "apps/my-app/src/main.ts",
+      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ]);
+
+  fs::write(
+    root.join("libs/my-lib/src/utils.ts"),
+    "export function helper() {\n  return 'changed';\n}\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change helper"]);
+
+  let affected = affected_in(
+    &root,
+    vec![
+      barrel_project("my-lib", "libs/my-lib/src"),
+      barrel_project("my-app", "apps/my-app/src"),
+    ],
+  );
+
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "my-app should be affected through a wildcard re-export barrel. Got: {:?}",
+    affected
+  );
+}
+
+/// (d) Negative case: a project importing a DIFFERENT symbol from the same
+/// barrel must NOT be affected.
+#[test]
+fn test_barrel_consumer_of_other_symbol_not_affected() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
+    }
+  }
+}
+"#;
+  let (_tmp, root) = scaffold_repo(&[
+    (
+      "libs/my-lib/src/utils.ts",
+      "export function helper() {\n  return 'original';\n}\n",
+    ),
+    (
+      "libs/my-lib/src/other.ts",
+      "export function other() {\n  return 'other';\n}\n",
+    ),
+    (
+      "libs/my-lib/src/index.ts",
+      "export { helper } from './utils';\nexport { other } from './other';\n",
+    ),
+    (
+      "apps/consumer-helper/src/main.ts",
+      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
+    ),
+    (
+      "apps/consumer-other/src/main.ts",
+      "import { other } from '@scope/my-lib';\n\nexport function run() {\n  return other();\n}\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ]);
+
+  fs::write(
+    root.join("libs/my-lib/src/utils.ts"),
+    "export function helper() {\n  return 'changed';\n}\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change helper"]);
+
+  let affected = affected_in(
+    &root,
+    vec![
+      barrel_project("my-lib", "libs/my-lib/src"),
+      barrel_project("consumer-helper", "apps/consumer-helper/src"),
+      barrel_project("consumer-other", "apps/consumer-other/src"),
+    ],
+  );
+
+  assert!(
+    affected.contains(&"consumer-helper".to_string()),
+    "consumer-helper imports the changed symbol and must be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"consumer-other".to_string()),
+    "consumer-other imports a DIFFERENT symbol from the same barrel and must \
+     NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
 // ===========================================================================
 // Turborepo workspace integration tests
 // ===========================================================================
@@ -4420,19 +4693,6 @@ fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathB
     .canonicalize()
     .expect("Failed to canonicalize temp dir");
 
-  for (rel, contents) in files {
-    let path = root.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, contents).unwrap();
-  }
-
-  git_in(&root, &["init"]);
-  git_in(&root, &["config", "user.email", "test@test.com"]);
-  git_in(&root, &["config", "user.name", "Test"]);
-  git_in(&root, &["branch", "-M", "main"]);
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "initial"]);
-  git_in(&root, &["checkout", "-b", "feature"]);
   let ui_src = root.join("packages/ui/src");
   let app_src = root.join("packages/app/src");
   let tools_src = root.join("packages/tools/src");
@@ -4519,21 +4779,6 @@ export function run() {
   (tmp, root)
 }
 
-fn barrel_project(name: &str, source_root: &str) -> Project {
-  Project {
-    name: name.to_string(),
-    root: PathBuf::from(source_root),
-    source_root: PathBuf::from(source_root),
-    ts_config: None,
-    implicit_dependencies: vec![],
-    targets: vec![],
-  }
-}
-
-fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
-  let config = TrueAffectedConfig {
-    cwd: root.to_path_buf(),
-    base: "main".to_string(),
 /// Projects of the scaffolded turbo repo with workspace-root-relative roots.
 ///
 /// `workspaces::get_projects` — which Turbo discovery delegates to — returns
@@ -4564,72 +4809,8 @@ fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffe
     cwd: root.to_path_buf(),
     base: base.to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-  };
-  let profiler = Arc::new(Profiler::new(false));
-  find_affected(config, profiler)
-    .expect("find_affected failed")
-    .affected_projects
-}
-
-/// (a) Single-hop barrel: symbol changed in utils.ts, re-exported through
-/// `libs/my-lib/src/index.ts`, consumed from the barrel by another project.
-#[test]
-fn test_barrel_named_reexport_affects_consumer() {
-  let tsconfig = r#"{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
-    }
-  }
-}
-"#;
-  let (_tmp, root) = scaffold_repo(&[
-    (
-      "libs/my-lib/src/utils.ts",
-      "export function helper() {\n  return 'original';\n}\n",
-    ),
-    (
-      "libs/my-lib/src/index.ts",
-      "export { helper } from './utils';\n",
-    ),
-    (
-      "apps/my-app/src/main.ts",
-      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
-    ),
-    ("tsconfig.base.json", tsconfig),
-  ]);
-
-  fs::write(
-    root.join("libs/my-lib/src/utils.ts"),
-    "export function helper() {\n  return 'changed';\n}\n",
-  )
-  .unwrap();
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "change helper"]);
-
-  let affected = affected_in(
-    &root,
-    vec![
-      barrel_project("my-lib", "libs/my-lib/src"),
-      barrel_project("my-app", "apps/my-app/src"),
-    ],
-  );
-
-  assert!(
-    affected.contains(&"my-lib".to_string()),
-    "my-lib should be affected (file changed). Got: {:?}",
-    affected
-  );
-  assert!(
-    affected.contains(&"my-app".to_string()),
-    "my-app should be affected: it imports 'helper' from the barrel that \
-     re-exports it from utils.ts. Got: {:?}",
   }
 }
 
@@ -4819,107 +5000,6 @@ fn test_turbo_non_global_change_does_not_globally_invalidate() {
   );
 }
 
-/// (b) Multi-hop chain: barrel of barrels
-/// utils.ts -> inner/index.ts -> index.ts -> consumer
-#[test]
-fn test_barrel_of_barrels_multi_hop_reexport() {
-  let tsconfig = r#"{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
-    }
-  }
-}
-"#;
-  let (_tmp, root) = scaffold_repo(&[
-    (
-      "libs/my-lib/src/inner/utils.ts",
-      "export function helper() {\n  return 'original';\n}\n",
-    ),
-    (
-      "libs/my-lib/src/inner/index.ts",
-      "export { helper } from './utils';\n",
-    ),
-    (
-      "libs/my-lib/src/index.ts",
-      "export { helper } from './inner';\n",
-    ),
-    (
-      "apps/my-app/src/main.ts",
-      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
-    ),
-    ("tsconfig.base.json", tsconfig),
-  ]);
-
-  fs::write(
-    root.join("libs/my-lib/src/inner/utils.ts"),
-    "export function helper() {\n  return 'changed';\n}\n",
-  )
-  .unwrap();
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "change helper"]);
-
-  let affected = affected_in(
-    &root,
-    vec![
-      barrel_project("my-lib", "libs/my-lib/src"),
-      barrel_project("my-app", "apps/my-app/src"),
-    ],
-  );
-
-  assert!(
-    affected.contains(&"my-app".to_string()),
-    "my-app should be affected through a two-hop barrel chain \
-     (utils.ts -> inner/index.ts -> index.ts). Got: {:?}",
-    affected
-  );
-}
-
-/// (c) Wildcard re-export: `export * from './utils'`
-#[test]
-fn test_wildcard_reexport_affects_consumer() {
-  let tsconfig = r#"{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
-    }
-  }
-}
-"#;
-  let (_tmp, root) = scaffold_repo(&[
-    (
-      "libs/my-lib/src/utils.ts",
-      "export function helper() {\n  return 'original';\n}\n",
-    ),
-    ("libs/my-lib/src/index.ts", "export * from './utils';\n"),
-    (
-      "apps/my-app/src/main.ts",
-      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
-    ),
-    ("tsconfig.base.json", tsconfig),
-  ]);
-
-  fs::write(
-    root.join("libs/my-lib/src/utils.ts"),
-    "export function helper() {\n  return 'changed';\n}\n",
-  )
-  .unwrap();
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "change helper"]);
-
-  let affected = affected_in(
-    &root,
-    vec![
-      barrel_project("my-lib", "libs/my-lib/src"),
-      barrel_project("my-app", "apps/my-app/src"),
-    ],
-  );
-
-  assert!(
-    affected.contains(&"my-app".to_string()),
-    "my-app should be affected through a wildcard re-export barrel. Got: {:?}",
 /// Nx wins over Turbo for global-invalidation config too: with both nx.json
 /// (namedInputs) and turbo.json (globalDependencies) present, only the Nx
 /// patterns apply, matching the project-discovery precedence.
@@ -5066,71 +5146,6 @@ fn test_turbo_dependency_manifest_in_global_dependencies_does_not_globally_inval
   );
 }
 
-/// (d) Negative case: a project importing a DIFFERENT symbol from the same
-/// barrel must NOT be affected.
-#[test]
-fn test_barrel_consumer_of_other_symbol_not_affected() {
-  let tsconfig = r#"{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@scope/my-lib": ["libs/my-lib/src/index.ts"]
-    }
-  }
-}
-"#;
-  let (_tmp, root) = scaffold_repo(&[
-    (
-      "libs/my-lib/src/utils.ts",
-      "export function helper() {\n  return 'original';\n}\n",
-    ),
-    (
-      "libs/my-lib/src/other.ts",
-      "export function other() {\n  return 'other';\n}\n",
-    ),
-    (
-      "libs/my-lib/src/index.ts",
-      "export { helper } from './utils';\nexport { other } from './other';\n",
-    ),
-    (
-      "apps/consumer-helper/src/main.ts",
-      "import { helper } from '@scope/my-lib';\n\nexport function run() {\n  return helper();\n}\n",
-    ),
-    (
-      "apps/consumer-other/src/main.ts",
-      "import { other } from '@scope/my-lib';\n\nexport function run() {\n  return other();\n}\n",
-    ),
-    ("tsconfig.base.json", tsconfig),
-  ]);
-
-  fs::write(
-    root.join("libs/my-lib/src/utils.ts"),
-    "export function helper() {\n  return 'changed';\n}\n",
-  )
-  .unwrap();
-  git_in(&root, &["add", "."]);
-  git_in(&root, &["commit", "-m", "change helper"]);
-
-  let affected = affected_in(
-    &root,
-    vec![
-      barrel_project("my-lib", "libs/my-lib/src"),
-      barrel_project("consumer-helper", "apps/consumer-helper/src"),
-      barrel_project("consumer-other", "apps/consumer-other/src"),
-    ],
-  );
-
-  assert!(
-    affected.contains(&"consumer-helper".to_string()),
-    "consumer-helper imports the changed symbol and must be affected. Got: {:?}",
-    affected
-  );
-  assert!(
-    !affected.contains(&"consumer-other".to_string()),
-    "consumer-other imports a DIFFERENT symbol from the same barrel and must \
-     NOT be affected. Got: {:?}",
-    affected
-  );
 /// The manifest exemption is gated on lockfile analysis actually running, for
 /// Turbo exactly as for Nx: under `LockfileStrategy::None` a lockfile listed in
 /// `globalDependencies` stays a global trigger (conservative fallback) instead

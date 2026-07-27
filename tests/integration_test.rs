@@ -202,7 +202,6 @@ impl TestBranch {
       cwd: fixture_path(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: Some(PathBuf::from("tsconfig.json")),
       projects: vec![
         Project {
           name: "proj1".to_string(),
@@ -229,8 +228,6 @@ impl TestBranch {
           targets: vec![],
         },
       ],
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -449,7 +446,6 @@ export function anotherFn() {
     cwd: fixture_path(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: Some(PathBuf::from("tsconfig.json")),
     projects: vec![
       Project {
         name: "proj1".to_string(),
@@ -476,8 +472,6 @@ export function anotherFn() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2026,7 +2020,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -2045,8 +2038,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2136,7 +2127,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -2155,8 +2145,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2265,7 +2253,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "@test/lib".to_string(),
@@ -2284,8 +2271,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2397,7 +2382,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         // Nx project name does NOT match the tsconfig path alias
@@ -2417,8 +2401,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3153,7 +3135,6 @@ fn test_shared_source_root_all_projects_affected() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "app-desktop".to_string(),
@@ -3172,8 +3153,6 @@ fn test_shared_source_root_all_projects_affected() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3351,10 +3330,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -3407,10 +3383,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Full,
   };
 
@@ -3468,10 +3441,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3520,10 +3490,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -3561,10 +3528,7 @@ fn test_lockfile_no_change_zero_impact() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -3692,7 +3656,6 @@ export const mockData: SharedType = { name: 'test' };
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "shared-types".to_string(),
@@ -3711,8 +3674,6 @@ export const mockData: SharedType = { name: 'test' };
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3818,7 +3779,6 @@ export const mockData: SharedType = { name: 'test' };
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "shared-types".to_string(),
@@ -3837,8 +3797,6 @@ export const mockData: SharedType = { name: 'test' };
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3997,10 +3955,7 @@ impl TempNxRepo {
       cwd: self.root().to_path_buf(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: None,
       projects,
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -4016,10 +3971,7 @@ impl TempNxRepo {
       cwd: self.root().to_path_buf(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: None,
       projects,
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -4375,10 +4327,7 @@ fn test_workspace_root_project_not_over_attributed() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4451,10 +4400,7 @@ fn test_spec_file_change_affects_owning_project() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4496,7 +4442,6 @@ export function unusedFn() {
     cwd: fixture_path(),
     base: main_sha,
     head: Some(head_sha),
-    root_ts_config: Some(PathBuf::from("tsconfig.json")),
     projects: vec![
       Project {
         name: "proj1".to_string(),
@@ -4523,8 +4468,6 @@ export function unusedFn() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4597,7 +4540,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -4616,8 +4558,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4766,10 +4706,7 @@ fn test_dependency_manifest_in_shared_globals_does_not_globally_invalidate() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4820,10 +4757,7 @@ fn test_non_manifest_shared_global_still_globally_invalidates() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4882,10 +4816,7 @@ fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4951,10 +4882,7 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 

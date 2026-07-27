@@ -2512,7 +2512,6 @@ export function Panel() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "proj-a".to_string(),
@@ -2539,8 +2538,6 @@ export function Panel() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4397,24 +4394,6 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
 /// workspaces.rs) repos always reported ZERO affected projects.
 #[test]
 fn test_generic_workspaces_relative_roots_resolve_affected_projects() {
-// ===========================================================================
-// Turborepo workspace integration tests
-// ===========================================================================
-
-/// Scaffold a self-contained Turborepo-style monorepo:
-///
-/// ```text
-///   package.json           workspaces: ["packages/*"]
-///   tsconfig.base.json     path alias @repo/ui -> packages/ui/src/index.ts
-///   .env                   candidate globalDependency
-///   packages/ui            exports helper()
-///   packages/app           imports helper() from @repo/ui
-///   packages/tools         standalone, no relation to ui/app
-/// ```
-///
-/// `turbo_config` is written to `turbo_filename` (turbo.json or turbo.jsonc).
-/// The repo is committed on `main`; callers create a feature branch.
-fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathBuf) {
   let tmp = TempDir::new().expect("Failed to create temp dir");
   let root = tmp
     .path()
@@ -4426,17 +4405,6 @@ fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathB
     root.join("package.json"),
     r#"{
   "name": "root",
-  let ui_src = root.join("packages/ui/src");
-  let app_src = root.join("packages/app/src");
-  let tools_src = root.join("packages/tools/src");
-  fs::create_dir_all(&ui_src).unwrap();
-  fs::create_dir_all(&app_src).unwrap();
-  fs::create_dir_all(&tools_src).unwrap();
-
-  fs::write(
-    root.join("package.json"),
-    r#"{
-  "name": "turbo-root",
   "private": true,
   "workspaces": ["packages/*"]
 }"#,
@@ -4469,29 +4437,6 @@ fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathB
   fs::write(
     proj_a_src.join("index.ts"),
     r#"export function helperA() {
-  fs::write(
-    root.join("tsconfig.base.json"),
-    r#"{
-  "compilerOptions": {
-    "paths": {
-      "@repo/ui": ["packages/ui/src/index.ts"]
-    }
-  }
-}"#,
-  )
-  .unwrap();
-
-  fs::write(root.join(".env"), "API_URL=https://example.test\n").unwrap();
-  fs::write(root.join(turbo_filename), turbo_config).unwrap();
-
-  fs::write(
-    root.join("packages/ui/package.json"),
-    r#"{"name": "@repo/ui", "version": "0.0.0"}"#,
-  )
-  .unwrap();
-  fs::write(
-    ui_src.join("index.ts"),
-    r#"export function helper() {
   return 'original';
 }
 "#,
@@ -4504,16 +4449,6 @@ fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathB
 
 export function run() {
   return helperA();
-    root.join("packages/app/package.json"),
-    r#"{"name": "@repo/app", "version": "0.0.0"}"#,
-  )
-  .unwrap();
-  fs::write(
-    app_src.join("index.ts"),
-    r#"import { helper } from '@repo/ui';
-
-export function run() {
-  return helper();
 }
 "#,
   )
@@ -4522,13 +4457,6 @@ export function run() {
   fs::write(
     proj_c_src.join("index.ts"),
     r#"export function helperC() {
-    root.join("packages/tools/package.json"),
-    r#"{"name": "@repo/tools", "version": "0.0.0"}"#,
-  )
-  .unwrap();
-  fs::write(
-    tools_src.join("index.ts"),
-    r#"export function standalone() {
   return 'unrelated';
 }
 "#,
@@ -4570,6 +4498,132 @@ export function run() {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+    head: None,
+    projects,
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"@test/proj-a".to_string()),
+    "@test/proj-a should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"@test/proj-b".to_string()),
+    "@test/proj-b should be affected (imports the changed, used export from @test/proj-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"@test/proj-c".to_string()),
+    "@test/proj-c is unrelated and should NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+// ===========================================================================
+// Turborepo workspace integration tests
+// ===========================================================================
+
+/// Scaffold a self-contained Turborepo-style monorepo:
+///
+/// ```text
+///   package.json           workspaces: ["packages/*"]
+///   tsconfig.base.json     path alias @repo/ui -> packages/ui/src/index.ts
+///   .env                   candidate globalDependency
+///   packages/ui            exports helper()
+///   packages/app           imports helper() from @repo/ui
+///   packages/tools         standalone, no relation to ui/app
+/// ```
+///
+/// `turbo_config` is written to `turbo_filename` (turbo.json or turbo.jsonc).
+/// The repo is committed on `main`; callers create a feature branch.
+fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathBuf) {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let ui_src = root.join("packages/ui/src");
+  let app_src = root.join("packages/app/src");
+  let tools_src = root.join("packages/tools/src");
+  fs::create_dir_all(&ui_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&tools_src).unwrap();
+
+  fs::write(
+    root.join("package.json"),
+    r#"{
+  "name": "turbo-root",
+  "private": true,
+  "workspaces": ["packages/*"]
+}"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@repo/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  fs::write(root.join(".env"), "API_URL=https://example.test\n").unwrap();
+  fs::write(root.join(turbo_filename), turbo_config).unwrap();
+
+  fs::write(
+    root.join("packages/ui/package.json"),
+    r#"{"name": "@repo/ui", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    ui_src.join("index.ts"),
+    r#"export function helper() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("packages/app/package.json"),
+    r#"{"name": "@repo/app", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    app_src.join("index.ts"),
+    r#"import { helper } from '@repo/ui';
+
+export function run() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("packages/tools/package.json"),
+    r#"{"name": "@repo/tools", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    tools_src.join("index.ts"),
+    r#"export function standalone() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
   git_in(&root, &["init", "-q"]);
   git_in(&root, &["config", "user.email", "test@example.com"]);
   git_in(&root, &["config", "user.name", "Test"]);
@@ -4610,33 +4664,8 @@ fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffe
     cwd: root.to_path_buf(),
     base: base.to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
-  };
-
-  let profiler = Arc::new(Profiler::new(false));
-  let result = find_affected(config, profiler).expect("find_affected failed");
-  let affected = result.affected_projects;
-
-  assert!(
-    affected.contains(&"@test/proj-a".to_string()),
-    "@test/proj-a should be affected (file was changed). Got: {:?}",
-    affected
-  );
-  assert!(
-    affected.contains(&"@test/proj-b".to_string()),
-    "@test/proj-b should be affected (imports the changed, used export from @test/proj-a). Got: {:?}",
-    affected
-  );
-  assert!(
-    !affected.contains(&"@test/proj-c".to_string()),
-    "@test/proj-c is unrelated and should NOT be affected. Got: {:?}",
-    affected
-  );
-}
   }
 }
 

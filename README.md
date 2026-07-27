@@ -11,7 +11,7 @@
 
 ## Overview
 
-domino is a drop-in replacement for the TypeScript version of [traf](https://github.com/@lemonade-hq/traf), providing the same semantic analysis capabilities with significantly better performance thanks to Rust and the Oxc parser.
+domino is a drop-in replacement for the TypeScript version of [traf](https://github.com/lemonade-hq/traf), providing the same semantic analysis capabilities with significantly better performance thanks to Rust and the Oxc parser.
 
 ## Features
 
@@ -232,11 +232,11 @@ RUST_LOG=domino=debug cargo run -- affected
 
 ## License
 
-Same as the original traf project.
+MIT - see [LICENSE](LICENSE).
 
 ## Credits
 
-This is a Rust port of the original [traf](https://github.com/@lemonade-hq/traf) TypeScript implementation.
+This is a Rust port of the original [traf](https://github.com/lemonade-hq/traf) TypeScript implementation.
 
 Built with:
 

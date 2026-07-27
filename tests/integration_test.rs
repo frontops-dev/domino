@@ -2503,7 +2503,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "proj-a".to_string(),
@@ -2530,8 +2529,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2648,7 +2645,6 @@ export function Panel() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "proj-a".to_string(),
@@ -2675,8 +2671,6 @@ export function Panel() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2778,7 +2772,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "proj-a".to_string(),
@@ -2805,8 +2798,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2903,7 +2894,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -2930,8 +2920,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3028,7 +3016,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -3055,8 +3042,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -5041,10 +5026,7 @@ fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffe
     cwd: root.to_path_buf(),
     base: base.to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   }
 }

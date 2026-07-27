@@ -4,6 +4,7 @@ use domino::core::{find_affected, find_affected_with_report};
 use domino::profiler::Profiler;
 use domino::report::generate_html_report;
 use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
+use domino::workspace;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2420,6 +2421,140 @@ export function run() {
   );
 }
 
+/// Regression test: `.mts` files must be treated as first-class source files, not assets.
+///
+/// Reproduces a strict-ESM monorepo scenario where a shared library exposes a `.mts`
+/// module. Before the fix, `.mts` was not in `SOURCE_EXTENSIONS`, so the file was
+/// classified as an "asset" — its owning project (`proj-a`) was still marked affected
+/// via the asset-fallback path, but its exports were never traced through the import
+/// index, so downstream consumers (`proj-b`) were silently missed.
+///
+/// Note: `proj-b`'s import is deliberately extension-less; this relies on domino's
+/// deliberately-permissive extension-less resolution — real TypeScript under
+/// `node16`/`nodenext` module resolution would require the explicit `.mts` extension.
+#[test]
+fn test_mts_source_file_traced_across_projects() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let proj_a_src = root.join("proj-a/src");
+  let proj_b_src = root.join("proj-b/src");
+  let proj_c_src = root.join("proj-c/src");
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  fs::write(
+    proj_a_src.join("utils.mts"),
+    r#"export function computeValue(): number {
+  return 1;
+}
+"#,
+  )
+  .unwrap();
+
+  // Deliberately extension-less: proj-b's source text never contains the literal
+  // string "utils.mts", so the naive filename-text asset-reference fallback (which
+  // greps quoted strings for the changed file's basename) cannot find this consumer.
+  // Only proper source-file symbol tracing (which requires utils.mts to be scanned
+  // into the semantic analyzer and resolved via the extensions probing list) can.
+  fs::write(
+    proj_b_src.join("index.ts"),
+    r#"import { computeValue } from '../../proj-a/src/utils';
+
+export function run() {
+  return computeValue();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_c_src.join("index.ts"),
+    r#"export function unrelated() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    proj_a_src.join("utils.mts"),
+    r#"export function computeValue(): number {
+  return 2;
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify computeValue"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      Project {
+        name: "proj-a".to_string(),
+        root: PathBuf::from("proj-a"),
+        source_root: PathBuf::from("proj-a/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-b".to_string(),
+        root: PathBuf::from("proj-b"),
+        source_root: PathBuf::from("proj-b/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-c".to_string(),
+        root: PathBuf::from("proj-c"),
+        source_root: PathBuf::from("proj-c/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (utils.mts was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj-b".to_string()),
+    "proj-b should be affected (imports computeValue from proj-a's utils.mts, which must be \
+     traced as a source file, not dropped as an asset). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c is unrelated and must NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
 /// Regression/characterization test for batching multiple changed assets in a
 /// single diff: each asset's references must still be attributed to the
 /// correct project, and unrelated projects must not be falsely marked
@@ -2557,6 +2692,378 @@ export function Panel() {
   assert!(
     !affected.contains(&"proj-c".to_string()),
     "proj-c should NOT be affected (references no changed asset). Got: {:?}",
+    affected
+  );
+}
+
+/// Regression test: `.mjs` files must be treated as first-class source files, not assets.
+///
+/// Same shape as [`test_mts_source_file_traced_across_projects`] but for plain
+/// JavaScript ESM modules (`.mjs`), common in dual-package (ESM+CJS) libraries.
+///
+/// Note: `proj-b`'s import is deliberately extension-less; this relies on domino's
+/// deliberately-permissive extension-less resolution — real TypeScript under
+/// `node16`/`nodenext` module resolution would require the explicit `.mjs` extension.
+#[test]
+fn test_mjs_source_file_traced_across_projects() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let proj_a_src = root.join("proj-a/src");
+  let proj_b_src = root.join("proj-b/src");
+  let proj_c_src = root.join("proj-c/src");
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  fs::write(
+    proj_a_src.join("utils.mjs"),
+    r#"export function computeValue() {
+  return 1;
+}
+"#,
+  )
+  .unwrap();
+
+  // Deliberately extension-less: see the .mts variant of this test for why this
+  // avoids the naive filename-text asset-reference fallback.
+  fs::write(
+    proj_b_src.join("index.js"),
+    r#"import { computeValue } from '../../proj-a/src/utils';
+
+export function run() {
+  return computeValue();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_c_src.join("index.js"),
+    r#"export function unrelated() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    proj_a_src.join("utils.mjs"),
+    r#"export function computeValue() {
+  return 2;
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify computeValue"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      Project {
+        name: "proj-a".to_string(),
+        root: PathBuf::from("proj-a"),
+        source_root: PathBuf::from("proj-a/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-b".to_string(),
+        root: PathBuf::from("proj-b"),
+        source_root: PathBuf::from("proj-b/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-c".to_string(),
+        root: PathBuf::from("proj-c"),
+        source_root: PathBuf::from("proj-c/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (utils.mjs was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj-b".to_string()),
+    "proj-b should be affected (imports computeValue from proj-a's utils.mjs, which must be \
+     traced as a source file, not dropped as an asset). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c is unrelated and must NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+/// Regression test: relative imports using the TypeScript "import with output extension"
+/// convention (`./utils.mjs` on disk as `utils.mts`) must resolve via `extension_alias`,
+/// mirroring the existing `.js` -> `.ts` alias.
+#[test]
+fn test_mjs_import_resolves_to_mts_source() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let lib_src = root.join("lib/src");
+  let app_src = root.join("app/src");
+  let other_src = root.join("other/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&other_src).unwrap();
+
+  fs::write(
+    lib_src.join("utils.mts"),
+    r#"export function helper(): string {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  // app imports with the .mjs (output) extension while the source on disk is .mts
+  fs::write(
+    app_src.join("index.mts"),
+    r#"import { helper } from '../../lib/src/utils.mjs';
+
+export function main() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    other_src.join("index.mts"),
+    r#"export function unrelated() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    lib_src.join("utils.mts"),
+    r#"export function helper(): string {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      Project {
+        name: "lib".to_string(),
+        root: PathBuf::from("lib"),
+        source_root: PathBuf::from("lib/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app".to_string(),
+        root: PathBuf::from("app"),
+        source_root: PathBuf::from("app/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "other".to_string(),
+        root: PathBuf::from("other"),
+        source_root: PathBuf::from("other/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (utils.mts was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected (imports lib/src/utils.mts via .mjs output-extension import, \
+     which requires extension_alias to resolve). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"other".to_string()),
+    "other is unrelated and must NOT be affected. Got: {:?}",
+    affected
+  );
+}
+
+/// Regression test: relative imports using the TypeScript "import with output extension"
+/// convention (`./helper.cjs` on disk as `helper.cts`) must resolve via `extension_alias`,
+/// mirroring [`test_mjs_import_resolves_to_mts_source`] but for the CJS side of the alias.
+#[test]
+fn test_cjs_import_resolves_to_cts_source() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let lib_src = root.join("lib/src");
+  let app_src = root.join("app/src");
+  let other_src = root.join("other/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&other_src).unwrap();
+
+  fs::write(
+    lib_src.join("helper.cts"),
+    r#"export function helper(): string {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  // app imports with the .cjs (output) extension while the source on disk is .cts
+  fs::write(
+    app_src.join("index.cts"),
+    r#"import { helper } from '../../lib/src/helper.cjs';
+
+export function main() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    other_src.join("index.cts"),
+    r#"export function unrelated() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    lib_src.join("helper.cts"),
+    r#"export function helper(): string {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helper"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      Project {
+        name: "lib".to_string(),
+        root: PathBuf::from("lib"),
+        source_root: PathBuf::from("lib/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "app".to_string(),
+        root: PathBuf::from("app"),
+        source_root: PathBuf::from("app/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "other".to_string(),
+        root: PathBuf::from("other"),
+        source_root: PathBuf::from("other/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"lib".to_string()),
+    "lib should be affected (helper.cts was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"app".to_string()),
+    "app should be affected (imports lib/src/helper.cts via .cjs output-extension import, \
+     which requires extension_alias to resolve). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"other".to_string()),
+    "other is unrelated and must NOT be affected. Got: {:?}",
     affected
   );
 }
@@ -4391,6 +4898,19 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
 // ---------------------------------------------------------------------------
 
 fn scaffold_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+/// Integration test: generic npm/yarn/pnpm-workspaces repo (root package.json with
+/// "workspaces", NO nx.json/turbo.json/rush.json) must resolve affected projects using
+/// projects discovered via `workspace::discover_projects` (which delegates to
+/// `workspaces::get_projects` for this workspace type).
+///
+/// Regression test for a bug where `parse_package_json` returned ABSOLUTE root/source_root
+/// paths (unlike nx.rs/rush.rs, which always strip the cwd prefix), while `ProjectIndex`
+/// matches projects against git's workspace-RELATIVE changed-file paths via prefix
+/// matching. The mismatch meant a normal source change matched NO project root, so
+/// generic-workspace (and therefore Turborepo, which delegates discovery to
+/// workspaces.rs) repos always reported ZERO affected projects.
+#[test]
+fn test_generic_workspaces_relative_roots_resolve_affected_projects() {
   let tmp = TempDir::new().expect("Failed to create temp dir");
   let root = tmp
     .path()
@@ -4403,6 +4923,70 @@ fn scaffold_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
     fs::write(&path, contents).unwrap();
   }
 
+  // -- scaffold a generic npm-workspaces monorepo (no nx.json/turbo.json/rush.json) --
+  fs::write(
+    root.join("package.json"),
+    r#"{
+  "name": "root",
+  "private": true,
+  "workspaces": ["packages/*"]
+}"#,
+  )
+  .unwrap();
+
+  let proj_a_src = root.join("packages/proj-a/src");
+  let proj_b_src = root.join("packages/proj-b/src");
+  let proj_c_src = root.join("packages/proj-c/src");
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  fs::write(
+    root.join("packages/proj-a/package.json"),
+    r#"{ "name": "@test/proj-a", "version": "1.0.0" }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("packages/proj-b/package.json"),
+    r#"{ "name": "@test/proj-b", "version": "1.0.0", "dependencies": { "@test/proj-a": "1.0.0" } }"#,
+  )
+  .unwrap();
+  fs::write(
+    root.join("packages/proj-c/package.json"),
+    r#"{ "name": "@test/proj-c", "version": "1.0.0" }"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_a_src.join("index.ts"),
+    r#"export function helperA() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_b_src.join("index.ts"),
+    r#"import { helperA } from '@test/proj-a';
+
+export function run() {
+  return helperA();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    proj_c_src.join("index.ts"),
+    r#"export function helperC() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
   git_in(&root, &["init"]);
   git_in(&root, &["config", "user.email", "test@test.com"]);
   git_in(&root, &["config", "user.name", "Test"]);
@@ -4426,6 +5010,31 @@ fn barrel_project(name: &str, source_root: &str) -> Project {
 }
 
 fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
+
+  // -- create feature branch with a change to a used export in proj-a -----
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(
+    proj_a_src.join("index.ts"),
+    r#"export function helperA() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify helperA"]);
+
+  // -- discover projects exactly as the CLI does --------------------------
+  let projects = workspace::discover_projects(&root).expect("discover_projects failed");
+  assert_eq!(
+    projects.len(),
+    3,
+    "expected 3 discovered workspace projects, got: {:?}",
+    projects
+  );
+
+  // -- run find_affected ---------------------------------------------------
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
@@ -4665,6 +5274,24 @@ fn test_barrel_consumer_of_other_symbol_not_affected() {
     !affected.contains(&"consumer-other".to_string()),
     "consumer-other imports a DIFFERENT symbol from the same barrel and must \
      NOT be affected. Got: {:?}",
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"@test/proj-a".to_string()),
+    "@test/proj-a should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"@test/proj-b".to_string()),
+    "@test/proj-b should be affected (imports the changed, used export from @test/proj-a). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"@test/proj-c".to_string()),
+    "@test/proj-c is unrelated and should NOT be affected. Got: {:?}",
     affected
   );
 }

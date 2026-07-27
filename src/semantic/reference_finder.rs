@@ -541,6 +541,84 @@ mod tests {
   }
 
   #[test]
+  fn test_simple_resolve_mjs_to_mts_remapping() {
+    // Test that imports with .mjs extensions resolve to .mts files through the
+    // `simple_resolve_relative` fallback (used when oxc_resolver fails to resolve).
+    // This exercises the ESM "import with output extension" convention, e.g.
+    // import { helper } from './utils.mjs' where the actual file is utils.mts.
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: src/utils.mts (but NOT src/utils.mjs)
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    let utils_file = src_dir.join("utils.mts");
+    fs::write(&utils_file, "export function helper() {}").expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./utils.mjs" from src directory
+    // Should find utils.mts by stripping .mjs and trying .mts
+    let context = src_dir.as_path();
+    let specifier = "./utils.mjs";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve utils.mjs to utils.mts"
+    );
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/utils.mts"),
+      "Expected to resolve ./utils.mjs to utils.mts"
+    );
+  }
+
+  #[test]
+  fn test_simple_resolve_cjs_to_cts_remapping() {
+    // Test that imports with .cjs extensions resolve to .cts files through the
+    // `simple_resolve_relative` fallback (used when oxc_resolver fails to resolve).
+    // This exercises the CJS "import with output extension" convention, e.g.
+    // import { helper } from './helper.cjs' where the actual file is helper.cts.
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cwd = temp_dir.path();
+
+    // Create a test file: src/helper.cts (but NOT src/helper.cjs)
+    let src_dir = cwd.join("src");
+    fs::create_dir_all(&src_dir).expect("Failed to create src dir");
+    let helper_file = src_dir.join("helper.cts");
+    fs::write(&helper_file, "export function helper() {}").expect("Failed to write test file");
+
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer =
+      WorkspaceAnalyzer::new(vec![], cwd, profiler.clone()).expect("Failed to create analyzer");
+    let reference_finder = ReferenceFinder::new(&analyzer, cwd, profiler);
+
+    // Test: resolve "./helper.cjs" from src directory
+    // Should find helper.cts by stripping .cjs and trying .cts
+    let context = src_dir.as_path();
+    let specifier = "./helper.cjs";
+    let resolved = reference_finder.simple_resolve(context, specifier);
+
+    assert!(
+      resolved.is_some(),
+      "Expected to resolve helper.cjs to helper.cts"
+    );
+    let resolved_path = resolved.unwrap();
+    assert_eq!(
+      resolved_path,
+      PathBuf::from("src/helper.cts"),
+      "Expected to resolve ./helper.cjs to helper.cts"
+    );
+  }
+
+  #[test]
   fn test_simple_resolve_js_to_tsx_remapping() {
     // Test that .js imports can resolve to .tsx files
 

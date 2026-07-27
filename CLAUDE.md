@@ -279,7 +279,10 @@ reflect the order features were added, not execution order (`Step 6` appears twi
 Uses `oxc_resolver` with TypeScript-aware configuration:
 
 - Looks for `tsconfig.base.json` in workspace root for path mappings
-- Supports extensions: `.ts`, `.tsx`, `.js`, `.jsx`, `.d.ts`
+- Supports extensions: `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.d.ts`, `.d.mts`, `.d.cts`
+- TypeScript variants are preferred over their JS counterparts, and `.mjs`/`.cjs`
+  specifiers resolve to `.mts`/`.cts` sources respectively (via `extension_alias`),
+  matching TypeScript's "import with output extension" convention
 - Handles both relative imports and workspace path aliases
 
 ### Workspace Specifier Matching (Known Pitfall)

@@ -10,7 +10,6 @@ use crate::types::{
 };
 use crate::utils::{self, ProjectIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -961,22 +960,99 @@ fn process_changed_symbol(
   Ok(())
 }
 
+/// Whether an Nx `implicitDependencies` entry should be treated as a glob
+/// (matched against known project **names**, not paths).
+fn is_implicit_dep_glob(pattern: &str) -> bool {
+  let pat = pattern.strip_prefix('!').unwrap_or(pattern);
+  pat.contains('*') || pat.contains('?') || pat.contains('[')
+}
+
+/// Expand Nx-style `implicitDependencies` entries against known project names.
+///
+/// - Literals are kept as-is (even if no project with that name exists).
+/// - Globs (`*`, `?`, `[…]`) are matched against project names only.
+/// - Entries starting with `!` exclude matching names (Nx / minimatch style).
+fn expand_implicit_dependencies(patterns: &[String], project_names: &[String]) -> Vec<String> {
+  let mut includes: Vec<String> = Vec::new();
+  let mut exclude_globs: Vec<glob::Pattern> = Vec::new();
+  let mut exclude_literals: FxHashSet<String> = FxHashSet::default();
+
+  for pattern in patterns {
+    if let Some(negated) = pattern.strip_prefix('!') {
+      if negated.is_empty() {
+        continue;
+      }
+      if is_implicit_dep_glob(negated) {
+        match glob::Pattern::new(negated) {
+          Ok(p) => exclude_globs.push(p),
+          Err(e) => {
+            debug!(
+              "Ignoring invalid implicitDependencies exclude glob '{}': {}",
+              negated, e
+            );
+          }
+        }
+      } else {
+        exclude_literals.insert(negated.to_string());
+      }
+      continue;
+    }
+
+    if is_implicit_dep_glob(pattern) {
+      match glob::Pattern::new(pattern) {
+        Ok(glob_pat) => {
+          for name in project_names {
+            if glob_pat.matches(name) {
+              includes.push(name.clone());
+            }
+          }
+        }
+        Err(e) => {
+          debug!(
+            "Ignoring invalid implicitDependencies glob '{}': {}",
+            pattern, e
+          );
+        }
+      }
+    } else {
+      includes.push(pattern.clone());
+    }
+  }
+
+  let mut result: Vec<String> = includes
+    .into_iter()
+    .filter(|name| {
+      if exclude_literals.contains(name) {
+        return false;
+      }
+      !exclude_globs.iter().any(|p| p.matches(name))
+    })
+    .collect();
+  result.sort();
+  result.dedup();
+  result
+}
+
 fn add_implicit_dependencies(
   projects: &[Project],
   affected_packages: &mut FxHashSet<String>,
   mut project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
 ) {
-  // Build a map of package -> implicit dependents
-  let mut implicit_dep_map: HashMap<String, Vec<String>> = HashMap::new();
+  // Build a map of package -> implicit dependents.
+  // Expand Nx-style globs against known project names up front so lookups stay O(1).
+  let project_names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+  let mut implicit_dep_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
   for project in projects {
-    if !project.implicit_dependencies.is_empty() {
-      for dep in &project.implicit_dependencies {
-        implicit_dep_map
-          .entry(dep.clone())
-          .or_default()
-          .push(project.name.clone());
-      }
+    if project.implicit_dependencies.is_empty() {
+      continue;
+    }
+    let deps = expand_implicit_dependencies(&project.implicit_dependencies, &project_names);
+    for dep in deps {
+      implicit_dep_map
+        .entry(dep)
+        .or_default()
+        .push(project.name.clone());
     }
   }
 
@@ -1008,33 +1084,26 @@ mod tests {
   use super::*;
   use std::path::PathBuf;
 
+  fn project(name: &str, implicit_dependencies: Vec<&str>) -> Project {
+    Project {
+      name: name.to_string(),
+      root: PathBuf::from(format!("libs/{name}")),
+      source_root: PathBuf::from(format!("libs/{name}")),
+      ts_config: None,
+      implicit_dependencies: implicit_dependencies
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+      targets: vec![],
+    }
+  }
+
   #[test]
   fn test_add_implicit_dependencies() {
     let projects = vec![
-      Project {
-        name: "app".to_string(),
-        root: PathBuf::from("apps/app"),
-        source_root: PathBuf::from("apps/app"),
-        ts_config: None,
-        implicit_dependencies: vec!["lib1".to_string(), "lib2".to_string()],
-        targets: vec![],
-      },
-      Project {
-        name: "lib1".to_string(),
-        root: PathBuf::from("libs/lib1"),
-        source_root: PathBuf::from("libs/lib1"),
-        ts_config: None,
-        implicit_dependencies: vec![],
-        targets: vec![],
-      },
-      Project {
-        name: "lib2".to_string(),
-        root: PathBuf::from("libs/lib2"),
-        source_root: PathBuf::from("libs/lib2"),
-        ts_config: None,
-        implicit_dependencies: vec![],
-        targets: vec![],
-      },
+      project("app", vec!["lib1", "lib2"]),
+      project("lib1", vec![]),
+      project("lib2", vec![]),
     ];
 
     let mut affected = FxHashSet::default();
@@ -1044,5 +1113,61 @@ mod tests {
 
     assert!(affected.contains("lib1"));
     assert!(affected.contains("app")); // Should be added as implicit dependent
+  }
+
+  #[test]
+  fn test_add_implicit_dependencies_expands_globs() {
+    let projects = vec![
+      project("probe", vec!["lib-a", "integration-*-module"]),
+      project("lib-a", vec![]),
+      project("integration-foo-module", vec![]),
+      project("integration-bar-module", vec![]),
+      project("unrelated", vec![]),
+    ];
+
+    // Glob match: changing integration-foo-module should select probe
+    let mut affected = FxHashSet::default();
+    affected.insert("integration-foo-module".to_string());
+    add_implicit_dependencies(&projects, &mut affected, None);
+    assert!(affected.contains("probe"));
+    assert!(!affected.contains("unrelated"));
+
+    // Literal match still works
+    let mut affected_literal = FxHashSet::default();
+    affected_literal.insert("lib-a".to_string());
+    add_implicit_dependencies(&projects, &mut affected_literal, None);
+    assert!(affected_literal.contains("probe"));
+
+    // Non-matching name does not select probe
+    let mut affected_unrelated = FxHashSet::default();
+    affected_unrelated.insert("unrelated".to_string());
+    add_implicit_dependencies(&projects, &mut affected_unrelated, None);
+    assert!(!affected_unrelated.contains("probe"));
+  }
+
+  #[test]
+  fn test_expand_implicit_dependencies_supports_negation() {
+    let names = vec![
+      "pkg-a".to_string(),
+      "pkg-b".to_string(),
+      "other".to_string(),
+    ];
+    let expanded =
+      expand_implicit_dependencies(&["pkg-*".to_string(), "!pkg-b".to_string()], &names);
+    assert_eq!(expanded, vec!["pkg-a".to_string()]);
+  }
+
+  #[test]
+  fn test_expand_implicit_dependencies_deduplicates_overlapping_matches() {
+    let names = vec!["app-a".to_string(), "app-b".to_string()];
+    let expanded = expand_implicit_dependencies(
+      &[
+        "app-*".to_string(),
+        "app-a".to_string(),
+        "app-*".to_string(),
+      ],
+      &names,
+    );
+    assert_eq!(expanded, vec!["app-a".to_string(), "app-b".to_string()]);
   }
 }

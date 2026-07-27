@@ -1619,6 +1619,16 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
   let project_count = report.projects.len();
   let trigger_count = report.global_triggers.len();
 
+  // Every trigger in a single report comes from exactly one source — Nx
+  // `nx.json` or Turbo `turbo.json` — since
+  // [`crate::named_inputs::resolve_global_inputs`] picks one config to
+  // resolve per run, so checking the first trigger is enough to tell which
+  // source produced the whole report.
+  let is_turbo = report
+    .global_triggers
+    .first()
+    .is_some_and(|t| t.named_input == crate::named_inputs::TURBO_GLOBAL_DEPENDENCIES);
+
   let mut rows = String::new();
   for trigger in &report.global_triggers {
     rows.push_str(&format!(
@@ -1634,6 +1644,22 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
     ));
   }
 
+  let (source_prose, cli_equivalent, docs_href, docs_label) = if is_turbo {
+    (
+      "Turborepo <code>globalDependencies</code>",
+      "turbo run",
+      "https://turborepo.com/docs/reference/configuration#globaldependencies",
+      "Turborepo <code>globalDependencies</code>",
+    )
+  } else {
+    (
+      "Nx <code>namedInputs</code>",
+      "nx affected",
+      "https://nx.dev/concepts/more-concepts/customizing-inputs",
+      "Nx <code>namedInputs</code>",
+    )
+  };
+
   format!(
     r#"<section class="global-banner" role="status" aria-labelledby="gbanner-title">
             <div class="global-banner-head">
@@ -1641,9 +1667,9 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
                 <h3 id="gbanner-title">Global invalidation detected</h3>
             </div>
             <p>
-                <strong>{trigger_count}</strong> changed file{trigger_plural} matched Nx <code>namedInputs</code>
+                <strong>{trigger_count}</strong> changed file{trigger_plural} matched {source_prose}
                 workspace-root pattern{trigger_plural}, so all <strong>{project_count}</strong> projects
-                are marked affected &mdash; the same as <code>nx affected</code> would do.
+                are marked affected &mdash; the same as <code>{cli_equivalent}</code> would do.
             </p>
             <div class="global-banner-list">{rows}</div>
             <p>
@@ -1651,8 +1677,8 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
                 <em>Detailed impact analysis</em> section below separates projects affected by
                 real code signal from those only swept up by the global rule.
             </p>
-            <a class="docs-link" href="https://nx.dev/concepts/more-concepts/customizing-inputs" target="_blank" rel="noopener noreferrer">
-                Learn how Nx <code>namedInputs</code> work {external}
+            <a class="docs-link" href="{docs_href}" target="_blank" rel="noopener noreferrer">
+                Learn how {docs_label} work {external}
             </a>
         </section>"#,
     icon = ICON_INFO,
@@ -1661,6 +1687,10 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
     trigger_plural = if trigger_count == 1 { "" } else { "s" },
     project_count = format_number(project_count),
     rows = rows,
+    source_prose = source_prose,
+    cli_equivalent = cli_equivalent,
+    docs_href = docs_href,
+    docs_label = docs_label,
   )
 }
 
@@ -2148,6 +2178,44 @@ mod tests {
     }
   }
 
+  /// Same shape as `synth_global_report`, but the trigger originates from a
+  /// Turborepo `turbo.json` `globalDependencies` entry rather than an Nx
+  /// `nx.json` `namedInputs` entry, so the banner must use Turbo-flavored
+  /// wording and docs link instead of the Nx ones.
+  fn synth_turbo_global_report() -> AffectedReport {
+    let projects = vec![make_project(
+      "core",
+      vec![
+        AffectCause::DirectChange {
+          file: PathBuf::from("libs/core/src/logger.ts"),
+          symbol: Some("Logger".to_string()),
+          line: 42,
+        },
+        AffectCause::GlobalInvalidation {
+          file: PathBuf::from("tsconfig.base.json"),
+          named_input: "globalDependencies".to_string(),
+        },
+      ],
+    )];
+
+    AffectedReport {
+      projects,
+      global_triggers: vec![GlobalTrigger {
+        file: PathBuf::from("tsconfig.base.json"),
+        named_input: "globalDependencies".to_string(),
+        raw_pattern: "tsconfig.base.json".to_string(),
+      }],
+      totals: ReportTotals {
+        globally_invalidated: 1,
+        semantically_affected: 1,
+        overlap: 1,
+        changed_files: 1,
+      },
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: synth_recent_timestamp(),
+    }
+  }
+
   fn synth_normal_report() -> AffectedReport {
     let projects = vec![
       make_project(
@@ -2220,6 +2288,49 @@ mod tests {
     // The metadata script is harmless on non-global runs and lets dashboards
     // pick up the same shape regardless of run type.
     assert!(normal.contains(r#"id="domino-meta""#));
+  }
+
+  #[test]
+  fn banner_uses_turbo_wording_and_docs_link_for_turbo_trigger() {
+    let html = generate_html(&synth_turbo_global_report());
+
+    assert!(html.contains("Global invalidation detected"));
+    assert!(html.contains(r#"<section class="global-banner""#));
+
+    // Turbo-flavored prose and docs link must be present...
+    assert!(html.contains("Turborepo <code>globalDependencies</code>"));
+    assert!(html.contains("https://turborepo.com/docs/reference/configuration#globaldependencies"));
+
+    // ...and the Nx-flavored wording/link must NOT leak into a Turbo report.
+    assert!(!html.contains("Nx <code>namedInputs</code>"));
+    assert!(!html.contains("https://nx.dev/concepts/more-concepts/customizing-inputs"));
+
+    // Scope the "nx affected" check to the banner itself — the page footer's
+    // unrelated "drop-in `nx affected` replacement" tagline is fixed branding
+    // that applies regardless of trigger source and is out of scope here.
+    let banner_start = html
+      .find(r#"<section class="global-banner""#)
+      .expect("banner section must be present");
+    let banner_end = html[banner_start..]
+      .find("</section>")
+      .map(|i| banner_start + i)
+      .expect("banner section must close");
+    let banner = &html[banner_start..banner_end];
+    assert!(!banner.contains("nx affected"));
+  }
+
+  #[test]
+  fn banner_uses_nx_wording_and_docs_link_for_nx_trigger() {
+    let html = generate_html(&synth_global_report());
+
+    // The pre-existing Nx path must remain byte-identical.
+    assert!(html.contains("Nx <code>namedInputs</code>"));
+    assert!(html.contains("https://nx.dev/concepts/more-concepts/customizing-inputs"));
+    assert!(html.contains("nx affected"));
+
+    // Turbo-flavored wording/link must NOT leak into an Nx report.
+    assert!(!html.contains("Turborepo <code>globalDependencies</code>"));
+    assert!(!html.contains("https://turborepo.com/docs/reference/configuration#globaldependencies"));
   }
 
   #[test]

@@ -5,7 +5,7 @@ use domino::profiler::Profiler;
 use domino::report::generate_html_report;
 use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -37,9 +37,116 @@ fn git_command(args: &[&str]) -> String {
   String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// True when `dir`'s index holds staged changes.
+///
+/// `git commit` fails when nothing is staged, so callers that may run against
+/// an already-up-to-date fixture have to guard it. `git status --porcelain`
+/// cannot be that guard: it also reports untracked and unstaged files, which
+/// other tests routinely leave in the shared fixture, so it would report work
+/// to commit when the index is actually empty.
+///
+/// Only exit code 0 means "clean"; 1 means "staged". Anything else (128 for a
+/// broken repo, a signal, a failure to launch git) is an unknown state that
+/// must not be silently reported as clean, or the caller skips a commit it
+/// owed the shared fixture. Such states resolve to "attempt the commit" so the
+/// error surfaces through `git_command`, which panics with git's stderr —
+/// rather than by panicking here, which would abort the whole test binary when
+/// the `Drop` caller below runs during unwinding.
+fn has_staged_changes(dir: &Path) -> bool {
+  Command::new("git")
+    .args(["diff", "--cached", "--quiet"])
+    .current_dir(dir)
+    .status()
+    .map(|status| status.code() != Some(0))
+    .unwrap_or(true)
+}
+
 /// Ensure the fixture repo exists and is initialized with git
 fn ensure_git_repo() {
   common::ensure_fixture_git_repo(&fixture_path());
+}
+
+/// A structurally invalid `.git` *directory* must not be reused, even though
+/// every liveness check passes against it.
+///
+/// Git's repository discovery walks up past an invalid gitdir instead of
+/// failing, so inside an enclosing repository `rev-parse` and
+/// `show-ref refs/heads/main` both succeed — against the *outer* repo. A
+/// fixture in that state looks healthy, and the `git checkout` / `git commit`
+/// calls these tests make would then run against domino's real working tree.
+#[test]
+fn fixture_regenerates_when_git_dir_is_invalid_inside_enclosing_repo() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let (outer, fixture) = enclosing_repo_with_fixture(tmp.path());
+
+  // A fixture whose `.git` exists but holds none of the structure git needs.
+  fs::create_dir_all(fixture.join(".git")).expect("Failed to create fixture dir");
+
+  // Precondition: this is precisely the state that fools a liveness check.
+  assert_eq!(
+    canonical(git_in(&fixture, &["rev-parse", "--show-toplevel"])),
+    canonical(outer),
+    "expected the invalid .git to resolve to the enclosing repo"
+  );
+  git_in(&fixture, &["show-ref", "--verify", "refs/heads/main"]);
+
+  common::ensure_fixture_git_repo(&fixture);
+  assert_fixture_owns_itself(outer, &fixture);
+}
+
+/// A `.git` *file* is linked-worktree or submodule metadata pointing at a
+/// gitdir that need not exist here — exactly the state a container mount of a
+/// git worktree produces. The scaffolding only ever creates a real repository,
+/// so this is a broken fixture rather than something to reuse.
+#[test]
+fn fixture_regenerates_when_git_is_a_file() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let (outer, fixture) = enclosing_repo_with_fixture(tmp.path());
+
+  fs::create_dir_all(&fixture).expect("Failed to create fixture dir");
+  fs::write(
+    fixture.join(".git"),
+    "gitdir: /nonexistent/worktrees/monorepo\n",
+  )
+  .expect("Failed to write .git file");
+
+  common::ensure_fixture_git_repo(&fixture);
+  assert_fixture_owns_itself(outer, &fixture);
+}
+
+/// Build an enclosing repository with a `main` branch, mirroring how the real
+/// fixture sits inside domino's own checkout. Returns `(outer, fixture)`; the
+/// fixture directory itself is left for the caller to stage.
+fn enclosing_repo_with_fixture(outer: &Path) -> (&Path, PathBuf) {
+  git_in(outer, &["init"]);
+  git_in(outer, &["config", "user.email", "test@example.com"]);
+  git_in(outer, &["config", "user.name", "Test User"]);
+  git_in(outer, &["branch", "-M", "main"]);
+  fs::write(outer.join("outer.txt"), "outer").expect("Failed to write file");
+  git_in(outer, &["add", "."]);
+  git_in(outer, &["commit", "-m", "Outer commit"]);
+
+  let fixture = outer.join("tests").join("fixtures").join("monorepo");
+  (outer, fixture)
+}
+
+/// The fixture is its own repository with its own `main` and generated
+/// content, and the enclosing repository was never committed to.
+fn assert_fixture_owns_itself(outer: &Path, fixture: &Path) {
+  assert_eq!(
+    canonical(git_in(fixture, &["rev-parse", "--show-toplevel"])),
+    canonical(fixture),
+    "fixture should have been regenerated as its own repository"
+  );
+  git_in(fixture, &["show-ref", "--verify", "refs/heads/main"]);
+  assert!(fixture.join("proj1/index.ts").exists());
+  assert_eq!(git_in(outer, &["rev-list", "--count", "HEAD"]), "1");
+}
+
+/// Resolve symlinks so `/var` and `/private/var` compare equal on macOS.
+fn canonical(path: impl AsRef<Path>) -> PathBuf {
+  fs::canonicalize(path.as_ref())
+    .unwrap_or_else(|e| panic!("Failed to canonicalize {}: {e}", path.as_ref().display()))
 }
 
 /// Setup: Create a test branch and reset to main after test
@@ -95,7 +202,6 @@ impl TestBranch {
       cwd: fixture_path(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: Some(PathBuf::from("tsconfig.json")),
       projects: vec![
         Project {
           name: "proj1".to_string(),
@@ -122,8 +228,6 @@ impl TestBranch {
           targets: vec![],
         },
       ],
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -270,11 +374,7 @@ fn test_three_dot_diff_behavior() {
         common::fixture_file_content("proj2/index.ts"),
       );
       git(&["add", "proj2/index.ts"]);
-      let staged = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&fixture)
-        .output();
-      if staged.map(|o| !o.stdout.is_empty()).unwrap_or(false) {
+      if has_staged_changes(&fixture) {
         git(&["commit", "-m", "Restore proj2/index.ts"]);
       }
     }
@@ -334,12 +434,7 @@ export function anotherFn() {
   git_command(&["add", "proj2/index.ts"]);
   // This commit lands on the fixture's main and persists across runs; on a
   // repeat run the content is already there, so only commit when staged
-  let staged = Command::new("git")
-    .args(["status", "--porcelain"])
-    .current_dir(fixture_path())
-    .output()
-    .expect("Failed to check git status");
-  if !staged.stdout.is_empty() {
+  if has_staged_changes(&fixture_path()) {
     git_command(&["commit", "-m", "Main branch change"]);
   }
 
@@ -351,7 +446,6 @@ export function anotherFn() {
     cwd: fixture_path(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: Some(PathBuf::from("tsconfig.json")),
     projects: vec![
       Project {
         name: "proj1".to_string(),
@@ -378,8 +472,6 @@ export function anotherFn() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -1928,7 +2020,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -1947,8 +2038,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2038,7 +2127,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -2057,8 +2145,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2167,7 +2253,6 @@ export function main() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "@test/lib".to_string(),
@@ -2186,8 +2271,6 @@ export function main() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2299,7 +2382,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         // Nx project name does NOT match the tsconfig path alias
@@ -2319,8 +2401,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2336,6 +2416,150 @@ export function run() {
   assert!(
     affected.contains(&"my-app".to_string()),
     "my-app should be affected (imports via tsconfig path alias @scope/my-lib that differs from project name my-lib). Got: {:?}",
+    affected
+  );
+}
+
+/// Regression/characterization test for batching multiple changed assets in a
+/// single diff: each asset's references must still be attributed to the
+/// correct project, and unrelated projects must not be falsely marked
+/// affected.
+///
+/// Reproduces a PR that changes several unrelated assets at once:
+/// - `icon1.svg` is referenced only by `proj-a`
+/// - `icon2.svg` is referenced only by `proj-b`
+/// - `icon3.svg` is referenced by nobody
+///
+/// `proj-c` doesn't reference (or own) any of them and must stay unaffected.
+#[test]
+fn test_batch_asset_scan_attributes_references_per_project() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  // -- scaffold monorepo ------------------------------------------------
+  let assets_dir = root.join("assets");
+  let proj_a_src = root.join("proj-a/src");
+  let proj_b_src = root.join("proj-b/src");
+  let proj_c_src = root.join("proj-c/src");
+  fs::create_dir_all(&assets_dir).unwrap();
+  fs::create_dir_all(&proj_a_src).unwrap();
+  fs::create_dir_all(&proj_b_src).unwrap();
+  fs::create_dir_all(&proj_c_src).unwrap();
+
+  // Assets live outside any project root, so being "affected" here can only
+  // come from the reference scan, not from direct ownership.
+  fs::write(assets_dir.join("icon1.svg"), "<svg>one</svg>").unwrap();
+  fs::write(assets_dir.join("icon2.svg"), "<svg>two</svg>").unwrap();
+  fs::write(assets_dir.join("icon3.svg"), "<svg>three</svg>").unwrap(); // unreferenced
+
+  // proj-a references icon1.svg only
+  fs::write(
+    proj_a_src.join("widget.ts"),
+    r#"import icon1 from '../../assets/icon1.svg';
+
+export function Widget() {
+  return icon1;
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-b references icon2.svg only
+  fs::write(
+    proj_b_src.join("panel.ts"),
+    r#"import icon2 from '../../assets/icon2.svg';
+
+export function Panel() {
+  return icon2;
+}
+"#,
+  )
+  .unwrap();
+
+  // proj-c references no asset at all
+  fs::write(
+    proj_c_src.join("other.ts"),
+    r#"export function Other() {
+  return 'no asset references here';
+}
+"#,
+  )
+  .unwrap();
+
+  // -- init git repo & baseline commit -----------------------------------
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  // -- create feature branch that changes ALL three assets in one commit --
+  git_in(&root, &["checkout", "-b", "feature"]);
+
+  fs::write(assets_dir.join("icon1.svg"), "<svg>one-updated</svg>").unwrap();
+  fs::write(assets_dir.join("icon2.svg"), "<svg>two-updated</svg>").unwrap();
+  fs::write(assets_dir.join("icon3.svg"), "<svg>three-updated</svg>").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "update icons"]);
+
+  // -- run find_affected --------------------------------------------------
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    root_ts_config: None,
+    projects: vec![
+      Project {
+        name: "proj-a".to_string(),
+        root: PathBuf::from("proj-a/src"),
+        source_root: PathBuf::from("proj-a/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-b".to_string(),
+        root: PathBuf::from("proj-b/src"),
+        source_root: PathBuf::from("proj-b/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "proj-c".to_string(),
+        root: PathBuf::from("proj-c/src"),
+        source_root: PathBuf::from("proj-c/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    include: vec![],
+    ignored_paths: vec![],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a should be affected (references changed icon1.svg). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"proj-b".to_string()),
+    "proj-b should be affected (references changed icon2.svg). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c should NOT be affected (references no changed asset). Got: {:?}",
     affected
   );
 }
@@ -2393,7 +2617,6 @@ fn test_shared_source_root_all_projects_affected() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "app-desktop".to_string(),
@@ -2412,8 +2635,6 @@ fn test_shared_source_root_all_projects_affected() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2591,10 +2812,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -2647,10 +2865,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Full,
   };
 
@@ -2708,10 +2923,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -2760,10 +2972,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -2801,10 +3010,7 @@ fn test_lockfile_no_change_zero_impact() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -2932,7 +3138,6 @@ export const mockData: SharedType = { name: 'test' };
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "shared-types".to_string(),
@@ -2951,8 +3156,6 @@ export const mockData: SharedType = { name: 'test' };
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3058,7 +3261,6 @@ export const mockData: SharedType = { name: 'test' };
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "shared-types".to_string(),
@@ -3077,8 +3279,6 @@ export const mockData: SharedType = { name: 'test' };
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3237,10 +3437,7 @@ impl TempNxRepo {
       cwd: self.root().to_path_buf(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: None,
       projects,
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -3256,10 +3453,7 @@ impl TempNxRepo {
       cwd: self.root().to_path_buf(),
       base: "main".to_string(),
       head: None,
-      root_ts_config: None,
       projects,
-      include: vec![],
-      ignored_paths: vec![],
       lockfile_strategy: LockfileStrategy::None,
     };
 
@@ -3615,10 +3809,7 @@ fn test_workspace_root_project_not_over_attributed() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3691,10 +3882,7 @@ fn test_spec_file_change_affects_owning_project() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects,
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3736,7 +3924,6 @@ export function unusedFn() {
     cwd: fixture_path(),
     base: main_sha,
     head: Some(head_sha),
-    root_ts_config: Some(PathBuf::from("tsconfig.json")),
     projects: vec![
       Project {
         name: "proj1".to_string(),
@@ -3763,8 +3950,6 @@ export function unusedFn() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -3837,7 +4022,6 @@ export function run() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: vec![
       Project {
         name: "lib".to_string(),
@@ -3856,8 +4040,6 @@ export function run() {
         targets: vec![],
       },
     ],
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4006,10 +4188,7 @@ fn test_dependency_manifest_in_shared_globals_does_not_globally_invalidate() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4060,10 +4239,7 @@ fn test_non_manifest_shared_global_still_globally_invalidates() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4122,10 +4298,7 @@ fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::Direct,
   };
 
@@ -4191,10 +4364,7 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
     cwd: root.to_path_buf(),
     base: "main".to_string(),
     head: None,
-    root_ts_config: None,
     projects: lockfile_projects(),
-    include: vec![],
-    ignored_paths: vec![],
     lockfile_strategy: LockfileStrategy::None,
   };
 
@@ -4226,6 +4396,24 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
 /// Scaffold a two-project workspace (lib + app) in a fresh TempDir and return
 /// the canonicalized root. `files` is a list of (relative path, contents).
 fn scaffold_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+// ===========================================================================
+// Turborepo workspace integration tests
+// ===========================================================================
+
+/// Scaffold a self-contained Turborepo-style monorepo:
+///
+/// ```text
+///   package.json           workspaces: ["packages/*"]
+///   tsconfig.base.json     path alias @repo/ui -> packages/ui/src/index.ts
+///   .env                   candidate globalDependency
+///   packages/ui            exports helper()
+///   packages/app           imports helper() from @repo/ui
+///   packages/tools         standalone, no relation to ui/app
+/// ```
+///
+/// `turbo_config` is written to `turbo_filename` (turbo.json or turbo.jsonc).
+/// The repo is committed on `main`; callers create a feature branch.
+fn setup_turbo_repo(turbo_filename: &str, turbo_config: &str) -> (TempDir, PathBuf) {
   let tmp = TempDir::new().expect("Failed to create temp dir");
   let root = tmp
     .path()
@@ -4245,6 +4433,88 @@ fn scaffold_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-m", "initial"]);
   git_in(&root, &["checkout", "-b", "feature"]);
+  let ui_src = root.join("packages/ui/src");
+  let app_src = root.join("packages/app/src");
+  let tools_src = root.join("packages/tools/src");
+  fs::create_dir_all(&ui_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+  fs::create_dir_all(&tools_src).unwrap();
+
+  fs::write(
+    root.join("package.json"),
+    r#"{
+  "name": "turbo-root",
+  "private": true,
+  "workspaces": ["packages/*"]
+}"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@repo/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+
+  fs::write(root.join(".env"), "API_URL=https://example.test\n").unwrap();
+  fs::write(root.join(turbo_filename), turbo_config).unwrap();
+
+  fs::write(
+    root.join("packages/ui/package.json"),
+    r#"{"name": "@repo/ui", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    ui_src.join("index.ts"),
+    r#"export function helper() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("packages/app/package.json"),
+    r#"{"name": "@repo/app", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    app_src.join("index.ts"),
+    r#"import { helper } from '@repo/ui';
+
+export function run() {
+  return helper();
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    root.join("packages/tools/package.json"),
+    r#"{"name": "@repo/tools", "version": "0.0.0"}"#,
+  )
+  .unwrap();
+  fs::write(
+    tools_src.join("index.ts"),
+    r#"export function standalone() {
+  return 'unrelated';
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init", "-q"]);
+  git_in(&root, &["config", "user.email", "test@example.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "initial"]);
 
   (tmp, root)
 }
@@ -4264,6 +4534,35 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
   let config = TrueAffectedConfig {
     cwd: root.to_path_buf(),
     base: "main".to_string(),
+/// Projects of the scaffolded turbo repo with workspace-root-relative roots.
+///
+/// `workspaces::get_projects` — which Turbo discovery delegates to — returns
+/// *absolute* roots when `cwd` is absolute, while the rest of the pipeline
+/// compares against git's workspace-relative paths. Global invalidation never
+/// consults project roots, so the globalDependencies tests below can use real
+/// discovery; semantic tracing does, so tests that exercise tracing declare
+/// relative-rooted projects explicitly (as every other test in this file does).
+/// This workaround is expected to go away once the real fix for the
+/// absolute-vs-relative root mismatch lands on branch
+/// `fix/relative-project-roots-generic-workspaces`.
+fn turbo_projects() -> Vec<Project> {
+  ["app", "tools", "ui"]
+    .iter()
+    .map(|pkg| Project {
+      name: format!("@repo/{pkg}"),
+      root: PathBuf::from(format!("packages/{pkg}")),
+      source_root: PathBuf::from(format!("packages/{pkg}")),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    })
+    .collect()
+}
+
+fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffectedConfig {
+  TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: base.to_string(),
     head: None,
     root_ts_config: None,
     projects,
@@ -4331,6 +4630,191 @@ fn test_barrel_named_reexport_affects_consumer() {
     affected.contains(&"my-app".to_string()),
     "my-app should be affected: it imports 'helper' from the barrel that \
      re-exports it from utils.ts. Got: {:?}",
+  }
+}
+
+/// A Turborepo workspace (turbo.json + root package.json `workspaces`) is
+/// detected as such, and its projects come from the root package.json globs.
+/// Turborepo v2 also accepts `turbo.jsonc`, which must be detected too.
+#[test]
+fn test_turbo_workspace_detected_and_projects_discovered() {
+  let (_tmp, root) = setup_turbo_repo("turbo.json", r#"{"tasks": {"build": {}}}"#);
+
+  assert!(
+    domino::workspace::turbo::is_turbo_workspace(&root),
+    "turbo.json at the workspace root must be detected as a Turbo workspace"
+  );
+
+  let mut names: Vec<String> = domino::workspace::discover_projects(&root)
+    .unwrap()
+    .into_iter()
+    .map(|p| p.name)
+    .collect();
+  names.sort();
+  assert_eq!(
+    names,
+    vec![
+      "@repo/app".to_string(),
+      "@repo/tools".to_string(),
+      "@repo/ui".to_string()
+    ],
+    "Turbo project discovery delegates to the root package.json workspaces globs"
+  );
+
+  // Turborepo v2 allows a JSONC-named config file.
+  fs::rename(root.join("turbo.json"), root.join("turbo.jsonc")).unwrap();
+  assert!(
+    domino::workspace::turbo::is_turbo_workspace(&root),
+    "turbo.jsonc (Turborepo v2) at the workspace root must also be detected"
+  );
+}
+
+/// Detection precedence: a repo with both nx.json and turbo.json is an Nx
+/// workspace — projects come from project.json, not from package.json names.
+#[test]
+fn test_nx_detection_wins_over_turbo() {
+  let (_tmp, root) = setup_turbo_repo("turbo.json", r#"{"tasks": {"build": {}}}"#);
+
+  fs::write(root.join("nx.json"), "{}").unwrap();
+  fs::write(
+    root.join("packages/ui/project.json"),
+    r#"{"name": "ui-lib", "sourceRoot": "packages/ui/src"}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "add nx.json"]);
+
+  let names: Vec<String> = domino::workspace::discover_projects(&root)
+    .unwrap()
+    .into_iter()
+    .map(|p| p.name)
+    .collect();
+  assert_eq!(
+    names,
+    vec!["ui-lib".to_string()],
+    "Nx must win the detection race: only the Nx project.json project is discovered"
+  );
+}
+
+/// A change to a file matched by turbo.json `globalDependencies` invalidates
+/// every project — the Turborepo equivalent of Nx `sharedGlobals`.
+#[test]
+fn test_turbo_global_dependencies_change_affects_all_projects() {
+  let (_tmp, root) = setup_turbo_repo(
+    "turbo.json",
+    r#"{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [".env", "config/*.json"],
+  "tasks": {
+    "build": { "dependsOn": ["^build"] }
+  }
+}"#,
+  );
+
+  git_in(&root, &["checkout", "-q", "-b", "feature"]);
+  fs::write(root.join(".env"), "API_URL=https://other.test\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "change env"]);
+
+  let projects = domino::workspace::discover_projects(&root).unwrap();
+  let config = turbo_config_for(&root, projects, "main");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  for proj in ["@repo/app", "@repo/tools", "@repo/ui"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: .env is listed in turbo.json globalDependencies. Got: {:?}",
+      affected
+    );
+  }
+}
+
+/// A `turbo.jsonc` (Turborepo v2) with comments must be parsed, and a v1
+/// `pipeline` layout must not break `globalDependencies` handling.
+#[test]
+fn test_turbo_jsonc_with_comments_and_v1_pipeline_global_dependencies() {
+  let (_tmp, root) = setup_turbo_repo(
+    "turbo.jsonc",
+    r#"{
+  // Turborepo v1 task layout, JSONC comments, trailing comma below.
+  "globalDependencies": [".env"],
+  "pipeline": {
+    "build": { "dependsOn": ["^build"] },
+  }
+}"#,
+  );
+
+  git_in(&root, &["checkout", "-q", "-b", "feature"]);
+  fs::write(root.join(".env"), "API_URL=https://other.test\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "change env"]);
+
+  let projects = domino::workspace::discover_projects(&root).unwrap();
+  let config = turbo_config_for(&root, projects, "main");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  for proj in ["@repo/app", "@repo/tools", "@repo/ui"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: .env is a globalDependency in turbo.jsonc. Got: {:?}",
+      affected
+    );
+  }
+}
+
+/// A change NOT matched by `globalDependencies` must fall through to normal
+/// semantic tracing: only the changed project and its dependents are affected.
+#[test]
+fn test_turbo_non_global_change_does_not_globally_invalidate() {
+  let (_tmp, root) = setup_turbo_repo(
+    "turbo.json",
+    r#"{
+  "globalDependencies": [".env"],
+  "tasks": { "build": {} }
+}"#,
+  );
+
+  git_in(&root, &["checkout", "-q", "-b", "feature"]);
+  fs::write(
+    root.join("packages/ui/src/index.ts"),
+    r#"export function helper() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "modify helper"]);
+
+  let config = turbo_config_for(&root, turbo_projects(), "main");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert!(
+    affected.contains(&"@repo/ui".to_string()),
+    "@repo/ui was changed directly. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"@repo/app".to_string()),
+    "@repo/app imports helper() from @repo/ui. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"@repo/tools".to_string()),
+    "@repo/tools is unrelated and must NOT be affected — a non-global change \
+     must not trigger global invalidation. Got: {:?}",
     affected
   );
 }
@@ -4436,6 +4920,148 @@ fn test_wildcard_reexport_affects_consumer() {
   assert!(
     affected.contains(&"my-app".to_string()),
     "my-app should be affected through a wildcard re-export barrel. Got: {:?}",
+/// Nx wins over Turbo for global-invalidation config too: with both nx.json
+/// (namedInputs) and turbo.json (globalDependencies) present, only the Nx
+/// patterns apply, matching the project-discovery precedence.
+#[test]
+fn test_nx_named_inputs_win_over_turbo_global_dependencies() {
+  let (_tmp, root) = setup_turbo_repo(
+    "turbo.json",
+    r#"{
+  "globalDependencies": [".env"],
+  "tasks": { "build": {} }
+}"#,
+  );
+
+  // nx.json declares a *different* global file, and Nx projects mirror the
+  // package.json workspaces so the affected sets are comparable.
+  fs::write(
+    root.join("nx.json"),
+    r#"{
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": ["{workspaceRoot}/.nvmrc"]
+  }
+}"#,
+  )
+  .unwrap();
+  for pkg in ["ui", "app", "tools"] {
+    fs::write(
+      root.join(format!("packages/{pkg}/project.json")),
+      format!(r#"{{"name": "{pkg}", "sourceRoot": "packages/{pkg}/src"}}"#),
+    )
+    .unwrap();
+  }
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "add nx.json"]);
+
+  git_in(&root, &["checkout", "-q", "-b", "feature"]);
+  fs::write(root.join(".env"), "API_URL=https://other.test\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "change env"]);
+
+  let projects = domino::workspace::discover_projects(&root).unwrap();
+  let config = turbo_config_for(&root, projects, "main");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler.clone())
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert!(
+    !affected.contains(&"tools".to_string()),
+    "tools must NOT be affected: nx.json takes precedence and does not list \
+     .env in sharedGlobals, so turbo.json globalDependencies must be ignored. \
+     Got: {:?}",
+    affected
+  );
+
+  // Positive control: this test would pass vacuously if the Nx global-invalidation
+  // path were silently broken (e.g. always resolving to `None`), since an empty
+  // global-trigger set also means "tools" isn't affected. Prove the Nx path is
+  // actually wired up by changing a file the Nx `sharedGlobals` DOES list
+  // (`.nvmrc`) and confirming it DOES globally invalidate every project.
+  fs::write(root.join(".nvmrc"), "20\n").unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-q", "-m", "bump node version"]);
+
+  let projects_after_nvmrc = domino::workspace::discover_projects(&root).unwrap();
+  let config_after_nvmrc = turbo_config_for(&root, projects_after_nvmrc, "main");
+  let affected_after_nvmrc = find_affected(config_after_nvmrc, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  for project in ["ui", "app", "tools"] {
+    assert!(
+      affected_after_nvmrc.contains(&project.to_string()),
+      "{project} MUST be affected: `.nvmrc` matches nx.json's sharedGlobals \
+       pattern, so the Nx global-invalidation path must mark every project \
+       affected. Got: {:?}",
+      affected_after_nvmrc
+    );
+  }
+}
+
+/// Consistency with the Nx dependency-manifest exemption (see
+/// `test_dependency_manifest_in_shared_globals_does_not_globally_invalidate`):
+/// a lockfile listed in turbo.json `globalDependencies` must NOT globally
+/// invalidate when lockfile analysis is enabled — the lockfile analyzer computes
+/// the real affected set instead.
+#[test]
+fn test_turbo_dependency_manifest_in_global_dependencies_does_not_globally_invalidate() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  fs::write(
+    root.join("turbo.json"),
+    r#"{
+  "globalDependencies": ["package.json", "package-lock.json"],
+  "tasks": { "build": {} }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(
+    &root,
+    &[
+      "commit",
+      "-m",
+      "add turbo.json with lockfile globalDependencies",
+    ],
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "dependencies": { "lib-a": "^1.0.0" } },
+    "node_modules/lib-a": { "version": "2.0.0", "dependencies": { "lib-nested": "^1.0.0" } },
+    "node_modules/lib-nested": { "version": "1.0.0" }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let mut config = turbo_config_for(&root, lockfile_projects(), "main");
+  config.lockfile_strategy = LockfileStrategy::Direct;
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  assert!(
+    affected.contains(&"proj-a".to_string()),
+    "proj-a imports lib-a and must be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"proj-c".to_string()),
+    "proj-c has no lib-a dependency and must NOT be affected — a lockfile listed \
+     in turbo.json globalDependencies must not globally invalidate. Got: {:?}",
     affected
   );
 }
@@ -4505,4 +5131,62 @@ fn test_barrel_consumer_of_other_symbol_not_affected() {
      NOT be affected. Got: {:?}",
     affected
   );
+/// The manifest exemption is gated on lockfile analysis actually running, for
+/// Turbo exactly as for Nx: under `LockfileStrategy::None` a lockfile listed in
+/// `globalDependencies` stays a global trigger (conservative fallback) instead
+/// of silently dropping all -> 0.
+#[test]
+fn test_turbo_lockfile_in_global_dependencies_with_none_strategy_still_globally_invalidates() {
+  let (_tmp, root) = setup_lockfile_test_repo();
+
+  fs::write(
+    root.join("turbo.json"),
+    r#"{
+  "globalDependencies": ["package.json", "package-lock.json"],
+  "tasks": { "build": {} }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(
+    &root,
+    &[
+      "commit",
+      "-m",
+      "add turbo.json with lockfile globalDependencies",
+    ],
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("package-lock.json"),
+    r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "dependencies": { "lib-a": "^1.0.0" } },
+    "node_modules/lib-a": { "version": "2.0.0", "dependencies": { "lib-nested": "^1.0.0" } },
+    "node_modules/lib-nested": { "version": "1.0.0" }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "bump lib-a"]);
+
+  let config = turbo_config_for(&root, lockfile_projects(), "main");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+
+  for proj in ["proj-a", "proj-b", "proj-c"] {
+    assert!(
+      affected.contains(&proj.to_string()),
+      "{proj} must be affected: with strategy=none there is no lockfile analysis, \
+       so a lockfile in turbo.json globalDependencies must globally invalidate. \
+       Got: {:?}",
+      affected
+    );
+  }
 }

@@ -600,6 +600,27 @@ fn test_invalid_base_branch() {
   assert!(!stderr.is_empty(), "Should show error message");
 }
 
+#[test]
+fn test_ts_config_flag_removed() {
+  let branch = TestBranch::new("test-ts-config-removed");
+
+  // --ts-config was a dead option (never read by the pipeline) and has been
+  // removed entirely. It must now be rejected as an unknown argument.
+  let output = branch.run_domino(&["affected", "--base", "main", "--ts-config", "foo.json"]);
+
+  assert!(
+    !output.status.success(),
+    "--ts-config should be rejected as an unknown argument"
+  );
+
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    stderr.contains("unexpected argument") || stderr.contains("unrecognized"),
+    "Should show an unknown argument error, got: {}",
+    stderr
+  );
+}
+
 // ============================================================================
 // Combined Flags Tests
 // ============================================================================

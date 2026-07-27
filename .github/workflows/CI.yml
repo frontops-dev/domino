@@ -51,8 +51,14 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          # No step here needs to authenticate to the remote; don't leave the
+          # job-scoped token in the local git config while running repo code.
+          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup show
       - name: Cache cargo

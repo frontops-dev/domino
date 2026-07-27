@@ -125,6 +125,113 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
   })
 }
 
+/// Label reported for turbo.json global-invalidation triggers. Mirrors the way
+/// the Nx path reports the `namedInput` name (e.g. `sharedGlobals`): the term
+/// surfaced back to the user is the key they actually wrote in their config.
+pub(crate) const TURBO_GLOBAL_DEPENDENCIES: &str = "globalDependencies";
+
+/// Resolve global-invalidation patterns from a root `turbo.json` / `turbo.jsonc`.
+///
+/// Turborepo's `globalDependencies` are the direct analogue of Nx's
+/// `sharedGlobals`: workspace-root-relative globs whose contents feed the global
+/// hash, so a change to any of them invalidates every task in the workspace.
+/// They are compiled into the same [`ResolvedNamedInputs`] the Nx path produces,
+/// so `core` treats both identically — including the dependency-manifest
+/// exemption that keeps a lockfile in the list from short-circuiting to "all
+/// projects" while lockfile analysis is enabled.
+///
+/// Turborepo has no per-project negation concept, so `negation_patterns` is
+/// always empty. Returns `None` when there is no turbo config, it can't be
+/// parsed, or it lists no usable `globalDependencies`.
+pub fn resolve_from_turbo_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
+  let config = crate::workspace::turbo::parse_config(cwd)?;
+
+  if config.global_dependencies.is_empty() {
+    debug!("No globalDependencies found in turbo config");
+    return None;
+  }
+
+  let mut global_patterns: Vec<GlobalPattern> = Vec::new();
+  for raw_pattern in &config.global_dependencies {
+    // Negations only carry meaning for task `inputs`/`outputs` (out of scope),
+    // and Turborepo rejects globs that escape the workspace root. Skip both
+    // rather than mis-compiling them into positive patterns that would
+    // over-invalidate.
+    if let Some(negated) = raw_pattern.strip_prefix('!') {
+      // Dropping a negation silently over-includes files the user meant to
+      // exclude, which changes the affected result — loud enough for warn!,
+      // matching the root-escaping skip below.
+      warn!(
+        "Skipping negated globalDependency '!{}' (not supported)",
+        negated
+      );
+      continue;
+    }
+    // A bare ".." or a "../..." prefix escapes the workspace root. Don't
+    // reject a legitimate root-relative file that merely starts with two
+    // literal dots, e.g. "..config.json".
+    if raw_pattern.starts_with('/') || raw_pattern == ".." || raw_pattern.starts_with("../") {
+      warn!(
+        "Skipping globalDependency '{}': not relative to the workspace root",
+        raw_pattern
+      );
+      continue;
+    }
+
+    // Strip a leading "./" before compiling: glob::Pattern matches it
+    // literally, so "./.env" would never match git's relative path ".env" —
+    // a silent no-op. `raw_pattern` is kept as-written for display.
+    let compiled_pattern = raw_pattern.strip_prefix("./").unwrap_or(raw_pattern);
+
+    match Pattern::new(compiled_pattern) {
+      Ok(pattern) => {
+        debug!("Global pattern from globalDependencies: {}", raw_pattern);
+        global_patterns.push(GlobalPattern {
+          named_input: TURBO_GLOBAL_DEPENDENCIES.to_string(),
+          raw_pattern: raw_pattern.clone(),
+          pattern,
+        });
+      }
+      Err(e) => {
+        warn!("Invalid glob pattern '{}': {}", raw_pattern, e);
+      }
+    }
+  }
+
+  if global_patterns.is_empty() {
+    debug!("No actionable patterns resolved from globalDependencies");
+    return None;
+  }
+
+  debug!(
+    "Resolved {} global patterns from globalDependencies",
+    global_patterns.len()
+  );
+
+  Some(ResolvedNamedInputs {
+    global_patterns,
+    negation_patterns: Vec::new(),
+  })
+}
+
+/// Resolve the workspace's global-invalidation configuration, following the same
+/// workspace-type precedence as project discovery
+/// ([`crate::workspace::discover_projects`]): Nx before Turborepo.
+///
+/// A repo containing both `nx.json` and `turbo.json` is treated as an Nx
+/// workspace, so its `namedInputs` are authoritative and turbo.json is ignored —
+/// otherwise the projects and the global rules could come from two different
+/// tools' configs.
+pub fn resolve_global_inputs(cwd: &Path) -> Option<ResolvedNamedInputs> {
+  if crate::workspace::nx::is_nx_workspace(cwd) {
+    return resolve_from_nx_json(cwd);
+  }
+  if crate::workspace::turbo::is_turbo_workspace(cwd) {
+    return resolve_from_turbo_json(cwd);
+  }
+  None
+}
+
 /// Recursively resolve a named input, following references to other named inputs.
 ///
 /// `origin` is the user-facing namedInput name attributed to literal patterns
@@ -612,5 +719,154 @@ mod tests {
     }];
 
     assert!(check_global_invalidation(&resolved, &changed).is_empty());
+  }
+
+  fn write_turbo_json(root: &Path, content: &str) {
+    fs::write(root.join("turbo.json"), content).unwrap();
+  }
+
+  #[test]
+  fn test_turbo_global_dependencies_resolved() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_turbo_json(
+      root,
+      r#"{
+        "globalDependencies": [".env", "config/*.json"],
+        "tasks": { "build": {} }
+      }"#,
+    );
+
+    let resolved = resolve_from_turbo_json(root).unwrap();
+    assert_eq!(resolved.global_patterns.len(), 2);
+    // Turborepo has no per-project negation concept.
+    assert!(resolved.negation_patterns.is_empty());
+
+    let env = resolved
+      .matches_global_pattern(&PathBuf::from(".env"))
+      .expect(".env should match");
+    assert_eq!(env.named_input, "globalDependencies");
+    assert_eq!(env.raw_pattern, ".env");
+
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("config/app.json"))
+      .is_some());
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("packages/ui/src/index.ts"))
+      .is_none());
+  }
+
+  #[test]
+  fn test_turbo_without_global_dependencies_returns_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_turbo_json(root, r#"{"tasks": {"build": {}}}"#);
+    assert!(resolve_from_turbo_json(root).is_none());
+  }
+
+  #[test]
+  fn test_turbo_unusable_patterns_skipped() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Negations and root-escaping globs are skipped rather than mis-compiled
+    // into positive patterns; the remaining entries still resolve. "..config.json"
+    // merely starts with two literal dots — it is a legitimate root file, not a
+    // root-escaping "../" path, so it must NOT be skipped.
+    write_turbo_json(
+      root,
+      r#"{
+        "globalDependencies": ["!.env.local", "../outside/**", "/abs/path", ".env", "..config.json"]
+      }"#,
+    );
+
+    let resolved = resolve_from_turbo_json(root).unwrap();
+    assert_eq!(resolved.global_patterns.len(), 2);
+    assert_eq!(resolved.global_patterns[0].raw_pattern, ".env");
+    assert_eq!(resolved.global_patterns[1].raw_pattern, "..config.json");
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from(".env.local"))
+      .is_none());
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from("..config.json"))
+      .is_some());
+  }
+
+  #[test]
+  fn test_turbo_leading_dot_slash_stripped_before_compiling() {
+    // A leading "./" compiles into a glob::Pattern that can never match
+    // git's relative paths (which never start with "./"), silently making
+    // the pattern a no-op. It must be stripped before compiling.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_turbo_json(root, r#"{"globalDependencies": ["./.env"]}"#);
+
+    let resolved = resolve_from_turbo_json(root).unwrap();
+    assert_eq!(resolved.global_patterns.len(), 1);
+    // Display text keeps the user's original spelling...
+    assert_eq!(resolved.global_patterns[0].raw_pattern, "./.env");
+    // ...but the compiled pattern matches the path git actually reports.
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from(".env"))
+      .is_some());
+  }
+
+  #[test]
+  fn test_turbo_malformed_config_returns_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_turbo_json(root, "{ not json ");
+    assert!(resolve_from_turbo_json(root).is_none());
+  }
+
+  #[test]
+  fn test_resolve_global_inputs_prefers_nx_over_turbo() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_nx_json(
+      root,
+      r#"{
+        "namedInputs": {
+          "default": ["{projectRoot}/**/*", "sharedGlobals"],
+          "sharedGlobals": ["{workspaceRoot}/.nvmrc"]
+        }
+      }"#,
+    );
+    write_turbo_json(root, r#"{"globalDependencies": [".env"]}"#);
+
+    let resolved = resolve_global_inputs(root).expect("nx.json should resolve");
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from(".nvmrc"))
+      .is_some());
+    assert!(
+      resolved
+        .matches_global_pattern(&PathBuf::from(".env"))
+        .is_none(),
+      "turbo.json globalDependencies must be ignored in an Nx workspace"
+    );
+  }
+
+  #[test]
+  fn test_resolve_global_inputs_falls_back_to_turbo() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+
+    write_turbo_json(root, r#"{"globalDependencies": [".env"]}"#);
+
+    let resolved = resolve_global_inputs(root).expect("turbo.json should resolve");
+    assert!(resolved
+      .matches_global_pattern(&PathBuf::from(".env"))
+      .is_some());
+  }
+
+  #[test]
+  fn test_resolve_global_inputs_none_without_config() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(resolve_global_inputs(dir.path()).is_none());
   }
 }

@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -50,54 +52,9 @@ fn git_command(args: &[&str]) -> String {
   String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// Ensure the fixture repo is initialized with git
+/// Ensure the fixture repo exists and is initialized with git
 fn ensure_git_repo() {
-  let fixture = fixture_path();
-  let git_dir = fixture.join(".git");
-
-  // If .git directory doesn't exist, initialize the repo
-  if !git_dir.exists() {
-    // Initialize git repo
-    Command::new("git")
-      .args(["init"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to init git repo");
-
-    // Configure git
-    Command::new("git")
-      .args(["config", "user.email", "test@example.com"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to configure git email");
-
-    Command::new("git")
-      .args(["config", "user.name", "Test User"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to configure git name");
-
-    // Rename default branch to main (for consistency)
-    Command::new("git")
-      .args(["branch", "-M", "main"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to rename branch to main");
-
-    // Add all files
-    Command::new("git")
-      .args(["add", "."])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to add files");
-
-    // Create initial commit
-    Command::new("git")
-      .args(["commit", "-m", "Initial commit"])
-      .current_dir(&fixture)
-      .output()
-      .expect("Failed to create initial commit");
-  }
+  common::ensure_fixture_git_repo(&fixture_path());
 }
 
 /// Setup: Create a test branch and reset to main after test

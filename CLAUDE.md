@@ -185,7 +185,7 @@ domino affected --lockfile-strategy full
 domino affected --cwd /path/to/monorepo
 ```
 
-Two things the flag list does not show:
+Three things the flag list does not show:
 
 - `--base` defaults to `origin/main` only as a clap placeholder. When it is left at that
   default, `git::detect_default_branch` overrides it with the repository's actual default

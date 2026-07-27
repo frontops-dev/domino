@@ -44,18 +44,109 @@ fn git_command(args: &[&str]) -> String {
 /// cannot be that guard: it also reports untracked and unstaged files, which
 /// other tests routinely leave in the shared fixture, so it would report work
 /// to commit when the index is actually empty.
+///
+/// Only exit code 0 means "clean"; 1 means "staged". Anything else (128 for a
+/// broken repo, a signal, a failure to launch git) is an unknown state that
+/// must not be silently reported as clean, or the caller skips a commit it
+/// owed the shared fixture. Such states resolve to "attempt the commit" so the
+/// error surfaces through `git_command`, which panics with git's stderr —
+/// rather than by panicking here, which would abort the whole test binary when
+/// the `Drop` caller below runs during unwinding.
 fn has_staged_changes(dir: &Path) -> bool {
   Command::new("git")
     .args(["diff", "--cached", "--quiet"])
     .current_dir(dir)
     .status()
-    .map(|status| status.code() == Some(1))
-    .unwrap_or(false)
+    .map(|status| status.code() != Some(0))
+    .unwrap_or(true)
 }
 
 /// Ensure the fixture repo exists and is initialized with git
 fn ensure_git_repo() {
   common::ensure_fixture_git_repo(&fixture_path());
+}
+
+/// A structurally invalid `.git` *directory* must not be reused, even though
+/// every liveness check passes against it.
+///
+/// Git's repository discovery walks up past an invalid gitdir instead of
+/// failing, so inside an enclosing repository `rev-parse` and
+/// `show-ref refs/heads/main` both succeed — against the *outer* repo. A
+/// fixture in that state looks healthy, and the `git checkout` / `git commit`
+/// calls these tests make would then run against domino's real working tree.
+#[test]
+fn fixture_regenerates_when_git_dir_is_invalid_inside_enclosing_repo() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let (outer, fixture) = enclosing_repo_with_fixture(tmp.path());
+
+  // A fixture whose `.git` exists but holds none of the structure git needs.
+  fs::create_dir_all(fixture.join(".git")).expect("Failed to create fixture dir");
+
+  // Precondition: this is precisely the state that fools a liveness check.
+  assert_eq!(
+    canonical(git_in(&fixture, &["rev-parse", "--show-toplevel"])),
+    canonical(outer),
+    "expected the invalid .git to resolve to the enclosing repo"
+  );
+  git_in(&fixture, &["show-ref", "--verify", "refs/heads/main"]);
+
+  common::ensure_fixture_git_repo(&fixture);
+  assert_fixture_owns_itself(outer, &fixture);
+}
+
+/// A `.git` *file* is linked-worktree or submodule metadata pointing at a
+/// gitdir that need not exist here — exactly the state a container mount of a
+/// git worktree produces. The scaffolding only ever creates a real repository,
+/// so this is a broken fixture rather than something to reuse.
+#[test]
+fn fixture_regenerates_when_git_is_a_file() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let (outer, fixture) = enclosing_repo_with_fixture(tmp.path());
+
+  fs::create_dir_all(&fixture).expect("Failed to create fixture dir");
+  fs::write(
+    fixture.join(".git"),
+    "gitdir: /nonexistent/worktrees/monorepo\n",
+  )
+  .expect("Failed to write .git file");
+
+  common::ensure_fixture_git_repo(&fixture);
+  assert_fixture_owns_itself(outer, &fixture);
+}
+
+/// Build an enclosing repository with a `main` branch, mirroring how the real
+/// fixture sits inside domino's own checkout. Returns `(outer, fixture)`; the
+/// fixture directory itself is left for the caller to stage.
+fn enclosing_repo_with_fixture(outer: &Path) -> (&Path, PathBuf) {
+  git_in(outer, &["init"]);
+  git_in(outer, &["config", "user.email", "test@example.com"]);
+  git_in(outer, &["config", "user.name", "Test User"]);
+  git_in(outer, &["branch", "-M", "main"]);
+  fs::write(outer.join("outer.txt"), "outer").expect("Failed to write file");
+  git_in(outer, &["add", "."]);
+  git_in(outer, &["commit", "-m", "Outer commit"]);
+
+  let fixture = outer.join("tests").join("fixtures").join("monorepo");
+  (outer, fixture)
+}
+
+/// The fixture is its own repository with its own `main` and generated
+/// content, and the enclosing repository was never committed to.
+fn assert_fixture_owns_itself(outer: &Path, fixture: &Path) {
+  assert_eq!(
+    canonical(git_in(fixture, &["rev-parse", "--show-toplevel"])),
+    canonical(fixture),
+    "fixture should have been regenerated as its own repository"
+  );
+  git_in(fixture, &["show-ref", "--verify", "refs/heads/main"]);
+  assert!(fixture.join("proj1/index.ts").exists());
+  assert_eq!(git_in(outer, &["rev-list", "--count", "HEAD"]), "1");
+}
+
+/// Resolve symlinks so `/var` and `/private/var` compare equal on macOS.
+fn canonical(path: impl AsRef<Path>) -> PathBuf {
+  fs::canonicalize(path.as_ref())
+    .unwrap_or_else(|e| panic!("Failed to canonicalize {}: {e}", path.as_ref().display()))
 }
 
 /// Setup: Create a test branch and reset to main after test

@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Base fixture layout: an Nx-style monorepo with three projects.
@@ -235,6 +235,49 @@ fn git_succeeds(fixture: &Path, args: &[&str]) -> bool {
     .unwrap_or(false)
 }
 
+/// What git makes of the fixture directory.
+enum FixtureRepo {
+  /// git resolves the directory to the fixture's *own* repository.
+  Own,
+  /// git ran, but the directory is not the fixture's own repository.
+  Foreign,
+  /// git could not be executed at all.
+  GitUnavailable,
+}
+
+/// Ask git which repository `fixture` belongs to.
+///
+/// The question has to be *identity* ("which repo is this?"), not liveness
+/// ("does git work here?"). Git's repository discovery walks **up** from the
+/// working directory until it finds a structurally valid gitdir, silently
+/// skipping an empty or half-written `.git` rather than reporting it. Since
+/// this fixture lives inside domino's own checkout, a corrupt `.git` makes the
+/// walk land on domino itself — `rev-parse` and `show-ref refs/heads/main`
+/// then both succeed against *that* repo, the fixture looks reusable, and
+/// every later `git checkout` / `git commit` in the tests runs against the
+/// real working tree.
+fn classify_fixture_repo(fixture: &Path) -> FixtureRepo {
+  let Ok(output) = Command::new("git")
+    .args(["rev-parse", "--absolute-git-dir"])
+    .current_dir(fixture)
+    .output()
+  else {
+    return FixtureRepo::GitUnavailable;
+  };
+
+  if !output.status.success() {
+    return FixtureRepo::Foreign;
+  }
+
+  // `--absolute-git-dir` is absolute but not necessarily canonical (macOS
+  // resolves `/var` to `/private/var`), so compare canonicalised forms.
+  let resolved = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+  match (resolved.canonicalize(), fixture.join(".git").canonicalize()) {
+    (Ok(resolved), Ok(expected)) if resolved == expected => FixtureRepo::Own,
+    _ => FixtureRepo::Foreign,
+  }
+}
+
 fn write_fixture_files(fixture: &Path) {
   for (rel_path, content) in FIXTURE_FILES {
     let path = fixture.join(rel_path);
@@ -260,35 +303,33 @@ pub fn fixture_file_content(rel_path: &str) -> &'static str {
 /// regenerates the fixture if a previous interrupted run left the repo in a
 /// broken state (e.g. HEAD on an unborn branch).
 pub fn ensure_fixture_git_repo(fixture: &Path) {
-  // Self-heal: an interrupted run can leave .git without a usable main branch.
-  // Only wipe when git demonstrably works on this repo (`rev-parse --git-dir`
-  // succeeds) but `main` is missing — environmental failures (git not on
-  // PATH, dubious-ownership, permissions) should surface loudly later via
-  // run_git instead of silently destroying the fixture.
-  // A `.git` *file* is linked-worktree or submodule metadata pointing at a
-  // gitdir that need not exist here. The scaffolding below always creates a
-  // real repository, so anything else is a broken fixture, not something to
-  // reuse — and leaving it in place makes every test fail with a confusing
-  // "not a git repository".
-  if fixture.join(".git").is_file() {
-    fs::remove_dir_all(fixture).expect("Failed to remove broken fixture");
-  }
-
-  // `show-ref --verify refs/heads/main` rather than `rev-parse --verify main`:
-  // the latter also resolves a *tag* named `main`, which would let a fixture
-  // with no local `main` branch skip regeneration and then fail on checkout.
-  if fixture.join(".git").is_dir()
-    && git_succeeds(fixture, &["rev-parse", "--git-dir"])
-    && !git_succeeds(
-      fixture,
-      &["show-ref", "--verify", "--quiet", "refs/heads/main"],
-    )
-  {
-    fs::remove_dir_all(fixture).expect("Failed to remove broken fixture");
-  }
-
-  if fixture.join(".git").is_dir() {
-    return;
+  // Self-heal: an interrupted run can leave `.git` behind in a state that is
+  // not reusable. `classify_fixture_repo` is what decides, because merely
+  // asking whether git works here answers the wrong question — see its docs
+  // for why a corrupt `.git` resolves to the *enclosing* domino repository
+  // instead of failing. A `.git` *file* is covered by the same comparison:
+  // linked-worktree or submodule metadata points at a gitdir elsewhere.
+  if fixture.join(".git").exists() {
+    match classify_fixture_repo(fixture) {
+      // Reuse only when the fixture is its own repo *and* carries a local
+      // `main` branch. `show-ref --verify refs/heads/main` rather than
+      // `rev-parse --verify main`: the latter also resolves a *tag* named
+      // `main`, which would let a fixture with no local branch skip
+      // regeneration and then fail on checkout.
+      FixtureRepo::Own
+        if git_succeeds(
+          fixture,
+          &["show-ref", "--verify", "--quiet", "refs/heads/main"],
+        ) =>
+      {
+        return;
+      }
+      // git could not run at all. Deleting the fixture would not help — the
+      // rebuild below fails the same way — so leave it in place and let
+      // `run_git` surface the real error.
+      FixtureRepo::GitUnavailable => {}
+      _ => fs::remove_dir_all(fixture).expect("Failed to remove broken fixture"),
+    }
   }
 
   write_fixture_files(fixture);

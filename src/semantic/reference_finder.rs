@@ -223,43 +223,50 @@ impl<'a> ReferenceFinder<'a> {
     // REVERSE: Find files that re-export FROM the current file (barrel files like index.ts)
     // For example, if clients.module.ts exports ClientsModule, and index.ts re-exports it,
     // we need to look for imports of index.ts
-    for (reexporting_file, file_exports) in &self.analyzer.exports {
-      for export in file_exports {
-        // Check if this export is a re-export from our current_file
-        if let Some(ref from_module) = export.re_export_from {
-          if let Some(resolved) = self.resolve_import(reexporting_file, from_module) {
-            if self.paths_equal(&resolved, current_file) {
-              // Handle wildcard re-exports: export * from '...'
-              if export.exported_name == "*" {
-                debug!(
-                  "Found barrel file {:?} with wildcard re-export from {:?}",
-                  reexporting_file, current_file
-                );
-                // Recursively look for imports of the re-exporting file
-                // The symbol name stays the same through wildcard re-exports
-                self.find_refs_recursive(symbol_name, reexporting_file, all_refs, visited)?;
-              } else {
-                // Named re-export: export { X } from '...' or export { X as Y } from '...'
-                let exported_symbol = export
-                  .local_name
-                  .as_deref()
-                  .unwrap_or(&export.exported_name);
-                if exported_symbol == symbol_name {
-                  debug!(
-                    "Found barrel file {:?} re-exporting '{}' from {:?}",
-                    reexporting_file, export.exported_name, current_file
-                  );
-                  // Recursively look for imports of the re-exporting file
-                  self.find_refs_recursive(
-                    &export.exported_name,
-                    reexporting_file,
-                    all_refs,
-                    visited,
-                  )?;
-                }
-              }
-            }
-          }
+    //
+    // The analyzer pre-computes this reverse mapping once (see
+    // `WorkspaceAnalyzer::build_reexport_index`), so this is a single hash lookup.
+    // Previously this scanned every export of every file in the workspace and resolved
+    // each re-export specifier on every call, which is O(total_exports) per visited
+    // (file, symbol) node.
+    let reexport_start = if self.profiler.is_enabled() {
+      Some(Instant::now())
+    } else {
+      None
+    };
+    let reexporters = self
+      .analyzer
+      .reexport_index
+      .get(Self::normalize_path(&self.cwd, current_file));
+    if let Some(start) = reexport_start {
+      self
+        .profiler
+        .record_reexport_check(start.elapsed().as_nanos() as u64);
+    }
+
+    for (reexporting_file, export) in reexporters.into_iter().flatten() {
+      // Handle wildcard re-exports: export * from '...'
+      if export.exported_name == "*" {
+        debug!(
+          "Found barrel file {:?} with wildcard re-export from {:?}",
+          reexporting_file, current_file
+        );
+        // Recursively look for imports of the re-exporting file
+        // The symbol name stays the same through wildcard re-exports
+        self.find_refs_recursive(symbol_name, reexporting_file, all_refs, visited)?;
+      } else {
+        // Named re-export: export { X } from '...' or export { X as Y } from '...'
+        let exported_symbol = export
+          .local_name
+          .as_deref()
+          .unwrap_or(&export.exported_name);
+        if exported_symbol == symbol_name {
+          debug!(
+            "Found barrel file {:?} re-exporting '{}' from {:?}",
+            reexporting_file, export.exported_name, current_file
+          );
+          // Recursively look for imports of the re-exporting file
+          self.find_refs_recursive(&export.exported_name, reexporting_file, all_refs, visited)?;
         }
       }
     }
@@ -355,22 +362,23 @@ impl<'a> ReferenceFinder<'a> {
     }
   }
 
+  /// Normalize a path to the workspace-relative form used as index keys.
+  ///
+  /// Absolute paths inside the workspace are made relative to `cwd`; everything else
+  /// is left untouched. No case folding or symlink canonicalization happens here, so
+  /// index keys must be built from the same (already `cwd`-relative) paths the
+  /// resolver produces — see `WorkspaceAnalyzer::resolve_workspace_specifier`.
+  fn normalize_path<'p>(cwd: &Path, path: &'p Path) -> &'p Path {
+    if path.is_absolute() {
+      path.strip_prefix(cwd).unwrap_or(path)
+    } else {
+      path
+    }
+  }
+
   /// Compare two paths for equality (handling relative vs absolute)
   fn paths_equal(&self, path1: &Path, path2: &Path) -> bool {
-    // Normalize both paths
-    let p1 = if path1.is_absolute() {
-      path1.strip_prefix(&self.cwd).unwrap_or(path1)
-    } else {
-      path1
-    };
-
-    let p2 = if path2.is_absolute() {
-      path2.strip_prefix(&self.cwd).unwrap_or(path2)
-    } else {
-      path2
-    };
-
-    p1 == p2
+    Self::normalize_path(&self.cwd, path1) == Self::normalize_path(&self.cwd, path2)
   }
 }
 

@@ -88,9 +88,8 @@ impl Profiler {
       .fetch_add(duration_ns, Ordering::Relaxed);
   }
 
-  /// Record a re-export check
+  /// Record a re-export check (reverse re-export index lookup)
   #[inline]
-  #[allow(dead_code)]
   pub fn record_reexport_check(&self, duration_ns: u64) {
     if !self.enabled {
       return;

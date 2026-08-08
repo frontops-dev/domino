@@ -23,7 +23,10 @@ env:
       - reopened
       - edited
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Pull request runs are superseded by newer pushes to the same branch, but each
+  # commit on main gets its own group so it is never cancelled or queued: pushes to
+  # main publish release artifacts and must always run the full matrix.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: true
 jobs:
   lint:
@@ -373,6 +376,12 @@ jobs:
     name: Publish
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Main-branch runs are no longer cancelled, so several can be in flight at once.
+    # Releases must still happen one at a time: queue publishes instead of overlapping
+    # them, since each derives its version from the latest tag.
+    concurrency:
+      group: publish-main
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
@@ -401,6 +410,10 @@ jobs:
       - name: Determine version bump
         id: version
         run: |
+          # Re-fetch tags: this checkout was made when the job was queued, so it can
+          # predate a tag an earlier main-branch run pushed while we were waiting.
+          git fetch --force --tags origin main
+
           COMMIT_MSG=$(git log -1 --pretty=%s)
 
           if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
@@ -460,25 +473,53 @@ jobs:
             echo "::warning::If this is unintentional, check commit messages for accidental '!:' suffix or 'BREAKING CHANGE:' footer"
           fi
 
+          # Bump from the last tag rather than from package.json: a queued run's checkout
+          # can still carry the pre-bump version even though a release already happened.
+          BASE_VERSION="${LAST_TAG#v}"
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION=$(node -p "require('./package.json').version")
+          fi
+          NEXT_VERSION=$(node -e 'const [b,t]=process.argv.slice(1);const [x,y,z]=b.split(".").map(Number);console.log(t==="major"?`${x+1}.0.0`:t==="minor"?`${x}.${y+1}.0`:`${x}.${y}.${z+1}`)' "$BASE_VERSION" "$BUMP")
+
+          echo "Next version: $BASE_VERSION -> $NEXT_VERSION"
+
           echo "bump=$BUMP" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
       - name: Bump version
         id: bump
         if: steps.version.outputs.is_release != 'true'
         run: |
-          npm version ${{ steps.version.outputs.bump }} --no-git-tag-version --ignore-scripts
+          npm version ${{ steps.version.outputs.next_version }} --no-git-tag-version --ignore-scripts --allow-same-version
           node scripts/sync-cargo-version.js
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
-      - name: Generate packages
+      - name: Claim version
+        id: claim
         if: steps.version.outputs.is_release != 'true'
+        run: |
+          TAG="v${{ steps.bump.outputs.new_version }}"
+          # Compare-and-swap on the tag: creating a remote ref is atomic and reversible,
+          # so whoever wins owns the version and everyone else stops here — before npm
+          # publish, the only irreversible step. Re-running the same commit re-pushes the
+          # same ref, which is a no-op success, so a retry after a flaky publish works.
+          # The tag marks the commit that was released; the version commit follows it.
+          if git push origin "HEAD:refs/tags/${TAG}"; then
+            echo "Claimed ${TAG}"
+            echo "claimed=true" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::${TAG} is already claimed by another run — skipping release"
+            echo "claimed=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Generate packages
+        if: steps.claim.outputs.claimed == 'true'
         run: node scripts/generate-packages.js
       - name: List packages
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.claim.outputs.claimed == 'true'
         run: ls -R ./npm
         shell: bash
       - name: Publish to npm
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.claim.outputs.claimed == 'true'
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
@@ -490,8 +531,8 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Push version commit and tag
-        if: steps.version.outputs.is_release != 'true'
+      - name: Push version commit
+        if: steps.claim.outputs.claimed == 'true'
         env:
           HUSKY: '0'
         run: |
@@ -510,5 +551,17 @@ jobs:
           done
           git add package.json Cargo.toml yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
-          git tag "v${{ steps.bump.outputs.new_version }}"
-          git push --atomic origin main "v${{ steps.bump.outputs.new_version }}"
+          # The tag was already pushed to claim the version, so only the commit is left.
+          # A feature commit can land on main while we publish, so rebase and retry.
+          for i in 1 2 3; do
+            if git push origin HEAD:refs/heads/main; then
+              exit 0
+            fi
+            echo "push attempt $i was rejected — rebasing onto origin/main"
+            git fetch origin main
+            git rebase origin/main || {
+              echo "::error::v${{ steps.bump.outputs.new_version }} is published and tagged, but the version commit conflicts with main and must be pushed manually"
+              exit 1
+            }
+          done
+          exit 1

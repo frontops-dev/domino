@@ -139,6 +139,7 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
     source_root,
     ts_config: None,
     implicit_dependencies: vec![],
+    config_dependencies: vec![],
     targets: vec![],
   })
 }

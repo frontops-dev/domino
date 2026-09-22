@@ -359,6 +359,7 @@ mod tests {
       source_root: PathBuf::from("packages/my-lib"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -387,6 +388,7 @@ mod tests {
       source_root: PathBuf::from("packages/my-lib"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -420,6 +422,7 @@ mod tests {
       source_root: PathBuf::from("packages/my-lib/src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -451,6 +454,7 @@ mod tests {
       source_root: PathBuf::from("packages/ghost"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -474,6 +478,7 @@ mod tests {
         source_root: PathBuf::from("packages/placeholder"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       })
       .collect()

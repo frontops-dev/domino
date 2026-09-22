@@ -21,6 +21,52 @@ struct NxProjectJson {
 #[derive(Debug, Deserialize)]
 struct NxTarget {
   options: Option<NxTargetOptions>,
+  /// Kept as raw JSON: entries mix strings (`"production"`, `"^build"`) with
+  /// several object shapes, and a strict type would fail the whole
+  /// project.json on any shape it did not anticipate.
+  inputs: Option<serde_json::Value>,
+  #[serde(rename = "dependsOn")]
+  depends_on: Option<serde_json::Value>,
+}
+
+/// Project names a target's config links to: the `projects` field of object
+/// entries in `inputs` (`{ "input": "production", "projects": ["x"] }`) and
+/// `dependsOn` (`{ "projects": ["x"], "target": "build" }`). `projects` may be a
+/// string or an array. Raw values are returned as written (including `self`,
+/// `dependencies` and glob or `!` patterns); `core` interprets them.
+fn target_config_projects(target: &NxTarget) -> Vec<String> {
+  let entries = [&target.inputs, &target.depends_on]
+    .into_iter()
+    .flatten()
+    .filter_map(|v| v.as_array())
+    .flatten();
+
+  let mut projects = Vec::new();
+  for entry in entries {
+    match entry.get("projects") {
+      Some(serde_json::Value::String(s)) => projects.push(s.clone()),
+      Some(serde_json::Value::Array(items)) => projects.extend(
+        items
+          .iter()
+          .filter_map(|item| item.as_str())
+          .map(str::to_string),
+      ),
+      _ => {}
+    }
+  }
+  projects
+}
+
+/// All project links declared across a project's targets, sorted and deduped.
+fn config_dependencies(targets: Option<&HashMap<String, NxTarget>>) -> Vec<String> {
+  let mut projects: Vec<String> = targets
+    .into_iter()
+    .flat_map(|t| t.values())
+    .flat_map(target_config_projects)
+    .collect();
+  projects.sort();
+  projects.dedup();
+  projects
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +202,7 @@ fn parse_project_json(path: &Path, cwd: &Path) -> Result<Project> {
     source_root,
     ts_config,
     implicit_dependencies: nx_project.implicit_dependencies,
+    config_dependencies: config_dependencies(nx_project.targets.as_ref()),
     targets,
   })
 }
@@ -249,6 +296,7 @@ fn get_workspace_json_projects(cwd: &Path) -> Result<Vec<Project>> {
         root,
         source_root,
         ts_config,
+        config_dependencies: config_dependencies(nx_project.targets.as_ref()),
         implicit_dependencies: nx_project.implicit_dependencies,
         targets,
       });

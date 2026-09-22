@@ -1045,50 +1045,93 @@ fn expand_implicit_dependencies(patterns: &[String], project_names: &[String]) -
   result
 }
 
+/// Add the dependents declared through `implicitDependencies` and target config
+/// of every affected project. One hop only, by design: the affected set is
+/// snapshotted first, so a project pulled in here does not pull in its own
+/// declared dependents in turn. That matches the pre-existing
+/// `implicitDependencies` behaviour; making declared links transitive is a
+/// separate decision for both kinds at once.
 fn add_implicit_dependencies(
   projects: &[Project],
   affected_packages: &mut FxHashSet<String>,
   mut project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
 ) {
-  // Build a map of package -> implicit dependents.
+  // Build a map of package -> dependents declared through `implicitDependencies`
+  // or through target config (`inputs[].projects`, `dependsOn[].projects`).
   // Expand Nx-style globs against known project names up front so lookups stay O(1).
   let project_names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-  let mut implicit_dep_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
+  let mut dep_map: FxHashMap<String, Vec<(String, DeclaredLink)>> = FxHashMap::default();
 
   for project in projects {
-    if project.implicit_dependencies.is_empty() {
-      continue;
-    }
-    let deps = expand_implicit_dependencies(&project.implicit_dependencies, &project_names);
-    for dep in deps {
-      implicit_dep_map
+    let implicit = expand_implicit_dependencies(&project.implicit_dependencies, &project_names)
+      .into_iter()
+      .map(|dep| (dep, DeclaredLink::Implicit));
+    let config = expand_config_dependencies(&project.config_dependencies, &project_names)
+      .into_iter()
+      .map(|dep| (dep, DeclaredLink::TargetConfig));
+    // A glob such as `lib-*` can match the declaring project itself; a
+    // project is not its own dependent.
+    for (dep, link) in implicit
+      .chain(config)
+      .filter(|(dep, _)| dep != &project.name)
+    {
+      dep_map
         .entry(dep)
         .or_default()
-        .push(project.name.clone());
+        .push((project.name.clone(), link));
     }
   }
 
-  // For each affected package, add its implicit dependents
+  // For each affected package, add its declared dependents
   let affected_clone: Vec<String> = affected_packages.iter().cloned().collect();
 
   for pkg in affected_clone {
-    if let Some(dependents) = implicit_dep_map.get(&pkg) {
-      debug!("Adding implicit dependents for '{}': {:?}", pkg, dependents);
-      for dependent in dependents {
+    if let Some(dependents) = dep_map.get(&pkg) {
+      debug!("Adding declared dependents for '{}': {:?}", pkg, dependents);
+      for (dependent, link) in dependents {
         affected_packages.insert(dependent.clone());
 
-        // Track implicit dependency cause if generating report
         if let Some(ref mut causes_map) = project_causes {
+          let depends_on = pkg.clone();
           causes_map
             .entry(dependent.clone())
             .or_default()
-            .push(AffectCause::ImplicitDependency {
-              depends_on: pkg.clone(),
+            .push(match link {
+              DeclaredLink::Implicit => AffectCause::ImplicitDependency { depends_on },
+              DeclaredLink::TargetConfig => AffectCause::TargetConfigDependency { depends_on },
             });
         }
       }
     }
   }
+}
+
+/// Where a declared (non-import) project link came from.
+#[derive(Debug, Clone, Copy)]
+enum DeclaredLink {
+  Implicit,
+  TargetConfig,
+}
+
+/// Expand the raw `projects` values from a project's target config.
+///
+/// Nx accepts two keywords there besides project names and patterns. Both are
+/// handled before expansion, because the expander would keep them as literal
+/// project names that match nothing:
+/// - `self`: the project itself; not a link to another project.
+/// - `dependencies`: the project's own dependencies, which the import graph
+///   already covers.
+///
+/// Everything else (literals, `*?[` globs, `!` exclusions) goes through
+/// [`expand_implicit_dependencies`]. Tag selectors (`tag:x`) are not supported:
+/// Domino does not read project tags, so they match nothing.
+fn expand_config_dependencies(patterns: &[String], project_names: &[String]) -> Vec<String> {
+  let patterns: Vec<String> = patterns
+    .iter()
+    .filter(|p| !matches!(p.as_str(), "self" | "dependencies"))
+    .cloned()
+    .collect();
+  expand_implicit_dependencies(&patterns, project_names)
 }
 
 #[cfg(test)]
@@ -1106,6 +1149,7 @@ mod tests {
         .into_iter()
         .map(str::to_string)
         .collect(),
+      config_dependencies: vec![],
       targets: vec![],
     }
   }
@@ -1155,6 +1199,66 @@ mod tests {
     affected_unrelated.insert("unrelated".to_string());
     add_implicit_dependencies(&projects, &mut affected_unrelated, None);
     assert!(!affected_unrelated.contains("probe"));
+  }
+
+  #[test]
+  fn test_expand_config_dependencies_treats_keywords_as_keywords() {
+    // Even when a project happens to be named after a keyword, the keyword
+    // is never read as a project name
+    let names = vec![
+      "self".to_string(),
+      "dependencies".to_string(),
+      "lib-a".to_string(),
+      "lib-b".to_string(),
+    ];
+    let expanded = expand_config_dependencies(
+      &[
+        "self".to_string(),
+        "dependencies".to_string(),
+        "lib-*".to_string(),
+        "!lib-b".to_string(),
+      ],
+      &names,
+    );
+    assert_eq!(expanded, vec!["lib-a".to_string()]);
+  }
+
+  #[test]
+  fn test_config_dependency_recorded_with_its_own_cause() {
+    let mut consumer = project("consumer", vec![]);
+    consumer.config_dependencies = vec!["lib-a".to_string()];
+    let projects = vec![consumer, project("lib-a", vec![])];
+
+    let mut affected = FxHashSet::default();
+    affected.insert("lib-a".to_string());
+    let mut causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
+    add_implicit_dependencies(&projects, &mut affected, Some(&mut causes));
+
+    assert!(affected.contains("consumer"));
+    assert_eq!(
+      causes["consumer"],
+      vec![AffectCause::TargetConfigDependency {
+        depends_on: "lib-a".to_string()
+      }]
+    );
+  }
+
+  #[test]
+  fn test_declared_link_matching_the_project_itself_is_skipped() {
+    // `lib-*` matches lib-b's own name; a project is not its own dependent
+    let mut lib_b = project("lib-b", vec![]);
+    lib_b.config_dependencies = vec!["lib-*".to_string()];
+    let projects = vec![project("lib-a", vec![]), lib_b];
+
+    let mut affected = FxHashSet::default();
+    affected.insert("lib-b".to_string());
+    let mut causes: FxHashMap<String, Vec<AffectCause>> = FxHashMap::default();
+    add_implicit_dependencies(&projects, &mut affected, Some(&mut causes));
+
+    assert!(
+      !causes.contains_key("lib-b"),
+      "unexpected self-link cause: {causes:?}"
+    );
   }
 
   #[test]

@@ -56,6 +56,12 @@ pub struct Project {
   pub ts_config: Option<PathBuf>,
   /// Implicit dependencies (projects that should be marked affected when this one changes)
   pub implicit_dependencies: Vec<String>,
+  /// Projects this one names in its target config (`inputs[].projects`,
+  /// `dependsOn[].projects`). Like implicit dependencies, a change to any of
+  /// them marks this project affected; kept separate so the report can say
+  /// where the link was declared. Nx only.
+  #[serde(default)]
+  pub config_dependencies: Vec<String>,
   /// Available targets (Nx only)
   pub targets: Vec<String>,
 }
@@ -259,6 +265,13 @@ pub enum AffectCause {
   /// Implicit dependency on another affected project
   #[serde(rename = "implicit_dependency")]
   ImplicitDependency {
+    /// Project this depends on
+    depends_on: String,
+  },
+  /// Another affected project is named in this project's target config
+  /// (`inputs[].projects` or `dependsOn[].projects`)
+  #[serde(rename = "target_config_dependency")]
+  TargetConfigDependency {
     /// Project this depends on
     depends_on: String,
   },

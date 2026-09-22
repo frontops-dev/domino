@@ -34,6 +34,11 @@ pub struct PackageInfo {
   pub version: String,
   /// Direct dependencies of this package (`name → version specifier`).
   pub dependencies: FxHashMap<String, String>,
+  /// Content hash the lockfile records for the resolved artifact (npm/pnpm/
+  /// yarn classic `integrity`, yarn berry `checksum`, bun's hash). `None` when
+  /// the format or entry does not carry one, in which case only `version` is
+  /// compared.
+  pub integrity: Option<String>,
 }
 
 /// Parsed representation of a lockfile, independent of package manager format.
@@ -43,6 +48,12 @@ pub struct LockfileData {
   pub direct_dependencies: FxHashSet<String>,
   /// All resolved packages (`name → info`).
   pub packages: FxHashMap<String, PackageInfo>,
+  /// What the recorded hashes are relative to, when the format makes them
+  /// depend on more than the package itself. Yarn berry's `checksum` hashes the
+  /// cache archive, so it changes for every package when `__metadata.cacheKey`
+  /// changes (a yarn upgrade). Hashes from lockfiles with different scopes are
+  /// not comparable. `None` for formats whose hashes are the package's own.
+  pub integrity_scope: Option<String>,
 }
 
 impl LockfileData {
@@ -51,6 +62,7 @@ impl LockfileData {
     Self {
       direct_dependencies: FxHashSet::default(),
       packages: FxHashMap::default(),
+      integrity_scope: None,
     }
   }
 }
@@ -296,6 +308,10 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
           PackageInfo {
             version,
             dependencies: deps,
+            integrity: val
+              .get("integrity")
+              .and_then(|v| v.as_str())
+              .map(str::to_string),
           },
         );
       }
@@ -310,6 +326,7 @@ fn parse_npm_lockfile(content: &str) -> Result<LockfileData> {
   Ok(LockfileData {
     direct_dependencies,
     packages,
+    integrity_scope: None,
   })
 }
 
@@ -347,6 +364,10 @@ fn parse_npm_v1_deps(
       PackageInfo {
         version,
         dependencies: sub_deps,
+        integrity: val
+          .get("integrity")
+          .and_then(|v| v.as_str())
+          .map(str::to_string),
       },
     );
 
@@ -458,6 +479,11 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
           PackageInfo {
             version,
             dependencies: deps,
+            integrity: val
+              .get("resolution")
+              .and_then(|r| r.get("integrity"))
+              .and_then(|v| v.as_str())
+              .map(str::to_string),
           },
         );
       }
@@ -467,6 +493,7 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
   Ok(LockfileData {
     direct_dependencies,
     packages,
+    integrity_scope: None,
   })
 }
 
@@ -502,15 +529,16 @@ fn parse_yarn_lockfile(content: &str, pkg_json_contents: &[String]) -> Result<Lo
 
   // Yarn Berry (v2+) uses a YAML-based format with `__metadata:` header.
   // Yarn Classic (v1) uses a custom text format with `# yarn lockfile v1`.
-  let packages = if content.contains("__metadata:") {
+  let (packages, integrity_scope) = if content.contains("__metadata:") {
     parse_yarn_berry_packages(content)?
   } else {
-    parse_yarn_classic_packages(content)?
+    (parse_yarn_classic_packages(content)?, None)
   };
 
   Ok(LockfileData {
     direct_dependencies,
     packages,
+    integrity_scope,
   })
 }
 
@@ -538,7 +566,12 @@ fn extract_direct_deps_into(pkg_json: &str, out: &mut FxHashSet<String>) {
 ///   languageName: node
 ///   linkType: hard
 /// ```
-fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageInfo>> {
+///
+/// Also returns `__metadata.cacheKey`, which scopes every `checksum` (see
+/// [`LockfileData::integrity_scope`]).
+fn parse_yarn_berry_packages(
+  content: &str,
+) -> Result<(FxHashMap<String, PackageInfo>, Option<String>)> {
   let parsed: serde_yaml::Value = serde_yaml::from_str(content)
     .map_err(|e| DominoError::Parse(format!("yarn berry lockfile: {}", e)))?;
 
@@ -546,10 +579,16 @@ fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageI
 
   let mapping = match parsed.as_mapping() {
     Some(m) => m,
-    None => return Ok(packages),
+    None => return Ok((packages, None)),
   };
 
+  let cache_key = mapping
+    .get("__metadata")
+    .and_then(|m| m.get("cacheKey"))
+    .map(yaml_value_to_string);
+
   let yaml_version_key = serde_yaml::Value::String("version".to_string());
+  let yaml_checksum_key = serde_yaml::Value::String("checksum".to_string());
   let yaml_berry_dep_keys: Vec<serde_yaml::Value> =
     ["dependencies", "optionalDependencies", "peerDependencies"]
       .iter()
@@ -603,11 +642,12 @@ fn parse_yarn_berry_packages(content: &str) -> Result<FxHashMap<String, PackageI
       PackageInfo {
         version: version_str,
         dependencies: deps,
+        integrity: entry.get(&yaml_checksum_key).map(yaml_value_to_string),
       },
     );
   }
 
-  Ok(packages)
+  Ok((packages, cache_key))
 }
 
 /// Convert a serde_yaml::Value to a trimmed string, preserving the original
@@ -656,6 +696,7 @@ fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, Packag
   let mut current_key: Option<String> = None;
   let mut current_version = String::new();
   let mut current_deps: FxHashMap<String, String> = FxHashMap::default();
+  let mut current_integrity: Option<String> = None;
   let mut in_dependencies = false;
 
   // Capture the full entry key (group 0) to preserve uniqueness when the same
@@ -677,6 +718,7 @@ fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, Packag
           PackageInfo {
             version: std::mem::take(&mut current_version),
             dependencies: std::mem::take(&mut current_deps),
+            integrity: current_integrity.take(),
           },
         );
       }
@@ -690,6 +732,7 @@ fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, Packag
           PackageInfo {
             version: std::mem::take(&mut current_version),
             dependencies: std::mem::take(&mut current_deps),
+            integrity: current_integrity.take(),
           },
         );
       }
@@ -713,6 +756,15 @@ fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, Packag
       continue;
     }
 
+    // Entry-level field; a dependency that happens to be named `integrity`
+    // lives inside a dependencies block, hence the guard.
+    if !in_dependencies {
+      if let Some(hash) = trimmed.strip_prefix("integrity ") {
+        current_integrity = Some(hash.trim_matches('"').to_string());
+        continue;
+      }
+    }
+
     if trimmed == "dependencies:" || trimmed == "optionalDependencies:" {
       in_dependencies = true;
       continue;
@@ -733,6 +785,7 @@ fn parse_yarn_classic_packages(content: &str) -> Result<FxHashMap<String, Packag
       PackageInfo {
         version: current_version,
         dependencies: current_deps,
+        integrity: current_integrity,
       },
     );
   }
@@ -813,6 +866,12 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
           PackageInfo {
             version,
             dependencies: deps,
+            integrity: arr
+              .iter()
+              .skip(1)
+              .filter_map(|v| v.as_str())
+              .find(|s| is_sri_hash(s))
+              .map(str::to_string),
           },
         );
       }
@@ -822,6 +881,7 @@ fn parse_bun_lockfile(content: &str) -> Result<LockfileData> {
   Ok(LockfileData {
     direct_dependencies,
     packages,
+    integrity_scope: None,
   })
 }
 
@@ -888,8 +948,46 @@ pub fn resolve_to_direct_deps(
 // Diffing
 // ---------------------------------------------------------------------------
 
+/// Whether a package present on both sides changed: a different version, or the
+/// same version with a different recorded content hash (a patched package, a
+/// re-resolved tarball). Integrity is compared only when **both** sides carry
+/// one, so a hash that appears or disappears (a format migration, a parser that
+/// cannot read it on one side) never marks the package on its own.
+fn package_changed(previous: &PackageInfo, current: &PackageInfo, compare_integrity: bool) -> bool {
+  if previous.version != current.version {
+    return true;
+  }
+  compare_integrity
+    && matches!(
+      (&previous.integrity, &current.integrity),
+      (Some(before), Some(after))
+        if hash_algorithm(before) == hash_algorithm(after) && before != after
+    )
+}
+
+/// Subresource-integrity hash algorithms lockfiles record (`sha512-<base64>`).
+const SRI_ALGORITHMS: [&str; 4] = ["sha1-", "sha256-", "sha384-", "sha512-"];
+
+/// Whether `s` is a subresource-integrity hash rather than some other string
+/// that happens to start with "sha" (a registry host, a path).
+fn is_sri_hash(s: &str) -> bool {
+  SRI_ALGORITHMS.iter().any(|prefix| s.starts_with(prefix))
+}
+
+/// The algorithm of an SRI hash (`sha512`), or `None` for a hash with no
+/// algorithm prefix (yarn berry checksums). Digests from different algorithms
+/// cannot be compared: npm re-hashing an old `sha1-` entry as `sha512-` is not
+/// a package change.
+fn hash_algorithm(hash: &str) -> Option<&str> {
+  if is_sri_hash(hash) {
+    hash.split_once('-').map(|(algorithm, _)| algorithm)
+  } else {
+    None
+  }
+}
+
 /// Compare two sets of resolved packages and return the **package names** that
-/// were added, removed, or had their version changed.
+/// were added, removed, or changed (see [`package_changed`]).
 ///
 /// Keys in the maps may be full paths (npm v3: `node_modules/debug/node_modules/ms`)
 /// or bare names (yarn, pnpm, bun: `ms`).  The returned set always contains
@@ -898,11 +996,19 @@ pub fn diff_lockfile_packages(
   current: &FxHashMap<String, PackageInfo>,
   previous: &FxHashMap<String, PackageInfo>,
 ) -> FxHashSet<String> {
+  diff_packages(current, previous, true)
+}
+
+fn diff_packages(
+  current: &FxHashMap<String, PackageInfo>,
+  previous: &FxHashMap<String, PackageInfo>,
+  compare_integrity: bool,
+) -> FxHashSet<String> {
   let mut changed = FxHashSet::default();
 
   for (key, info) in current {
     match previous.get(key) {
-      Some(prev_info) if prev_info.version != info.version => {
+      Some(prev_info) if package_changed(prev_info, info, compare_integrity) => {
         changed.insert(package_name_from_key(key).to_string());
       }
       None => {
@@ -919,6 +1025,17 @@ pub fn diff_lockfile_packages(
   }
 
   changed
+}
+
+/// Diff two parsed lockfiles. Hashes are compared only when both lockfiles
+/// share an [`LockfileData::integrity_scope`]; otherwise every hash would read
+/// as changed (a yarn upgrade bumping `cacheKey`) and only versions decide.
+fn diff_lockfiles(current: &LockfileData, previous: &LockfileData) -> FxHashSet<String> {
+  if current.integrity_scope == previous.integrity_scope {
+    diff_lockfile_packages(&current.packages, &previous.packages)
+  } else {
+    diff_packages(&current.packages, &previous.packages, false)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -980,7 +1097,7 @@ pub fn find_affected_dependencies(
     }
   };
 
-  let changed_packages = diff_lockfile_packages(&current_data.packages, &previous_data.packages);
+  let changed_packages = diff_lockfiles(&current_data, &previous_data);
   debug!("Changed packages in lockfile: {:?}", changed_packages);
 
   if changed_packages.is_empty() {
@@ -1374,6 +1491,34 @@ mod tests {
   }
 
   #[test]
+  fn test_parse_npm_lockfile_reads_integrity() {
+    let v3 = r#"{
+      "lockfileVersion": 3,
+      "packages": {
+        "": { "dependencies": { "lib-a": "^1.0.0" } },
+        "node_modules/lib-a": { "version": "1.0.0", "integrity": "sha512-aaa" },
+        "node_modules/lib-b": { "version": "1.0.0" }
+      }
+    }"#;
+    let data = parse_npm_lockfile(v3).unwrap();
+    assert_eq!(
+      data.packages["node_modules/lib-a"].integrity.as_deref(),
+      Some("sha512-aaa")
+    );
+    assert_eq!(data.packages["node_modules/lib-b"].integrity, None);
+
+    let v1 = r#"{
+      "lockfileVersion": 1,
+      "dependencies": { "lib-a": { "version": "1.0.0", "integrity": "sha1-bbb" } }
+    }"#;
+    let data = parse_npm_lockfile(v1).unwrap();
+    assert_eq!(
+      data.packages["lib-a"].integrity.as_deref(),
+      Some("sha1-bbb")
+    );
+  }
+
+  #[test]
   fn test_parse_npm_lockfile_v1() {
     let content = r#"{
       "lockfileVersion": 1,
@@ -1605,6 +1750,55 @@ lib-nested-1@^2.0.0:
   }
 
   #[test]
+  fn test_parse_pnpm_lockfile_reads_integrity() {
+    let content = r#"
+lockfileVersion: '9.0'
+importers:
+  '.':
+    dependencies:
+      lib-a:
+        specifier: ^1.0.0
+        version: 1.0.0
+packages:
+  lib-a@1.0.0:
+    resolution: {integrity: sha512-ccc}
+  lib-b@1.0.0:
+    resolution: {tarball: https://example.com/lib-b.tgz}
+"#;
+    let data = parse_pnpm_lockfile(content).unwrap();
+    assert_eq!(
+      data.packages["lib-a@1.0.0"].integrity.as_deref(),
+      Some("sha512-ccc")
+    );
+    assert_eq!(data.packages["lib-b@1.0.0"].integrity, None);
+  }
+
+  #[test]
+  fn test_parse_yarn_classic_lockfile_reads_integrity() {
+    let content = r#"# yarn lockfile v1
+
+lib-a@^1.0.0:
+  version "1.0.0"
+  resolved "https://registry.example.com/lib-a/-/lib-a-1.0.0.tgz#abc"
+  integrity sha512-ddd
+  dependencies:
+    lib-nested-1 "^2.0.0"
+
+lib-nested-1@^2.0.0:
+  version "2.0.0"
+"#;
+    let data = parse_yarn_lockfile(content, &[]).unwrap();
+    assert_eq!(
+      data.packages["lib-a@^1.0.0"].integrity.as_deref(),
+      Some("sha512-ddd")
+    );
+    assert!(data.packages["lib-a@^1.0.0"]
+      .dependencies
+      .contains_key("lib-nested-1"));
+    assert_eq!(data.packages["lib-nested-1@^2.0.0"].integrity, None);
+  }
+
+  #[test]
   fn test_parse_yarn_lockfile_scoped_packages() {
     let content = r#"# yarn lockfile v1
 
@@ -1775,6 +1969,67 @@ lib-a@^1.0.0:
   }
 
   #[test]
+  fn test_parse_yarn_berry_lockfile_reads_checksum() {
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"lib-a@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "lib-a@npm:1.0.0"
+  checksum: 10c0/fff
+  languageName: node
+  linkType: hard
+
+"app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:."
+  languageName: unknown
+  linkType: soft
+"#;
+    let data = parse_yarn_lockfile(content, &[]).unwrap();
+    assert_eq!(
+      data.packages["lib-a@npm:^1.0.0"].integrity.as_deref(),
+      Some("10c0/fff")
+    );
+    assert_eq!(data.packages["app@workspace:."].integrity, None);
+  }
+
+  fn berry_lockfile(cache_key: &str, checksum: &str) -> LockfileData {
+    let content = format!(
+      r#"__metadata:
+  version: 8
+  cacheKey: {cache_key}
+
+"lib-a@npm:^1.0.0":
+  version: 1.0.0
+  resolution: "lib-a@npm:1.0.0"
+  checksum: {checksum}
+  languageName: node
+  linkType: hard
+"#
+    );
+    parse_yarn_lockfile(&content, &[]).unwrap()
+  }
+
+  #[test]
+  fn test_yarn_berry_checksum_change_detected_under_same_cache_key() {
+    let previous = berry_lockfile("10c0", "10c0/old");
+    let current = berry_lockfile("10c0", "10c0/new");
+    assert!(diff_lockfiles(&current, &previous).contains("lib-a"));
+  }
+
+  #[test]
+  fn test_yarn_berry_cache_key_bump_does_not_mark_every_package() {
+    // A yarn upgrade changes cacheKey, which rewrites every checksum even
+    // though no package changed
+    let previous = berry_lockfile("8", "aaa");
+    let current = berry_lockfile("10c0", "10c0/bbb");
+    let changed = diff_lockfiles(&current, &previous);
+    assert!(changed.is_empty(), "got: {changed:?}");
+  }
+
+  #[test]
   fn test_yarn_berry_version_change_detected() {
     let old_content = r#"__metadata:
   version: 8
@@ -1853,6 +2108,40 @@ lib-a@^1.0.0:
   }
 
   #[test]
+  fn test_parse_bun_lockfile_reads_integrity() {
+    let content = r#"{
+      "lockfileVersion": 1,
+      "workspaces": { "": { "dependencies": { "lib-a": "^1.0.0" } } },
+      "packages": {
+        "lib-a": ["lib-a@1.0.0", "", {}, "sha512-eee"],
+        "lib-b": ["lib-b@1.0.0"]
+      }
+    }"#;
+    let data = parse_bun_lockfile(content).unwrap();
+    assert_eq!(
+      data.packages["lib-a"].integrity.as_deref(),
+      Some("sha512-eee")
+    );
+    assert_eq!(data.packages["lib-b"].integrity, None);
+  }
+
+  #[test]
+  fn test_parse_bun_lockfile_integrity_ignores_non_sri_strings() {
+    // A registry string that merely starts with "sha" is not a hash
+    let content = r#"{
+      "lockfileVersion": 1,
+      "packages": {
+        "lib-a": ["lib-a@1.0.0", "shared-registry.example.com", {}, "sha512-eee"]
+      }
+    }"#;
+    let data = parse_bun_lockfile(content).unwrap();
+    assert_eq!(
+      data.packages["lib-a"].integrity.as_deref(),
+      Some("sha512-eee")
+    );
+  }
+
+  #[test]
   fn test_parse_bun_lockfile_with_comments() {
     let content = r#"{
       // This is a JSONC comment
@@ -1908,6 +2197,7 @@ lib-a@^1.0.0:
         dependencies: [("lib-nested-1".to_string(), "^2.0.0".to_string())]
           .into_iter()
           .collect(),
+        integrity: None,
       },
     );
     packages.insert(
@@ -1917,6 +2207,7 @@ lib-a@^1.0.0:
         dependencies: [("lib-nested-1".to_string(), "^2.0.0".to_string())]
           .into_iter()
           .collect(),
+        integrity: None,
       },
     );
     packages.insert(
@@ -1924,12 +2215,14 @@ lib-a@^1.0.0:
       PackageInfo {
         version: "2.0.0".to_string(),
         dependencies: FxHashMap::default(),
+        integrity: None,
       },
     );
 
     let data = LockfileData {
       direct_dependencies: FxHashSet::default(),
       packages,
+      integrity_scope: None,
     };
 
     let graph = build_reverse_dep_graph(&data);
@@ -2008,6 +2301,7 @@ lib-a@^1.0.0:
       PackageInfo {
         version: "2.0.0".to_string(),
         dependencies: FxHashMap::default(),
+        integrity: None,
       },
     )]);
     let previous = FxHashMap::from_iter([(
@@ -2015,6 +2309,7 @@ lib-a@^1.0.0:
       PackageInfo {
         version: "1.0.0".to_string(),
         dependencies: FxHashMap::default(),
+        integrity: None,
       },
     )]);
 
@@ -2029,6 +2324,7 @@ lib-a@^1.0.0:
       PackageInfo {
         version: "1.0.0".to_string(),
         dependencies: FxHashMap::default(),
+        integrity: None,
       },
     )]);
     let previous = FxHashMap::default();
@@ -2045,6 +2341,7 @@ lib-a@^1.0.0:
       PackageInfo {
         version: "1.0.0".to_string(),
         dependencies: FxHashMap::default(),
+        integrity: None,
       },
     )]);
 
@@ -2052,11 +2349,79 @@ lib-a@^1.0.0:
     assert!(result.contains("lib-old"));
   }
 
+  fn pkg_with_integrity(version: &str, integrity: Option<&str>) -> PackageInfo {
+    PackageInfo {
+      version: version.to_string(),
+      dependencies: FxHashMap::default(),
+      integrity: integrity.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn test_diff_lockfile_packages_integrity_only_change() {
+    // Same version, re-resolved tarball (e.g. a patched package)
+    let current = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha512-new")),
+    )]);
+    let previous = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha512-old")),
+    )]);
+
+    let result = diff_lockfile_packages(&current, &previous);
+    assert!(result.contains("lib-a"), "got: {result:?}");
+  }
+
+  #[test]
+  fn test_diff_lockfile_packages_same_integrity_is_quiet() {
+    let current = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha512-same")),
+    )]);
+    let previous = current.clone();
+
+    assert!(diff_lockfile_packages(&current, &previous).is_empty());
+  }
+
+  #[test]
+  fn test_diff_lockfile_packages_integrity_gained_or_lost_is_quiet() {
+    // A hash appearing or disappearing (format migration, a parser that
+    // cannot read it on one side) is not evidence the artifact changed; the
+    // version still decides. Otherwise a lockfile format bump would mark every
+    // package in the workspace.
+    let with = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha512-x")),
+    )]);
+    let without = FxHashMap::from_iter([("lib-a".to_string(), pkg_with_integrity("1.0.0", None))]);
+
+    assert!(diff_lockfile_packages(&with, &without).is_empty());
+    assert!(diff_lockfile_packages(&without, &with).is_empty());
+  }
+
+  #[test]
+  fn test_diff_lockfile_packages_hash_algorithm_change_is_quiet() {
+    // npm re-hashing an old sha1 entry as sha512 at the same version is not a
+    // package change; the two digests cannot be compared
+    let current = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha512-new")),
+    )]);
+    let previous = FxHashMap::from_iter([(
+      "lib-a".to_string(),
+      pkg_with_integrity("1.0.0", Some("sha1-old")),
+    )]);
+
+    assert!(diff_lockfile_packages(&current, &previous).is_empty());
+  }
+
   #[test]
   fn test_diff_lockfile_packages_unchanged() {
     let pkg = PackageInfo {
       version: "1.0.0".to_string(),
       dependencies: FxHashMap::default(),
+      integrity: None,
     };
     let current = FxHashMap::from_iter([("lib-a".to_string(), pkg.clone())]);
     let previous = FxHashMap::from_iter([("lib-a".to_string(), pkg)]);

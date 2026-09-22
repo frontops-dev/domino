@@ -1619,15 +1619,12 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
   let project_count = report.projects.len();
   let trigger_count = report.global_triggers.len();
 
-  // Every trigger in a single report comes from exactly one source — Nx
-  // `nx.json` or Turbo `turbo.json` — since
-  // [`crate::named_inputs::resolve_global_inputs`] picks one config to
-  // resolve per run, so checking the first trigger is enough to tell which
-  // source produced the whole report.
-  let is_turbo = report
-    .global_triggers
-    .first()
-    .is_some_and(|t| t.named_input == crate::named_inputs::TURBO_GLOBAL_DEPENDENCIES);
+  let source = global_source(
+    report
+      .global_triggers
+      .iter()
+      .map(|t| t.named_input.as_str()),
+  );
 
   let mut rows = String::new();
   for trigger in &report.global_triggers {
@@ -1644,20 +1641,46 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
     ));
   }
 
-  let (source_prose, cli_equivalent, docs_href, docs_label) = if is_turbo {
-    (
+  let tool = match source {
+    GlobalSource::Turbo => Some((
       "Turborepo <code>globalDependencies</code>",
       "turbo run",
       "https://turborepo.com/docs/reference/configuration#globaldependencies",
-      "Turborepo <code>globalDependencies</code>",
-    )
-  } else {
-    (
+    )),
+    GlobalSource::Nx => Some((
       "Nx <code>namedInputs</code>",
       "nx affected",
       "https://nx.dev/concepts/more-concepts/customizing-inputs",
-      "Nx <code>namedInputs</code>",
-    )
+    )),
+    GlobalSource::RootTsConfig => None,
+  };
+
+  let project_count = format_number(project_count);
+  let (summary, docs_link) = match tool {
+    Some((source_prose, cli_equivalent, docs_href)) => (
+      format!(
+        r#"<strong>{trigger_count}</strong> changed file{plural} matched {source_prose}
+                workspace-root pattern{plural}, so all <strong>{project_count}</strong> projects
+                are marked affected &mdash; the same as <code>{cli_equivalent}</code> would do."#,
+        plural = if trigger_count == 1 { "" } else { "s" },
+      ),
+      format!(
+        r#"<a class="docs-link" href="{docs_href}" target="_blank" rel="noopener noreferrer">
+                Learn how {source_prose} work {external}
+            </a>"#,
+        external = ICON_EXTERNAL,
+      ),
+    ),
+    // Only the root tsconfig fired. No tool config matched, so name neither.
+    None => (
+      format!(
+        r#"The workspace-root <code>{file}</code> changed. Its path aliases drive module
+                resolution for every project, so all <strong>{project_count}</strong> projects
+                are marked affected."#,
+        file = crate::semantic::ROOT_TSCONFIG_FILE,
+      ),
+      String::new(),
+    ),
   };
 
   format!(
@@ -1667,9 +1690,7 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
                 <h3 id="gbanner-title">Global invalidation detected</h3>
             </div>
             <p>
-                <strong>{trigger_count}</strong> changed file{trigger_plural} matched {source_prose}
-                workspace-root pattern{trigger_plural}, so all <strong>{project_count}</strong> projects
-                are marked affected &mdash; the same as <code>{cli_equivalent}</code> would do.
+                {summary}
             </p>
             <div class="global-banner-list">{rows}</div>
             <p>
@@ -1677,21 +1698,32 @@ fn generate_global_banner_html(report: &AffectedReport) -> String {
                 <em>Detailed impact analysis</em> section below separates projects affected by
                 real code signal from those only swept up by the global rule.
             </p>
-            <a class="docs-link" href="{docs_href}" target="_blank" rel="noopener noreferrer">
-                Learn how {docs_label} work {external}
-            </a>
+            {docs_link}
         </section>"#,
     icon = ICON_INFO,
-    external = ICON_EXTERNAL,
-    trigger_count = trigger_count,
-    trigger_plural = if trigger_count == 1 { "" } else { "s" },
-    project_count = format_number(project_count),
-    rows = rows,
-    source_prose = source_prose,
-    cli_equivalent = cli_equivalent,
-    docs_href = docs_href,
-    docs_label = docs_label,
   )
+}
+
+/// Which config produced a run's global triggers. A run resolves exactly one
+/// tool config ([`crate::named_inputs::resolve_global_inputs`]), but the root
+/// tsconfig trigger is added in every workspace type, so it is skipped when
+/// deciding the tool and only wins when nothing else fired.
+#[derive(Debug, PartialEq, Eq)]
+enum GlobalSource {
+  Nx,
+  Turbo,
+  RootTsConfig,
+}
+
+fn global_source<'a>(named_inputs: impl IntoIterator<Item = &'a str>) -> GlobalSource {
+  match named_inputs
+    .into_iter()
+    .find(|name| *name != crate::named_inputs::ROOT_TSCONFIG)
+  {
+    Some(crate::named_inputs::TURBO_GLOBAL_DEPENDENCIES) => GlobalSource::Turbo,
+    Some(_) => GlobalSource::Nx,
+    None => GlobalSource::RootTsConfig,
+  }
 }
 
 /// Embed the run's machine-readable summary so downstream consumers (CI
@@ -1751,12 +1783,14 @@ fn global_only_group_label(global_only: &[&AffectedProjectInfo]) -> String {
       }
     }
   }
-  match inputs.len() {
-    1 => {
-      let name = inputs.into_iter().next().unwrap_or("");
-      format!(" via <code>{}</code>", html_escape(name))
-    }
-    _ => " via Nx <code>namedInputs</code>".to_string(),
+  if inputs.len() == 1 {
+    let name = inputs.into_iter().next().unwrap_or("");
+    return format!(" via <code>{}</code>", html_escape(name));
+  }
+  match global_source(inputs) {
+    GlobalSource::Nx => " via Nx <code>namedInputs</code>".to_string(),
+    GlobalSource::Turbo => " via Turborepo <code>globalDependencies</code>".to_string(),
+    GlobalSource::RootTsConfig => String::new(),
   }
 }
 
@@ -2331,6 +2365,68 @@ mod tests {
     // Turbo-flavored wording/link must NOT leak into an Nx report.
     assert!(!html.contains("Turborepo <code>globalDependencies</code>"));
     assert!(!html.contains("https://turborepo.com/docs/reference/configuration#globaldependencies"));
+  }
+
+  fn root_tsconfig_trigger() -> GlobalTrigger {
+    GlobalTrigger {
+      file: PathBuf::from("tsconfig.base.json"),
+      named_input: crate::named_inputs::ROOT_TSCONFIG.to_string(),
+      raw_pattern: "{workspaceRoot}/tsconfig.base.json".to_string(),
+    }
+  }
+
+  fn banner_of(html: &str) -> &str {
+    let start = html
+      .find(r#"<section class="global-banner""#)
+      .expect("banner section must be present");
+    let end = html[start..]
+      .find("</section>")
+      .map(|i| start + i)
+      .expect("banner section must close");
+    &html[start..end]
+  }
+
+  #[test]
+  fn banner_names_no_tool_when_only_root_tsconfig_triggered() {
+    // A generic workspace has neither nx.json nor turbo.json, so the banner
+    // must not attribute the root tsconfig trigger to either tool.
+    let mut report = synth_normal_report();
+    report.global_triggers = vec![root_tsconfig_trigger()];
+
+    let html = generate_html(&report);
+    let banner = banner_of(&html);
+    assert!(banner.contains("tsconfig.base.json"));
+    assert!(!banner.contains("Nx <code>namedInputs</code>"));
+    assert!(!banner.contains("Turborepo"));
+    assert!(!banner.contains("nx affected"));
+  }
+
+  #[test]
+  fn banner_source_skips_a_leading_root_tsconfig_trigger() {
+    let mut report = synth_turbo_global_report();
+    report.global_triggers.insert(0, root_tsconfig_trigger());
+
+    let html = generate_html(&report);
+    assert!(banner_of(&html).contains("Turborepo <code>globalDependencies</code>"));
+  }
+
+  #[test]
+  fn global_group_label_does_not_claim_nx_for_turbo_and_root_tsconfig() {
+    let project = make_project(
+      "core",
+      vec![
+        AffectCause::GlobalInvalidation {
+          file: PathBuf::from(".env"),
+          named_input: "globalDependencies".to_string(),
+        },
+        AffectCause::GlobalInvalidation {
+          file: PathBuf::from("tsconfig.base.json"),
+          named_input: crate::named_inputs::ROOT_TSCONFIG.to_string(),
+        },
+      ],
+    );
+    let label = global_only_group_label(&[&project]);
+    assert!(!label.contains("Nx"), "got: {label}");
   }
 
   #[test]

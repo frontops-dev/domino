@@ -132,7 +132,7 @@ fn find_affected_internal(
   // prevents). Any *other* global trigger (.nvmrc, nx.json, ...) always
   // invalidates every project.
   let lockfile_analysis_enabled = !matches!(config.lockfile_strategy, LockfileStrategy::None);
-  let global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
+  let mut global_triggers: Vec<GlobalTrigger> = if let Some(ref inputs) = resolved_inputs {
     named_inputs::check_global_invalidation(inputs, &changed_files)
       .into_iter()
       .filter(|t| {
@@ -143,6 +143,14 @@ fn find_affected_internal(
   } else {
     Vec::new()
   };
+
+  // A changed workspace-root tsconfig is a global trigger in every workspace
+  // type, not only when a namedInputs / globalDependencies pattern lists it:
+  // its path aliases feed module resolution for all projects. Appended after
+  // the config-derived triggers so the report still names that config first.
+  let root_tsconfig_triggers =
+    named_inputs::root_tsconfig_triggers(&changed_files, &global_triggers);
+  global_triggers.extend(root_tsconfig_triggers);
 
   if !global_triggers.is_empty() && !generate_report {
     let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();

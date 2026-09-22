@@ -6,6 +6,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+/// The workspace-root tsconfig that module resolution reads for path aliases.
+/// Also the file whose change invalidates every project
+/// (`named_inputs::root_tsconfig_triggers`), so the two can never drift.
+pub(crate) const ROOT_TSCONFIG_FILE: &str = "tsconfig.base.json";
+
 /// Shared resolver configuration for both the import index builder and the reference finder.
 /// Kept in one place to prevent drift between the two resolution paths.
 ///
@@ -23,7 +28,7 @@ use tracing::warn;
 /// in `package.json` (a convention used by several monorepo tools like Preconstruct).
 /// This is left as a future improvement.
 pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOptions {
-  let tsconfig_path = cwd.join("tsconfig.base.json");
+  let tsconfig_path = cwd.join(ROOT_TSCONFIG_FILE);
 
   // Build aliases: @scope/pkg → <cwd>/<source_root>/src (or <source_root> if no src/ dir)
   // This ensures cross-package imports resolve to source files that Domino analyses,
@@ -203,7 +208,7 @@ struct TsconfigCompilerOptions {
 /// inherited from ancestor configs — matching TypeScript semantics where the
 /// leaf config's `paths` take precedence.
 pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
-  let tsconfig_path = cwd.join("tsconfig.base.json");
+  let tsconfig_path = cwd.join(ROOT_TSCONFIG_FILE);
   if !tsconfig_path.exists() {
     return vec![];
   }

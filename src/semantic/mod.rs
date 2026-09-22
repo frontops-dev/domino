@@ -11,6 +11,7 @@ pub use reference_finder::ReferenceFinder;
 pub(crate) use resolve_options::create_resolve_options;
 pub(crate) use resolve_options::is_workspace_specifier;
 pub(crate) use resolve_options::parse_tsconfig_path_prefixes;
+pub(crate) use resolve_options::ROOT_TSCONFIG_FILE;
 
 /// Shared fallback resolution for relative imports when oxc_resolver fails.
 /// Handles .js/.jsx/.mjs/.cjs → TypeScript-equivalent remapping and standard

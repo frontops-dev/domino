@@ -5901,3 +5901,132 @@ fn test_file_moved_between_projects_marks_both() {
     affected
   );
 }
+
+/// Commit `content` to `file` on `main` and fast-forward `test-branch` onto it,
+/// so a later change on `test-branch` diffs as a modification, not an addition.
+fn commit_on_main(repo: &TempNxRepo, file: &str, content: &str) {
+  let root = repo.root();
+  git_in(root, &["checkout", "-q", "main"]);
+  let path = root.join(file);
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).unwrap();
+  }
+  fs::write(path, content).unwrap();
+  git_in(root, &["add", file]);
+  git_in(root, &["commit", "-q", "-m", &format!("add {file}")]);
+  git_in(root, &["checkout", "-q", "test-branch"]);
+  git_in(root, &["merge", "-q", "--ff-only", "main"]);
+}
+
+/// The workspace-root tsconfig drives path-alias resolution for every project,
+/// so changing it affects all of them, even with no namedInputs configured.
+#[test]
+fn test_root_tsconfig_change_affects_all_projects() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  commit_on_main(
+    &repo,
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": {} } }"#,
+  );
+
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }"#,
+  );
+
+  let mut affected = repo.get_affected();
+  affected.sort();
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// Only the workspace-root tsconfig is global. A project's own tsconfig.json is
+/// an ordinary file that marks just the project that owns it.
+#[test]
+fn test_nested_tsconfig_change_affects_only_owning_project() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  commit_on_main(
+    &repo,
+    "libs/lib-a/tsconfig.json",
+    r#"{ "compilerOptions": { "strict": false } }"#,
+  );
+
+  repo.change_and_commit(
+    "libs/lib-a/tsconfig.json",
+    r#"{ "compilerOptions": { "strict": true } }"#,
+  );
+
+  assert_eq!(repo.get_affected(), vec!["lib-a".to_string()]);
+}
+
+/// A root tsconfig change must reach every project in a generic (non-Nx,
+/// non-Turbo) workspace too, where no namedInputs / globalDependencies config
+/// exists. The trigger short-circuits before resolution runs, so this checks
+/// the trigger fires outside the tool-config path, not alias resolution itself
+/// (that is `test_tsconfig_path_alias_differs_from_project_name`).
+#[test]
+fn test_root_tsconfig_change_in_generic_workspace_affects_all() {
+  let (_tmp, root, config) = scaffold_lib_app_repo("export const widget = () => 1;\n");
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@scope/lib": ["libs/lib/src/index.ts"],
+      "@scope/lib/*": ["libs/lib/src/*"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "add wildcard alias"]);
+
+  let profiler = Arc::new(Profiler::new(false));
+  let mut affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+  assert_eq!(affected, vec!["app".to_string(), "lib".to_string()]);
+}
+
+/// When sharedGlobals already lists the root tsconfig, the report must carry a
+/// single trigger for it (attributed to sharedGlobals), not a second
+/// root-tsconfig one.
+#[test]
+fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"]
+      }
+    }"#,
+  );
+  commit_on_main(&repo, "tsconfig.base.json", r#"{ "compilerOptions": {} }"#);
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "strict": true } }"#,
+  );
+
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+  };
+  let report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected_with_report failed")
+    .report
+    .expect("expected a report");
+
+  assert_eq!(
+    report.global_triggers.len(),
+    1,
+    "expected one trigger, got: {:?}",
+    report.global_triggers
+  );
+  assert_eq!(report.global_triggers[0].named_input, "sharedGlobals");
+}

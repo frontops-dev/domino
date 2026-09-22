@@ -389,6 +389,35 @@ pub fn check_global_invalidation(
   triggers
 }
 
+/// Label reported for a changed workspace-root tsconfig. It is not a namedInput
+/// the user wrote: Domino adds it because the root tsconfig drives module
+/// resolution for every project.
+pub(crate) const ROOT_TSCONFIG: &str = "rootTsConfig";
+
+/// Global triggers for a changed workspace-root tsconfig — the one module
+/// resolution reads ([`crate::semantic::ROOT_TSCONFIG_FILE`]). Its path aliases
+/// feed resolution for the whole workspace, so a change can re-route imports in
+/// any project. Matched as an exact root-relative path, never by basename, so a
+/// nested `libs/x/tsconfig.base.json` stays an ordinary project-owned file. A
+/// root `tsconfig.json` is deliberately excluded: resolution never reads it.
+/// A file already present in `existing` (e.g. listed in `sharedGlobals`) is
+/// skipped so it yields one trigger, not two.
+pub fn root_tsconfig_triggers(
+  changed_files: &[ChangedFile],
+  existing: &[GlobalTrigger],
+) -> Vec<GlobalTrigger> {
+  changed_files
+    .iter()
+    .filter(|f| f.file_path.to_str() == Some(crate::semantic::ROOT_TSCONFIG_FILE))
+    .filter(|f| !existing.iter().any(|t| t.file == f.file_path))
+    .map(|f| GlobalTrigger {
+      file: f.file_path.clone(),
+      named_input: ROOT_TSCONFIG.to_string(),
+      raw_pattern: format!("{{workspaceRoot}}/{}", f.file_path.display()),
+    })
+    .collect()
+}
+
 /// Filter out changed files that match negation patterns from namedInputs.
 /// Returns a new vector with negated files removed.
 pub fn filter_negated_files(
@@ -693,6 +722,50 @@ mod tests {
     assert_eq!(
       by_file.get(&PathBuf::from("package.json")),
       Some(&"sharedGlobals".to_string())
+    );
+  }
+
+  fn changed(path: &str) -> ChangedFile {
+    ChangedFile {
+      file_path: PathBuf::from(path),
+      changed_lines: vec![1],
+      deleted_lines: vec![],
+    }
+  }
+
+  #[test]
+  fn test_root_tsconfig_triggers_match_exact_root_paths_only() {
+    let files = [
+      changed("tsconfig.base.json"),
+      // Resolution never reads a root tsconfig.json (solution-style configs
+      // are common), so it must not invalidate every project
+      changed("tsconfig.json"),
+      changed("libs/x/tsconfig.json"),
+      changed("libs/x/tsconfig.base.json"),
+    ];
+
+    let triggers = root_tsconfig_triggers(&files, &[]);
+    let paths: Vec<_> = triggers.iter().map(|t| t.file.clone()).collect();
+    assert_eq!(paths, vec![PathBuf::from("tsconfig.base.json")]);
+    assert!(triggers.iter().all(|t| t.named_input == ROOT_TSCONFIG));
+    assert_eq!(
+      triggers[0].raw_pattern,
+      "{workspaceRoot}/tsconfig.base.json"
+    );
+  }
+
+  #[test]
+  fn test_root_tsconfig_trigger_not_duplicated_when_shared_globals_matched() {
+    let existing = [GlobalTrigger {
+      file: PathBuf::from("tsconfig.base.json"),
+      named_input: "sharedGlobals".to_string(),
+      raw_pattern: "{workspaceRoot}/tsconfig.base.json".to_string(),
+    }];
+
+    let triggers = root_tsconfig_triggers(&[changed("tsconfig.base.json")], &existing);
+    assert!(
+      triggers.is_empty(),
+      "a file sharedGlobals already reported must yield one trigger, got extra: {triggers:?}"
     );
   }
 

@@ -6084,7 +6084,11 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
 /// change to lib-a is committed on the test branch. lib-b never imports lib-a,
 /// so any edge between them can only come from the target config.
 fn affected_after_lib_a_change(lib_b_targets: &str) -> Vec<String> {
-  let repo = TempNxRepo::new(r#"{}"#);
+  affected_after_lib_a_change_with_nx_json(r#"{}"#, lib_b_targets)
+}
+
+fn affected_after_lib_a_change_with_nx_json(nx_json: &str, lib_b_targets: &str) -> Vec<String> {
+  let repo = TempNxRepo::new(nx_json);
   commit_on_main(
     &repo,
     "libs/lib-b/project.json",
@@ -6110,6 +6114,21 @@ fn test_inputs_projects_link_marks_dependent() {
     r#"{ "test": { "inputs": ["default", { "input": "production", "projects": ["lib-a"] }] } }"#,
   );
   assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// Nx's `"project:target"` string sugar in `dependsOn` names a project when the
+/// prefix is one. A target that merely contains a colon (`build:prod`) and a
+/// `^`-prefixed string (the project's dependencies) name none.
+#[test]
+fn test_depends_on_project_target_string_marks_dependent() {
+  let affected =
+    affected_after_lib_a_change(r#"{ "deploy": { "dependsOn": ["lib-a:build", "build:prod"] } }"#);
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+
+  let affected = affected_after_lib_a_change(
+    r#"{ "deploy": { "dependsOn": ["^lib-a:build", "build:prod"] }, "test": { "inputs": ["lib-a:x"] } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string()]);
 }
 
 /// `self` and `dependencies` are Nx keywords, not project names: neither links
@@ -6145,6 +6164,137 @@ fn test_mixed_shape_target_config_keeps_project_and_link() {
         "dependsOn": ["^build", { "target": "codegen", "dependencies": true }, 42]
       }
     }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+// --- targetDefaults ---
+
+const DEPLOY_DEFAULT_LINKS_LIB_A: &str = r#"{
+  "targetDefaults": {
+    "deploy": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+  }
+}"#;
+
+#[test]
+fn test_target_defaults_link_applies_to_declared_target() {
+  let affected =
+    affected_after_lib_a_change_with_nx_json(DEPLOY_DEFAULT_LINKS_LIB_A, r#"{ "deploy": {} }"#);
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// A project's own `dependsOn` replaces the default's, as Nx merges them.
+#[test]
+fn test_target_defaults_overridden_by_project_own_field() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    DEPLOY_DEFAULT_LINKS_LIB_A,
+    r#"{ "deploy": { "dependsOn": ["build"] } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string()]);
+}
+
+/// A default for a target the project does not declare adds nothing.
+#[test]
+fn test_target_defaults_ignored_for_undeclared_target() {
+  let affected =
+    affected_after_lib_a_change_with_nx_json(DEPLOY_DEFAULT_LINKS_LIB_A, r#"{ "build": {} }"#);
+  assert_eq!(affected, vec!["lib-a".to_string()]);
+}
+
+/// An executor key wins over the target-name key, so the name key's link is
+/// not used when the executor key exists.
+#[test]
+fn test_target_defaults_executor_key_takes_precedence() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "@acme/deployer:deploy": { "inputs": ["default"] },
+        "deploy": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "deploy": { "executor": "@acme/deployer:deploy" } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string()]);
+
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "nx:run-commands": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "deploy": { "command": "echo deploy" } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+#[test]
+fn test_target_defaults_glob_key_matches_target_name() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "e2e-ci--*": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "e2e-ci--smoke": {} }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// Nx matches glob keys with minimatch, so its documented atomized-e2e key
+/// `e2e-ci--**/*` and brace sets must work.
+#[test]
+fn test_target_defaults_minimatch_style_glob_keys() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "e2e-ci--**/*": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "e2e-ci--src/app.cy.ts": {} }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "{deploy,release}": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "release": {} }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// When every entry of a higher-precedence key carries a `filter`, Nx may fall
+/// through to the next key. Filters are not evaluated here, so the lower key's
+/// links must still apply rather than be shadowed.
+#[test]
+fn test_target_defaults_fully_filtered_key_does_not_shadow_next_key() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "@acme/deployer:deploy": [{ "filter": { "projects": ["tag:never"] }, "cache": true }],
+        "deploy": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] }
+      }
+    }"#,
+    r#"{ "deploy": { "executor": "@acme/deployer:deploy" } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// Newer Nx allows an array of entries per key; links from every entry apply.
+#[test]
+fn test_target_defaults_array_form() {
+  let affected = affected_after_lib_a_change_with_nx_json(
+    r#"{
+      "targetDefaults": {
+        "deploy": [
+          { "cache": true },
+          { "inputs": [{ "input": "production", "projects": ["lib-a"] }] }
+        ]
+      }
+    }"#,
+    r#"{ "deploy": {} }"#,
   );
   assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
 }

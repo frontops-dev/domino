@@ -204,7 +204,9 @@ pub struct ReportTotals {
   pub semantically_affected: usize,
   /// Projects affected via both global and semantic causes.
   pub overlap: usize,
-  /// Total number of files changed in the diff (pre-filtering).
+  /// Total number of changed paths in the diff (pre-filtering). A rename
+  /// counts twice: once for the path it moved to and once for the path it
+  /// moved out of.
   pub changed_files: usize,
 }
 

@@ -5855,3 +5855,49 @@ fn test_barrel_consumer_of_other_symbol_not_affected() {
     affected
   );
 }
+
+/// A file moved from one project to another must mark BOTH projects: the one
+/// it moved into (new path) and the one it moved out of (old path). The old
+/// owner's consumers lost the symbol, so treating the move as "one changed file
+/// at the new path" silently drops the source project.
+#[test]
+fn test_file_moved_between_projects_marks_both() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let root = repo.root();
+
+  // The file must exist on `main` so the diff sees a move, not an addition.
+  let util = "export function formatLabel(value: string) {\n  const trimmed = value.trim();\n  const upper = trimmed.toUpperCase();\n  return `[${upper}]`;\n}\n\nexport function formatCount(n: number) {\n  return `${n} items`;\n}\n";
+  git_in(root, &["checkout", "-q", "main"]);
+  fs::write(root.join("libs/lib-a/src/util.ts"), util).unwrap();
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "add util to lib-a"]);
+  git_in(root, &["checkout", "-q", "test-branch"]);
+  git_in(root, &["merge", "-q", "--ff-only", "main"]);
+
+  git_in(
+    root,
+    &["mv", "libs/lib-a/src/util.ts", "libs/lib-b/src/util.ts"],
+  );
+  git_in(root, &["commit", "-q", "-m", "move util to lib-b"]);
+
+  // Guard: git must pair this as a rename. If it were reported as delete + add,
+  // lib-a would be marked through the deletion path and this test would pass
+  // without exercising rename handling at all.
+  let status = git_in(root, &["diff", "--name-status", "main"]);
+  assert!(
+    status.starts_with('R'),
+    "expected git to report a rename, got: {status}"
+  );
+
+  let affected = repo.get_affected();
+  assert!(
+    affected.contains(&"lib-b".to_string()),
+    "lib-b (moved into) must be affected. Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"lib-a".to_string()),
+    "lib-a (moved out of) must be affected. Got: {:?}",
+    affected
+  );
+}

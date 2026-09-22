@@ -225,6 +225,18 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
       let is_rename_or_copy = new_path.is_some();
       let file_path = new_path.unwrap_or(file_path);
 
+      // A rename (unlike a copy, which leaves the original in place) also
+      // removes the old path. Its owning project lost the file, so the old path
+      // is emitted below as a line-less entry. It is absent from the working
+      // tree, so `core` marks its owner through the root-ownership fallback,
+      // which never reaches deleted-symbol recovery; no lines are recorded for
+      // it. Consumers that imported the old path must have rewritten their
+      // imports, so they appear in the diff on their own.
+      let renamed_from = file_diff
+        .lines()
+        .find_map(|line| line.strip_prefix("rename from "))
+        .map(|path| path.replace('"', "").trim().to_string());
+
       // Extract line numbers from each hunk header `@@ -X,Y +Z,W @@`.
       //
       // A hunk that adds or modifies lines (`W >= 1`) expands to every new-side
@@ -286,12 +298,21 @@ fn parse_diff(diff: &str) -> Result<Vec<ChangedFile>> {
         }
       }
 
-      Some(ChangedFile {
+      let mut entries = vec![ChangedFile {
         file_path: file_path.into(),
         changed_lines,
         deleted_lines,
-      })
+      }];
+      if let Some(old_path) = renamed_from {
+        entries.push(ChangedFile {
+          file_path: old_path.into(),
+          changed_lines: Vec::new(),
+          deleted_lines: Vec::new(),
+        });
+      }
+      Some(entries)
     })
+    .flatten()
     .collect();
 
   if changed_files.is_empty() {
@@ -362,14 +383,23 @@ index 1234567..abcdefg 100644
 "#;
 
     let result = parse_diff(diff).unwrap();
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.len(), 2);
 
-    // Should use the NEW path, not the old path
+    // The NEW path carries the content change
     assert_eq!(
       result[0].file_path.to_str().unwrap(),
       "libs/new-dir/provider.ts"
     );
     assert_eq!(result[0].changed_lines, vec![10]);
+
+    // The OLD path is emitted too, with no lines, so the project it moved out
+    // of is marked
+    assert_eq!(
+      result[1].file_path.to_str().unwrap(),
+      "libs/old-dir/provider.ts"
+    );
+    assert!(result[1].changed_lines.is_empty());
+    assert!(result[1].deleted_lines.is_empty());
   }
 
   #[test]
@@ -392,7 +422,7 @@ index 1234567..abcdefg 100644
 "#;
 
     let result = parse_diff(diff).unwrap();
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.len(), 2);
 
     // Should use the NEW path
     assert_eq!(
@@ -401,6 +431,14 @@ index 1234567..abcdefg 100644
     );
     // Should have every line in each hunk's new-side range
     assert_eq!(result[0].changed_lines, vec![5, 20, 21, 22]);
+
+    // The OLD path is emitted too, with no lines
+    assert_eq!(
+      result[1].file_path.to_str().unwrap(),
+      "src/quotes/helper.ts"
+    );
+    assert!(result[1].changed_lines.is_empty());
+    assert!(result[1].deleted_lines.is_empty());
   }
 
   #[test]
@@ -426,16 +464,20 @@ index 9876543..fedcba9 100644
 "#;
 
     let result = parse_diff(diff).unwrap();
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.len(), 3);
 
-    // First file: renamed, should use new path
+    // First file: renamed, emitted as the new path then the old path
     assert_eq!(
       result[0].file_path.to_str().unwrap(),
       "src/new/component.ts"
     );
+    assert_eq!(
+      result[1].file_path.to_str().unwrap(),
+      "src/old/component.ts"
+    );
 
     // Second file: normal, should use the regular path
-    assert_eq!(result[1].file_path.to_str().unwrap(), "src/index.ts");
+    assert_eq!(result[2].file_path.to_str().unwrap(), "src/index.ts");
   }
 
   #[test]
@@ -447,8 +489,29 @@ rename to src/new/name.ts
 "#;
 
     let result = parse_diff(diff).unwrap();
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.len(), 2);
     assert_eq!(result[0].file_path.to_str().unwrap(), "src/new/name.ts");
+    assert_eq!(result[0].changed_lines, vec![1]);
+
+    // A pure rename has no hunks, but the old path is still emitted so its
+    // owning project is marked
+    assert_eq!(result[1].file_path.to_str().unwrap(), "src/old/name.ts");
+    assert!(result[1].changed_lines.is_empty());
+    assert!(result[1].deleted_lines.is_empty());
+  }
+
+  #[test]
+  fn test_parse_diff_copy_keeps_single_entry() {
+    // A copy leaves the original in place, so only the new path is changed
+    let diff = r#"diff --git a/src/orig/name.ts b/src/copy/name.ts
+similarity index 100%
+copy from src/orig/name.ts
+copy to src/copy/name.ts
+"#;
+
+    let result = parse_diff(diff).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].file_path.to_str().unwrap(), "src/copy/name.ts");
     assert_eq!(result[0].changed_lines, vec![1]);
   }
 

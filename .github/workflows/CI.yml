@@ -551,8 +551,7 @@ jobs:
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
           # Wait for npm propagation is now handled by the previous step.
-          YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install
-          if [ $? -ne 0 ]; then
+          if ! YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
             echo "::error::yarn install failed after npm propagation verification"
             echo "::error::This should not happen - investigate registry state or yarn configuration"
             exit 1

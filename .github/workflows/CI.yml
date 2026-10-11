@@ -490,56 +490,6 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Wait for npm propagation
-        if: steps.version.outputs.is_release != 'true'
-        run: |
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          echo "Waiting for all platform packages at version $PKG_VERSION to propagate to npm..."
-          
-          # List of all platform packages that must be available
-          PACKAGES=(
-            "@front-ops/domino-darwin-x64"
-            "@front-ops/domino-darwin-arm64"
-            "@front-ops/domino-win32-x64-msvc"
-            "@front-ops/domino-linux-x64-gnu"
-            "@front-ops/domino-linux-x64-musl"
-            "@front-ops/domino-linux-arm64-musl"
-            "@front-ops/domino-linux-arm64-gnu"
-          )
-          
-          MAX_ATTEMPTS=24  # 24 attempts * 15s = 6 minutes total
-          SLEEP_SECONDS=15
-          
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo ""
-            echo "Attempt $attempt/$MAX_ATTEMPTS: checking npm registry..."
-            ALL_AVAILABLE=true
-            
-            for pkg in "${PACKAGES[@]}"; do
-              if npm view "${pkg}@${PKG_VERSION}" version >/dev/null 2>&1; then
-                echo "  ✓ ${pkg}@${PKG_VERSION}"
-              else
-                echo "  ✗ ${pkg}@${PKG_VERSION} not yet available"
-                ALL_AVAILABLE=false
-              fi
-            done
-            
-            if [ "$ALL_AVAILABLE" = true ]; then
-              echo ""
-              echo "✓ All platform packages are available on npm"
-              break
-            fi
-            
-            if [ $attempt -lt $MAX_ATTEMPTS ]; then
-              echo "Waiting ${SLEEP_SECONDS}s before retry..."
-              sleep $SLEEP_SECONDS
-            else
-              echo ""
-              echo "::error::Timeout waiting for npm propagation after $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
-              echo "::error::Some platform packages are not yet available on npm registry"
-              exit 1
-            fi
-          done
       - name: Push version commit and tag
         if: steps.version.outputs.is_release != 'true'
         env:
@@ -550,12 +500,22 @@ jobs:
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
-          # Wait for npm propagation is now handled by the previous step.
-          if ! YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
-            echo "::error::yarn install failed after npm propagation verification"
-            echo "::error::This should not happen - investigate registry state or yarn configuration"
-            exit 1
-          fi
+          # Retry yarn install to handle npm registry propagation delay after publish.
+          MAX_ATTEMPTS=24
+          SLEEP_SECONDS=15
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+              break
+            fi
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              echo "yarn install attempt $attempt failed, retrying in ${SLEEP_SECONDS}s..."
+              sleep $SLEEP_SECONDS
+            else
+              echo "::error::yarn install failed after $MAX_ATTEMPTS attempts over $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
+              echo "::error::Registry propagation may still be incomplete or there is a configuration issue"
+              exit 1
+            fi
+          done
           git add package.json Cargo.toml yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           git tag "v${{ steps.bump.outputs.new_version }}"

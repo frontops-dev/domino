@@ -5212,7 +5212,9 @@ fn test_turbo_workspace_detected_and_projects_discovered() {
 }
 
 /// Detection precedence: a repo with both nx.json and turbo.json is an Nx
-/// workspace — projects come from project.json, not from package.json names.
+/// workspace. A package with a project.json is discovered under its Nx name, not
+/// its package.json name. Workspace members without a project.json are merged in,
+/// because Nx infers them from package.json too.
 #[test]
 fn test_nx_detection_wins_over_turbo() {
   let (_tmp, root) = setup_turbo_repo("turbo.json", r#"{"tasks": {"build": {}}}"#);
@@ -5226,15 +5228,20 @@ fn test_nx_detection_wins_over_turbo() {
   git_in(&root, &["add", "."]);
   git_in(&root, &["commit", "-q", "-m", "add nx.json"]);
 
-  let names: Vec<String> = domino::workspace::discover_projects(&root)
+  let mut names: Vec<String> = domino::workspace::discover_projects(&root)
     .unwrap()
     .into_iter()
     .map(|p| p.name)
     .collect();
+  names.sort();
   assert_eq!(
     names,
-    vec!["ui-lib".to_string()],
-    "Nx must win the detection race: only the Nx project.json project is discovered"
+    vec![
+      "@repo/app".to_string(),
+      "@repo/tools".to_string(),
+      "ui-lib".to_string()
+    ],
+    "Nx must win the detection race: packages/ui is discovered as its project.json name, the other workspace members are merged in"
   );
 }
 

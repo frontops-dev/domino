@@ -230,9 +230,15 @@ reflect the order features were added, not execution order (`Step 6` appears twi
   - Uses `oxc_resolver` for module resolution (same as Rolldown/Nova)
   - Maintains resolution cache for performance
   - Recursively follows import chains to find all affected files
-- **`src/semantic/resolve_options.rs`**: Shared `oxc_resolver` configuration used by **both**
-  resolution paths (import-index builder and reference finder) - deliberately centralised to
-  prevent the two from drifting. Also home of `is_workspace_specifier` (see pitfall below)
+- **`src/semantic/workspace_resolver.rs`**: `WorkspaceResolver`, the one resolver the analyzer owns
+  and the import index, re-export index and reference finder all call - deliberately shared so
+  the three cannot drift. Tries the nearest `tsconfig.json`'s `paths` first, then the root
+  `oxc_resolver` configuration
+- **`src/semantic/tsconfig_paths.rs`**: Loads a tsconfig's effective `paths`/`baseUrl` across its
+  `extends` chain with TypeScript's override rules, and matches specifiers against them
+- **`src/semantic/resolve_options.rs`**: The root `oxc_resolver` configuration
+  (`tsconfig.base.json`, extensions, project aliases). Also home of `is_workspace_specifier`
+  (see pitfall below)
 - **`src/semantic/assets.rs`**: Finds source-file references to non-source assets, so a changed
   template or stylesheet can be traced to the code that uses it
 - **`src/lockfile.rs`**: Lockfile diffing for npm/yarn/pnpm/bun - detects changed direct
@@ -278,7 +284,12 @@ reflect the order features were added, not execution order (`Step 6` appears twi
 
 Uses `oxc_resolver` with TypeScript-aware configuration:
 
-- Looks for `tsconfig.base.json` in workspace root for path mappings
+- Project-level `paths` first: the nearest `tsconfig.json` above the importing file (e.g. an
+  app's `$pages/*`), then `tsconfig.base.json` in the workspace root
+- domino reads that `extends` chain itself instead of using `oxc_resolver`'s tsconfig discovery,
+  which fails a whole config when a bare `extends` (`@scope/ts-config/tsconfig.front.json`) is
+  missing from `node_modules` - the usual state of a CI job that installs only the root package.
+  A bare `extends` resolves through the workspace project list first
 - Supports extensions: `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.d.ts`, `.d.mts`, `.d.cts`
 - TypeScript variants are preferred over their JS counterparts, and `.mjs`/`.cjs`
   specifiers resolve to `.mts`/`.cts` sources respectively (via `extension_alias`),
@@ -297,7 +308,8 @@ the npm package name or the tsconfig path alias used in import statements. For e
 
 The `is_workspace_specifier` function (in `resolve_options.rs`) is a performance guard
 that short-circuits the resolver for external packages. It MUST check **both** project
-names **and** tsconfig path alias keys. If it only checks project names, imports using
+names **and** tsconfig path alias keys. Aliases a project declares in its own
+`tsconfig.json` bypass it: `WorkspaceResolver` matches them first, per importing file. If it only checks project names, imports using
 tsconfig aliases will be silently classified as external and dropped from the import
 index — completely breaking cross-project affected detection.
 

@@ -5855,3 +5855,129 @@ fn test_barrel_consumer_of_other_symbol_not_affected() {
     affected
   );
 }
+
+/// Scaffold a monorepo where each app declares its own `$pages/*` alias in a
+/// project-level `tsconfig.json` (not in `tsconfig.base.json`), and `my-app`
+/// reaches a lib symbol only through a re-export barrel imported via that alias.
+/// `other-app` declares the same alias key pointing at its own pages, so a
+/// resolver that ignored which tsconfig owns the importing file would wire it
+/// to the wrong target.
+///
+/// The app tsconfigs extend a shared config through a workspace package name with
+/// no `node_modules` installed and no `include`, as a CI job that installs only the
+/// root package sees them.
+fn project_tsconfig_paths_affected(router_source: &str) -> Vec<String> {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let ts_config = root.join("tools/ts-config");
+  let lib_src = root.join("libs/my-lib/src");
+  let app = root.join("apps/my-app");
+  let other_app = root.join("apps/other-app");
+  fs::create_dir_all(&ts_config).unwrap();
+  fs::create_dir_all(lib_src.join("Page")).unwrap();
+  fs::create_dir_all(app.join("src/pages/Page")).unwrap();
+  fs::create_dir_all(other_app.join("src/pages/Page")).unwrap();
+
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{ "compilerOptions": {} }"#,
+  )
+  .unwrap();
+  fs::write(
+    ts_config.join("package.json"),
+    r#"{ "name": "@scope/ts-config" }"#,
+  )
+  .unwrap();
+  fs::write(
+    ts_config.join("tsconfig.front.json"),
+    r#"{ "compilerOptions": { "jsx": "react-jsx" } }"#,
+  )
+  .unwrap();
+  let app_tsconfig = r#"{
+  "extends": "@scope/ts-config/tsconfig.front.json",
+  "compilerOptions": { "paths": { "$pages/*": ["./src/pages/*"] } }
+}"#;
+  fs::write(app.join("tsconfig.json"), app_tsconfig).unwrap();
+  fs::write(other_app.join("tsconfig.json"), app_tsconfig).unwrap();
+
+  fs::write(
+    lib_src.join("Page/index.tsx"),
+    "const Page = () => 'original';\nexport default Page;\n",
+  )
+  .unwrap();
+  fs::write(
+    app.join("src/pages/Page/index.ts"),
+    "export { default } from '@scope/my-lib/Page';\n",
+  )
+  .unwrap();
+  fs::write(app.join("src/router.tsx"), router_source).unwrap();
+  fs::write(
+    other_app.join("src/pages/Page/index.ts"),
+    "const Page = () => 'other';\nexport default Page;\n",
+  )
+  .unwrap();
+  fs::write(other_app.join("src/router.tsx"), router_source).unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    lib_src.join("Page/index.tsx"),
+    "const Page = () => 'modified';\nexport default Page;\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify page"]);
+
+  let project = |name: &str, root: &str| Project {
+    name: name.to_string(),
+    root: PathBuf::from(root),
+    source_root: PathBuf::from(format!("{root}/src")),
+    ts_config: None,
+    implicit_dependencies: vec![],
+    targets: vec![],
+  };
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      project("@scope/ts-config", "tools/ts-config"),
+      project("@scope/my-lib", "libs/my-lib"),
+      project("my-app", "apps/my-app"),
+      project("other-app", "apps/other-app"),
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects
+}
+
+#[test]
+fn test_project_tsconfig_path_alias_static_import() {
+  let affected = project_tsconfig_paths_affected(
+    "import Page from '$pages/Page';\nexport const router = () => Page();\n",
+  );
+
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "my-app should be affected (imports the changed lib page via its own tsconfig `$pages/*` alias). Got: {:?}",
+    affected
+  );
+  assert!(
+    !affected.contains(&"other-app".to_string()),
+    "other-app should NOT be affected (its `$pages/*` alias points at its own page). Got: {:?}",
+    affected
+  );
+}

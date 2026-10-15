@@ -2,7 +2,6 @@ use crate::error::Result;
 use crate::profiler::Profiler;
 use crate::semantic::WorkspaceAnalyzer;
 use crate::types::Reference;
-use oxc_resolver::Resolver;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,6 @@ use tracing::{debug, warn};
 /// Cross-file reference finder
 pub struct ReferenceFinder<'a> {
   analyzer: &'a WorkspaceAnalyzer,
-  resolver: Resolver,
   cwd: PathBuf,
   /// Resolution cache: (from_file, specifier) -> resolved_path
   /// Using RefCell for interior mutability since resolution is logically const
@@ -27,7 +25,6 @@ impl<'a> ReferenceFinder<'a> {
   pub fn new(analyzer: &'a WorkspaceAnalyzer, cwd: &Path, profiler: Arc<Profiler>) -> Self {
     Self {
       analyzer,
-      resolver: Resolver::new(super::create_resolve_options(cwd, &analyzer.projects)),
       cwd: cwd.to_path_buf(),
       resolution_cache: RefCell::new(FxHashMap::default()),
       profiler,
@@ -297,37 +294,7 @@ impl<'a> ReferenceFinder<'a> {
       }
     }
 
-    if !super::is_workspace_specifier(
-      specifier,
-      &self.analyzer.projects,
-      &self.analyzer.tsconfig_path_prefixes,
-    ) {
-      self.resolution_cache.borrow_mut().insert(cache_key, None);
-      if let Some(start_time) = start {
-        self
-          .profiler
-          .record_resolution(false, start_time.elapsed().as_nanos() as u64);
-      }
-      return None;
-    }
-
-    // Not in cache, resolve it
-    let from_path = self.cwd.join(from_file);
-    let context = from_path.parent()?;
-
-    let resolved = match self.resolver.resolve(context, specifier) {
-      Ok(resolution) => {
-        let resolved = resolution.path();
-        resolved
-          .strip_prefix(&self.cwd)
-          .ok()
-          .map(|p| p.to_path_buf())
-      }
-      Err(_) => {
-        // Try simple relative resolution as fallback
-        self.simple_resolve(context, specifier)
-      }
-    };
+    let resolved = self.analyzer.resolver.resolve(from_file, specifier);
 
     // Cache the result (even if None)
     self
@@ -346,6 +313,7 @@ impl<'a> ReferenceFinder<'a> {
 
   /// Simple fallback resolution for relative imports.
   /// Delegates to the shared free function in `semantic::simple_resolve_relative`.
+  #[cfg(test)]
   fn simple_resolve(&self, context: &Path, specifier: &str) -> Option<PathBuf> {
     super::simple_resolve_relative(&self.cwd, context, specifier)
   }
@@ -367,7 +335,7 @@ impl<'a> ReferenceFinder<'a> {
   /// Absolute paths inside the workspace are made relative to `cwd`; everything else
   /// is left untouched. No case folding or symlink canonicalization happens here, so
   /// index keys must be built from the same (already `cwd`-relative) paths the
-  /// resolver produces — see `WorkspaceAnalyzer::resolve_workspace_specifier`.
+  /// resolver produces — see `WorkspaceResolver::resolve`.
   fn normalize_path<'p>(cwd: &Path, path: &'p Path) -> &'p Path {
     if path.is_absolute() {
       path.strip_prefix(cwd).unwrap_or(path)

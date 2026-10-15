@@ -2,15 +2,16 @@ pub mod analyzer;
 pub mod assets;
 pub mod reference_finder;
 mod resolve_options;
+mod tsconfig_paths;
+mod workspace_resolver;
 
 use std::path::{Path, PathBuf};
 
 pub use analyzer::WorkspaceAnalyzer;
 pub use assets::AssetReferenceFinder;
 pub use reference_finder::ReferenceFinder;
-pub(crate) use resolve_options::create_resolve_options;
-pub(crate) use resolve_options::is_workspace_specifier;
 pub(crate) use resolve_options::parse_tsconfig_path_prefixes;
+pub(crate) use workspace_resolver::WorkspaceResolver;
 
 /// Shared fallback resolution for relative imports when oxc_resolver fails.
 /// Handles .js/.jsx/.mjs/.cjs → TypeScript-equivalent remapping and standard

@@ -168,11 +168,8 @@ pub struct WorkspaceAnalyzer {
   /// Without this index, every reference lookup had to scan the exports of every file
   /// in the workspace and resolve each re-export specifier.
   pub reexport_index: ReexportIndexMap,
-  /// tsconfig.base.json path alias keys (e.g. `@scope/my-lib`).
-  /// Used alongside project names for the `is_workspace_specifier` check because
-  /// Nx project names can differ from the npm package names / tsconfig aliases
-  /// that code actually imports.
-  pub tsconfig_path_prefixes: Vec<String>,
+  /// Resolver shared by the import index, the re-export index and `ReferenceFinder`
+  pub(crate) resolver: super::WorkspaceResolver,
   /// Profiler for performance measurement
   pub profiler: Arc<Profiler>,
 }
@@ -180,7 +177,11 @@ pub struct WorkspaceAnalyzer {
 impl WorkspaceAnalyzer {
   /// Create a new workspace analyzer
   pub fn new(projects: Vec<Project>, cwd: &Path, profiler: Arc<Profiler>) -> Result<Self> {
-    let tsconfig_path_prefixes = super::parse_tsconfig_path_prefixes(cwd);
+    let resolver = super::WorkspaceResolver::new(
+      cwd,
+      projects.clone(),
+      super::parse_tsconfig_path_prefixes(cwd),
+    );
 
     let mut analyzer = Self {
       files: HashMap::new(),
@@ -189,50 +190,19 @@ impl WorkspaceAnalyzer {
       projects,
       import_index: FxHashMap::default(),
       reexport_index: FxHashMap::default(),
-      tsconfig_path_prefixes,
+      resolver,
       profiler,
     };
 
     analyzer.analyze_workspace(cwd)?;
 
     // Build import index
-    analyzer.build_import_index(cwd)?;
+    analyzer.build_import_index()?;
 
     // Build reverse re-export index (barrel files)
-    analyzer.build_reexport_index(cwd)?;
+    analyzer.build_reexport_index()?;
 
     Ok(analyzer)
-  }
-
-  /// Resolve an import/export specifier the same way `build_import_index` and
-  /// `ReferenceFinder::resolve_import` do, returning a workspace-relative path.
-  ///
-  /// Returns `None` for specifiers that are not workspace-internal, that fail to
-  /// resolve, or that resolve outside of `cwd`. Keeping this in one place guarantees
-  /// the import index, the re-export index and the on-demand resolution in
-  /// `ReferenceFinder` agree on what a specifier points at.
-  fn resolve_workspace_specifier(
-    &self,
-    resolver: &oxc_resolver::Resolver,
-    cwd: &Path,
-    from_file: &Path,
-    specifier: &str,
-  ) -> Option<PathBuf> {
-    let from_path = cwd.join(from_file);
-    let context = from_path.parent()?;
-
-    if !super::is_workspace_specifier(specifier, &self.projects, &self.tsconfig_path_prefixes) {
-      return None;
-    }
-
-    match resolver.resolve(context, specifier) {
-      Ok(resolution) => resolution
-        .path()
-        .strip_prefix(cwd)
-        .ok()
-        .map(|p| p.to_path_buf()),
-      Err(_) => super::simple_resolve_relative(cwd, context, specifier),
-    }
   }
 
   /// Build the reverse re-export index: resolved_source_file -> [(reexporting_file, export)]
@@ -240,11 +210,7 @@ impl WorkspaceAnalyzer {
   /// This is the mirror image of `build_import_index`: instead of "who imports this
   /// symbol", it answers "which files re-export from this file" (barrel files such as
   /// `index.ts`). Must be called after `analyze_workspace`.
-  fn build_reexport_index(&mut self, cwd: &Path) -> Result<()> {
-    use oxc_resolver::Resolver;
-
-    let resolver = Resolver::new(super::create_resolve_options(cwd, &self.projects));
-
+  fn build_reexport_index(&mut self) -> Result<()> {
     let mut index: ReexportIndexMap = FxHashMap::default();
 
     for (reexporting_file, file_exports) in &self.exports {
@@ -253,9 +219,7 @@ impl WorkspaceAnalyzer {
           continue;
         };
 
-        let Some(resolved) =
-          self.resolve_workspace_specifier(&resolver, cwd, reexporting_file, from_module)
-        else {
+        let Some(resolved) = self.resolver.resolve(reexporting_file, from_module) else {
           continue;
         };
 
@@ -287,16 +251,11 @@ impl WorkspaceAnalyzer {
   /// same resolver Rolldown uses multi-threaded. Constructing one `Resolver`
   /// per item would be wasteful,
   /// since construction itself is not free.
-  fn build_import_index(&mut self, cwd: &Path) -> Result<()> {
-    use oxc_resolver::Resolver;
-
-    let resolver = Resolver::new(super::create_resolve_options(cwd, &self.projects));
-
-    // Pre-extract the fields the resolution closure needs so it only ever
-    // captures shared (`Sync`) references — `self` as a whole is never
-    // captured, which keeps this compatible with the `&mut self` receiver.
-    let projects = &self.projects;
-    let tsconfig_path_prefixes = &self.tsconfig_path_prefixes;
+  fn build_import_index(&mut self) -> Result<()> {
+    // Borrow only the resolver field so the closure captures a shared (`Sync`)
+    // reference, never `self` as a whole, which keeps this compatible with the
+    // `&mut self` receiver.
+    let resolver = &self.resolver;
 
     // Flatten to a list of (importing_file, import) work items.
     let work_items: Vec<(&PathBuf, &Import)> = self
@@ -320,18 +279,7 @@ impl WorkspaceAnalyzer {
     let resolved_entries: Vec<((PathBuf, String), ImportIndexValue)> = work_items
       .into_par_iter()
       .filter_map(|(importing_file, import)| {
-        // Resolve where this import comes from
-        let from_path = cwd.join(importing_file);
-        let context = from_path.parent()?;
-
-        if !super::is_workspace_specifier(&import.from_module, projects, tsconfig_path_prefixes) {
-          return None;
-        }
-
-        let resolved = match resolver.resolve(context, &import.from_module) {
-          Ok(resolution) => resolution.path().strip_prefix(cwd).ok()?.to_path_buf(),
-          Err(_) => super::simple_resolve_relative(cwd, context, &import.from_module)?,
-        };
+        let resolved = resolver.resolve(importing_file, &import.from_module)?;
 
         // (resolved_file, imported_symbol) -> (importing_file, local_name, from_module, is_dynamic)
         let key = (resolved, import.imported_name.clone());

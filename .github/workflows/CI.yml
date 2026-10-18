@@ -542,12 +542,20 @@ jobs:
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
           # Retry yarn install to handle npm registry propagation delay after publish.
-          for i in 1 2 3 4 5; do
+          MAX_ATTEMPTS=24
+          SLEEP_SECONDS=15
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
             if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
               break
             fi
-            echo "yarn install attempt $i failed, retrying in 15s..."
-            sleep 15
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              echo "yarn install attempt $attempt failed, retrying in ${SLEEP_SECONDS}s..."
+              sleep $SLEEP_SECONDS
+            else
+              echo "::error::yarn install failed after $MAX_ATTEMPTS attempts over $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
+              echo "::error::Registry propagation may still be incomplete or there is a configuration issue"
+              exit 1
+            fi
           done
           git add package.json Cargo.toml yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"

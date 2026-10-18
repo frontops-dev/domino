@@ -10,6 +10,7 @@ pub use assets::AssetReferenceFinder;
 pub use reference_finder::ReferenceFinder;
 pub(crate) use resolve_options::create_resolve_options;
 pub(crate) use resolve_options::is_workspace_specifier;
+pub(crate) use resolve_options::package_name_prefixes;
 pub(crate) use resolve_options::parse_tsconfig_path_prefixes;
 
 /// Shared fallback resolution for relative imports when oxc_resolver fails.

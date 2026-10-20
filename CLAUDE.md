@@ -388,8 +388,11 @@ This allows:
   below are automatic. **Tests are not run by the hook.** The same hook runs `lint-staged`, which
   applies `prettier --write` to staged `js/ts/tsx/yml/yaml/md/json` and `taplo format` to `.toml` —
   so editing this file and committing it will also normalise its existing Markdown formatting.
-- Version bumps go through `yarn version` → `napi version` + `scripts/sync-cargo-version.js`,
-  which keeps `Cargo.toml` in sync with `package.json`.
+- Version bumps go through `yarn version` → `napi version` + `scripts/sync-version.js`,
+  which keeps `Cargo.toml` and the native-binding version checks in `index.js` in sync with
+  `package.json` (covered by `tests/sync-version.test.js`, run in the CI `lint` job).
+- A release that published but failed to push its version commit can be re-run safely: a
+  release tag already on the commit makes the publish job reuse that version instead of bumping.
 - Every push to `main` publishes a release unless the commit message contains `[skip release]`.
   Put it in the squash message to batch several merges into one release: CI still runs on each,
   and the next unmarked merge releases them all, bumping from every commit since the last tag.
@@ -449,6 +452,7 @@ yarn test
 # machine-local absolute paths — `git checkout -- tests/fixtures/test-repo/`
 # afterwards so they are not committed.
 node --test tests/publish-preview.test.js
+node --test tests/sync-version.test.js
 ```
 
 All tests must pass before committing.

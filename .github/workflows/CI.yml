@@ -51,6 +51,8 @@ jobs:
         run: cargo clippy
       - name: Test publish-preview script
         run: node --test tests/publish-preview.test.js
+      - name: Test version sync script
+        run: node --test tests/sync-version.test.js
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -427,6 +429,17 @@ jobs:
 
           echo "is_release=false" >> $GITHUB_OUTPUT
 
+          # A release tag already on HEAD means this is a re-run of that release (for
+          # example after the version commit failed). Reuse its version: bumping from
+          # it would publish a duplicate. The claim below re-pushes the same tag, publish
+          # skips what npm already has, and the version commit gets another try.
+          HEAD_TAG=$(git tag --points-at HEAD --list "v[0-9]*" | sort -V | tail -1)
+          if [ -n "$HEAD_TAG" ]; then
+            echo "HEAD is already released as ${HEAD_TAG}; re-running that release"
+            echo "next_version=${HEAD_TAG#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             LAST_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*" 2>/dev/null || echo "")
@@ -493,7 +506,7 @@ jobs:
         if: steps.version.outputs.is_release != 'true'
         run: |
           npm version ${{ steps.version.outputs.next_version }} --no-git-tag-version --ignore-scripts --allow-same-version
-          node scripts/sync-cargo-version.js
+          node scripts/sync-version.js
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
@@ -544,8 +557,9 @@ jobs:
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
-          # Retry yarn install to handle npm registry propagation delay after publish.
-          MAX_ATTEMPTS=24
+          # Retry yarn install to handle npm registry propagation delay after publish. A
+          # single platform package has taken about 7 minutes to appear, so allow 20.
+          MAX_ATTEMPTS=80
           SLEEP_SECONDS=15
           for attempt in $(seq 1 $MAX_ATTEMPTS); do
             if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
@@ -557,10 +571,11 @@ jobs:
             else
               echo "::error::yarn install failed after $MAX_ATTEMPTS attempts over $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
               echo "::error::Registry propagation may still be incomplete or there is a configuration issue"
+              echo "::error::The release is published and tagged; re-run this job to push the version commit"
               exit 1
             fi
           done
-          git add package.json Cargo.toml yarn.lock
+          git add package.json Cargo.toml index.js yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           # The tag was already pushed to claim the version, so only the commit is left.
           # A feature commit can land on main while we publish, so rebase and retry.

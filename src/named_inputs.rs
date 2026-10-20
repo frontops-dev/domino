@@ -14,6 +14,63 @@ pub struct GlobalPattern {
   pub named_input: String,
   pub raw_pattern: String,
   pub pattern: Pattern,
+  /// `<path>/**` for a glob-free entry, which Nx reads as "this path or
+  /// everything under it". `None` when the entry contains glob syntax.
+  pub directory: Option<Pattern>,
+}
+
+/// Whether a fileset path contains glob syntax. Braces count, so a brace set
+/// like `{a,b}` is never widened into a `{a,b}/**` directory prefix. (The `glob`
+/// crate does not expand brace sets at all: such an entry compiles to a literal
+/// and matches only a path spelled with the braces. That limitation predates
+/// this function.)
+fn has_glob_syntax(path: &str) -> bool {
+  path.contains(['*', '?', '[', ']', '{', '}', '!'])
+}
+
+/// Compile one workspace-root-relative global pattern.
+///
+/// A glob-free path (`config`, `config/`) matches the path itself **and**
+/// everything under it. Without this, `{workspaceRoot}/config` would only match
+/// a file literally named `config`, and the trailing-slash form would match
+/// nothing. Both tools read such an entry this way: Nx treats a fileset entry
+/// with no glob syntax as the path or everything under it, and Turborepo's
+/// globwalk expands a metacharacter-free pattern that names a directory to
+/// `dir/**` (`add_doublestar_to_dir` in `crates/turborepo-globwalk`).
+/// Domino does not check the disk, so a glob-free *file* path also gets the
+/// `/**` form; nothing can live under a file, so that form never matches.
+///
+/// Two divergences from Nx are deliberate; do not "fix" them here:
+/// - Matching runs with `require_literal_separator: false`, so `*` crosses `/`
+///   and `{workspaceRoot}/config/*` selects more than Nx does. Aligning means
+///   replacing the `glob` crate with `globset` wholesale. Domino is knowingly
+///   wider here.
+/// - Nx's `!` handling is not a target: nrwl/nx#36825 documents its extglob
+///   reading of `!` as a bug with its own pending fix. Domino strips the `!` and
+///   compiles the rest, which is currently closer to correct.
+///
+/// Returns `Ok(None)` for an empty path (`{workspaceRoot}/`), which must never
+/// widen to "every file".
+fn compile_global_pattern(
+  named_input: &str,
+  raw_pattern: &str,
+  path: &str,
+) -> Result<Option<GlobalPattern>, glob::PatternError> {
+  let (literal, directory) = if has_glob_syntax(path) {
+    (path, None)
+  } else {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+      return Ok(None);
+    }
+    (trimmed, Some(Pattern::new(&format!("{trimmed}/**"))?))
+  };
+  Ok(Some(GlobalPattern {
+    named_input: named_input.to_string(),
+    raw_pattern: raw_pattern.to_string(),
+    pattern: Pattern::new(literal)?,
+    directory,
+  }))
 }
 
 /// Resolved named inputs configuration from nx.json
@@ -91,14 +148,13 @@ pub fn resolve_from_nx_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
       }
     } else if let Some(suffix) = pattern_str.strip_prefix("{workspaceRoot}/") {
       // Global workspace-root pattern
-      match Pattern::new(suffix) {
-        Ok(pat) => {
+      match compile_global_pattern(origin, pattern_str, suffix) {
+        Ok(Some(gp)) => {
           debug!("Global pattern from '{}': {}", origin, suffix);
-          global_patterns.push(GlobalPattern {
-            named_input: origin.clone(),
-            raw_pattern: pattern_str.clone(),
-            pattern: pat,
-          });
+          global_patterns.push(gp);
+        }
+        Ok(None) => {
+          warn!("Skipping empty global pattern '{}'", pattern_str);
         }
         Err(e) => {
           warn!("Invalid glob pattern '{}': {}", suffix, e);
@@ -183,14 +239,13 @@ pub fn resolve_from_turbo_json(cwd: &Path) -> Option<ResolvedNamedInputs> {
     // a silent no-op. `raw_pattern` is kept as-written for display.
     let compiled_pattern = raw_pattern.strip_prefix("./").unwrap_or(raw_pattern);
 
-    match Pattern::new(compiled_pattern) {
-      Ok(pattern) => {
+    match compile_global_pattern(TURBO_GLOBAL_DEPENDENCIES, raw_pattern, compiled_pattern) {
+      Ok(Some(gp)) => {
         debug!("Global pattern from globalDependencies: {}", raw_pattern);
-        global_patterns.push(GlobalPattern {
-          named_input: TURBO_GLOBAL_DEPENDENCIES.to_string(),
-          raw_pattern: raw_pattern.clone(),
-          pattern,
-        });
+        global_patterns.push(gp);
+      }
+      Ok(None) => {
+        warn!("Skipping empty globalDependency '{}'", raw_pattern);
       }
       Err(e) => {
         warn!("Invalid glob pattern '{}': {}", raw_pattern, e);
@@ -298,12 +353,14 @@ impl ResolvedNamedInputs {
     };
 
     for gp in &self.global_patterns {
-      if gp.pattern.matches_with(path_str, opts) {
+      let under_directory = gp
+        .directory
+        .as_ref()
+        .is_some_and(|dir| dir.matches_with(path_str, opts));
+      if under_directory || gp.pattern.matches_with(path_str, opts) {
         debug!(
           "File '{}' matches global pattern '{}' from namedInput '{}'",
-          path_str,
-          gp.pattern.as_str(),
-          gp.named_input
+          path_str, gp.raw_pattern, gp.named_input
         );
         return Some(gp);
       }
@@ -492,6 +549,69 @@ mod tests {
     assert!(resolved
       .matches_global_pattern(&PathBuf::from("src/index.ts"))
       .is_none());
+  }
+
+  fn nx_shared_globals(patterns: &[&str]) -> ResolvedNamedInputs {
+    let dir = tempfile::TempDir::new().unwrap();
+    let list = patterns
+      .iter()
+      .map(|p| format!("\"{p}\""))
+      .collect::<Vec<_>>()
+      .join(", ");
+    write_nx_json(
+      dir.path(),
+      &format!(
+        r#"{{ "namedInputs": {{ "default": ["sharedGlobals"], "sharedGlobals": [{list}] }} }}"#
+      ),
+    );
+    resolve_from_nx_json(dir.path()).unwrap()
+  }
+
+  fn matches(resolved: &ResolvedNamedInputs, path: &str) -> bool {
+    resolved
+      .matches_global_pattern(&PathBuf::from(path))
+      .is_some()
+  }
+
+  #[test]
+  fn test_glob_free_path_matches_everything_under_it() {
+    let resolved = nx_shared_globals(&["{workspaceRoot}/config"]);
+    assert!(matches(&resolved, "config/app.json"));
+    assert!(matches(&resolved, "config/nested/deep.json"));
+    // The path itself still matches (it may be a file)
+    assert!(matches(&resolved, "config"));
+    // A sibling sharing the prefix is not under the directory
+    assert!(!matches(&resolved, "config.json"));
+    assert!(!matches(&resolved, "configs/app.json"));
+  }
+
+  #[test]
+  fn test_glob_free_path_with_trailing_slash_matches_the_same() {
+    let resolved = nx_shared_globals(&["{workspaceRoot}/config/"]);
+    assert!(matches(&resolved, "config/app.json"));
+    assert!(!matches(&resolved, "config.json"));
+  }
+
+  #[test]
+  fn test_glob_path_is_not_expanded_to_a_directory() {
+    // Brace sets and wildcards are glob syntax, not directory prefixes
+    let resolved = nx_shared_globals(&["{workspaceRoot}/*.json", "{workspaceRoot}/{a,b}"]);
+    assert!(matches(&resolved, "babel.json"));
+    // Would match only if the entries were widened with `/**`
+    assert!(!matches(&resolved, "{a,b}/file.ts"));
+    assert!(!matches(&resolved, "x.json/y"));
+  }
+
+  #[test]
+  fn test_empty_workspace_root_path_matches_nothing() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_nx_json(
+      dir.path(),
+      r#"{ "namedInputs": { "default": ["sharedGlobals"], "sharedGlobals": ["{workspaceRoot}/", "{workspaceRoot}/babel.config.json"] } }"#,
+    );
+    let resolved = resolve_from_nx_json(dir.path()).unwrap();
+    assert!(!matches(&resolved, "libs/a/src/index.ts"));
+    assert!(!matches(&resolved, "README.md"));
   }
 
   #[test]
@@ -828,6 +948,16 @@ mod tests {
     assert!(resolved
       .matches_global_pattern(&PathBuf::from("packages/ui/src/index.ts"))
       .is_none());
+  }
+
+  #[test]
+  fn test_turbo_glob_free_path_matches_everything_under_it() {
+    let dir = tempfile::TempDir::new().unwrap();
+    write_turbo_json(dir.path(), r#"{"globalDependencies": ["./config/"]}"#);
+
+    let resolved = resolve_from_turbo_json(dir.path()).unwrap();
+    assert!(matches(&resolved, "config/app.json"));
+    assert!(!matches(&resolved, "config.json"));
   }
 
   #[test]

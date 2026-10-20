@@ -8,6 +8,7 @@ use crate::error::{DominoError, Result};
 use crate::types::ChangedFile;
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -397,8 +398,7 @@ fn package_name_from_key(key: &str) -> &str {
 }
 
 fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
-  let parsed: serde_yaml::Value = serde_yaml::from_str(content)
-    .map_err(|e| DominoError::Parse(format!("pnpm lockfile: {}", e)))?;
+  let parsed = parse_pnpm_documents(content)?;
 
   let mut direct_dependencies = FxHashSet::default();
   let mut packages = FxHashMap::default();
@@ -468,6 +468,52 @@ fn parse_pnpm_lockfile(content: &str) -> Result<LockfileData> {
     direct_dependencies,
     packages,
   })
+}
+
+/// pnpm 10 writes `pnpm-lock.yaml` as two YAML documents. The first is the
+/// package manager's own dependency snapshot. The second is the workspace
+/// lockfile. `serde_yaml::from_str` rejects more than one document, and a
+/// single mapping cannot hold both `lockfileVersion` keys.
+///
+/// Later documents override scalar keys. Mapping keys (`importers`,
+/// `packages`) are merged so the snapshot's packages stay visible and the
+/// workspace document supplies project dependencies.
+fn parse_pnpm_documents(content: &str) -> Result<serde_yaml::Value> {
+  let mut merged: Option<serde_yaml::Value> = None;
+  for document in serde_yaml::Deserializer::from_str(content) {
+    let value = serde_yaml::Value::deserialize(document)
+      .map_err(|e| DominoError::Parse(format!("pnpm lockfile: {}", e)))?;
+    merged = Some(match merged {
+      Some(base) => merge_yaml_documents(base, value),
+      None => value,
+    });
+  }
+  merged.ok_or_else(|| DominoError::Parse("pnpm lockfile: empty input".to_string()))
+}
+
+fn merge_yaml_documents(
+  mut base: serde_yaml::Value,
+  overlay: serde_yaml::Value,
+) -> serde_yaml::Value {
+  merge_yaml_documents_in_place(&mut base, overlay);
+  base
+}
+
+fn merge_yaml_documents_in_place(base: &mut serde_yaml::Value, overlay: serde_yaml::Value) {
+  use serde_yaml::Value;
+  match (base, overlay) {
+    (_, Value::Null) => {}
+    (Value::Mapping(base_map), Value::Mapping(overlay_map)) => {
+      for (key, value) in overlay_map {
+        if let Some(existing) = base_map.get_mut(&key) {
+          merge_yaml_documents_in_place(existing, value);
+        } else {
+          base_map.insert(key, value);
+        }
+      }
+    }
+    (base, overlay) => *base = overlay,
+  }
 }
 
 fn parse_pnpm_package_key(key: &str) -> (String, String) {
@@ -1576,6 +1622,43 @@ packages:
   fn test_parse_pnpm_lockfile_invalid_yaml() {
     let result = parse_pnpm_lockfile("{\n\t- invalid:\n\t\t- [mixed");
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_parse_pnpm_lockfile_multiple_documents() {
+    let content = r#"---
+lockfileVersion: '9.0'
+importers:
+  .:
+    packageManagerDependencies:
+      pnpm:
+        specifier: 10.0.0
+        version: 10.0.0
+packages:
+  pnpm@10.0.0: {}
+---
+lockfileVersion: '9.0'
+importers:
+  .:
+    devDependencies:
+      vite-plugin-svgr:
+        specifier: 5.2.0
+        version: 5.2.0
+packages:
+  vite-plugin-svgr@5.2.0:
+    dependencies:
+      '@svgr/core': 8.1.0
+  '@svgr/core@8.1.0': {}
+"#;
+
+    let data = parse_pnpm_lockfile(content).unwrap();
+    assert!(data.direct_dependencies.contains("vite-plugin-svgr"));
+    assert!(!data.direct_dependencies.contains("pnpm"));
+    assert_eq!(data.packages["vite-plugin-svgr@5.2.0"].version, "5.2.0");
+    assert!(data.packages["vite-plugin-svgr@5.2.0"]
+      .dependencies
+      .contains_key("@svgr/core"));
+    assert!(data.packages.contains_key("pnpm@10.0.0"));
   }
 
   // --- yarn parsing ---

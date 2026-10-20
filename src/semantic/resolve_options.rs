@@ -889,6 +889,7 @@ mod tests {
       source_root: PathBuf::from("libs/feature/src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -954,6 +955,7 @@ mod tests {
       source_root: PathBuf::from("libs/decoy/src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     };
     let feature_project = Project {
@@ -962,6 +964,7 @@ mod tests {
       source_root: PathBuf::from("libs/feature/src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     };
 
@@ -1020,6 +1023,7 @@ mod tests {
       source_root: PathBuf::from("libs/feature/src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 

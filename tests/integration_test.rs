@@ -2513,6 +2513,7 @@ export function run() {
         source_root: PathBuf::from("libs/feature/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2521,6 +2522,7 @@ export function run() {
         source_root: PathBuf::from("apps/web/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],

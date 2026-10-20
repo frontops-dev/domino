@@ -2421,6 +2421,114 @@ export function run() {
   );
 }
 
+/// Regression test: an Nx project imported by its package.json name, including
+/// a subpath, is still a workspace import when that name is not a tsconfig path.
+///
+///   - project.json name = `my-lib`
+///   - package.json name = `@scope/my-lib`
+///   - consumer imports `@scope/my-lib/widget`
+///
+/// No tsconfig path covers that specifier. Before the fix it was classified as
+/// an external package and the consumer was never marked affected.
+#[test]
+fn test_package_json_name_differs_from_nx_project_name() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp
+    .path()
+    .canonicalize()
+    .expect("Failed to canonicalize temp dir");
+
+  let lib_src = root.join("libs/feature/src");
+  let app_src = root.join("apps/web/src");
+  fs::create_dir_all(&lib_src).unwrap();
+  fs::create_dir_all(&app_src).unwrap();
+
+  fs::write(
+    root.join("libs/feature/package.json"),
+    r#"{ "name": "@scope/my-lib" }"#,
+  )
+  .unwrap();
+
+  fs::write(
+    lib_src.join("widget.ts"),
+    r#"export function widget() {
+  return 'original';
+}
+"#,
+  )
+  .unwrap();
+
+  fs::write(
+    app_src.join("main.ts"),
+    r#"import { widget } from '@scope/my-lib/widget';
+
+export function run() {
+  return widget();
+}
+"#,
+  )
+  .unwrap();
+
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    lib_src.join("widget.ts"),
+    r#"export function widget() {
+  return 'modified';
+}
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "modify widget"]);
+
+  let config = TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: vec![
+      Project {
+        name: "my-lib".to_string(),
+        root: PathBuf::from("libs/feature"),
+        source_root: PathBuf::from("libs/feature/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+      Project {
+        name: "my-app".to_string(),
+        root: PathBuf::from("apps/web"),
+        source_root: PathBuf::from("apps/web/src"),
+        ts_config: None,
+        implicit_dependencies: vec![],
+        targets: vec![],
+      },
+    ],
+    lockfile_strategy: LockfileStrategy::None,
+  };
+
+  let profiler = Arc::new(Profiler::new(false));
+  let result = find_affected(config, profiler).expect("find_affected failed");
+  let affected = result.affected_projects;
+
+  assert!(
+    affected.contains(&"my-lib".to_string()),
+    "lib should be affected (file was changed). Got: {:?}",
+    affected
+  );
+  assert!(
+    affected.contains(&"my-app".to_string()),
+    "app should be affected via package subpath @scope/my-lib/widget. Got: {:?}",
+    affected
+  );
+}
+
 /// Regression test: `.mts` files must be treated as first-class source files, not assets.
 ///
 /// Reproduces a strict-ESM monorepo scenario where a shared library exposes a `.mts`

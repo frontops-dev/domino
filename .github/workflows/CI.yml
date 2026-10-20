@@ -374,7 +374,10 @@ jobs:
           path: pr-metadata.json
   publish:
     name: Publish
-    if: github.event_name == 'push'
+    # `[skip release]` anywhere in the pushed commit's message skips publishing but
+    # still runs the full build and test matrix. The next unmarked push releases the
+    # skipped commits too: the bump reads every commit subject since the last tag.
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip release]')
     runs-on: ubuntu-latest
     # Main-branch runs are no longer cancelled, so several can be in flight at once.
     # Releases must still happen one at a time: queue publishes instead of overlapping

@@ -390,6 +390,9 @@ This allows:
   so editing this file and committing it will also normalise its existing Markdown formatting.
 - Version bumps go through `yarn version` → `napi version` + `scripts/sync-cargo-version.js`,
   which keeps `Cargo.toml` in sync with `package.json`.
+- Every push to `main` publishes a release unless the commit message contains `[skip release]`.
+  Put it in the squash message to batch several merges into one release: CI still runs on each,
+  and the next unmarked merge releases them all, bumping from every commit since the last tag.
 - Preview releases are published by `scripts/publish-preview.js`, covered by
   `tests/publish-preview.test.js` (run in the CI `lint` job, not by `cargo test`).
 

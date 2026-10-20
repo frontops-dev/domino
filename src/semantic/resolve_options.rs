@@ -3,6 +3,7 @@ use json_strip_comments::StripComments;
 use oxc_resolver::{AliasValue, ResolveOptions};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -39,33 +40,12 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
   // project folder that contains a package.json, the resolver would follow exports/main
   // into dist/.  Pointing the alias at the src/ subdirectory bypasses package.json
   // entirely and lets main_files + extensions find index.ts directly.
-  let alias = projects
-    .iter()
-    .map(|p| {
-      let base = if p.source_root.is_absolute() {
-        p.source_root.clone()
-      } else {
-        cwd.join(&p.source_root)
-      };
-      // Prefer <project>/src when it exists (Rush-style project folders).
-      // If source_root already ends in src/ (Nx-style), or there is no src/ subdir,
-      // use source_root as-is.
-      let target = if !base.ends_with("src") {
-        let src_dir = base.join("src");
-        if src_dir.is_dir() {
-          src_dir
-        } else {
-          base
-        }
-      } else {
-        base
-      };
-      (
-        p.name.clone(),
-        vec![AliasValue::Path(target.to_string_lossy().into_owned())],
-      )
-    })
-    .collect::<Vec<_>>();
+  // The Nx project name (`my-lib`) and the package.json name (`@scope/my-lib`)
+  // often differ. Alias both at the same source root so package-name imports,
+  // including subpaths, resolve to source. oxc_resolver keeps the first alias
+  // whose key matches, so each key is registered once and a package.json name
+  // wins over another project's Nx name.
+  let alias = workspace_aliases(cwd, projects);
 
   ResolveOptions {
     // TypeScript variants are listed before their JS counterparts (mirroring the
@@ -132,15 +112,116 @@ pub fn create_resolve_options(cwd: &Path, projects: &[Project]) -> ResolveOption
   }
 }
 
+fn workspace_aliases(cwd: &Path, projects: &[Project]) -> Vec<(String, Vec<AliasValue>)> {
+  let mut package_aliases = Vec::new();
+  let mut project_aliases = Vec::with_capacity(projects.len());
+  for project in projects {
+    let target = alias_directory(cwd, project).to_string_lossy().into_owned();
+    let package_name = distinct_package_name(cwd, project)
+      .filter(|package_name| !package_aliases.iter().any(|(name, _)| name == package_name));
+    if let Some(package_name) = package_name {
+      package_aliases.push((package_name, target.clone()));
+    }
+    project_aliases.push((project.name.clone(), target));
+  }
+
+  let mut alias = Vec::with_capacity(package_aliases.len() + project_aliases.len());
+  for (name, target) in package_aliases {
+    alias.push((name, vec![AliasValue::Path(target)]));
+  }
+  for (name, target) in project_aliases {
+    if alias.iter().any(|(key, _)| key == &name) {
+      continue;
+    }
+    alias.push((name, vec![AliasValue::Path(target)]));
+  }
+  alias
+}
+
+fn alias_directory(cwd: &Path, project: &Project) -> PathBuf {
+  let base = if project.source_root.is_absolute() {
+    project.source_root.clone()
+  } else {
+    cwd.join(&project.source_root)
+  };
+  // Prefer <project>/src when it exists (Rush-style project folders).
+  // If source_root already ends in src/ (Nx-style), or there is no src/ subdir,
+  // use source_root as-is.
+  if !base.ends_with("src") {
+    let src_dir = base.join("src");
+    if src_dir.is_dir() {
+      return src_dir;
+    }
+  }
+  base
+}
+
+fn absolute_under_cwd(cwd: &Path, path: &Path) -> PathBuf {
+  if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    cwd.join(path)
+  }
+}
+
+fn package_name_at(path: &Path) -> Option<String> {
+  let content = fs::read_to_string(path).ok()?;
+  let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+  let name = parsed.get("name")?.as_str()?.trim();
+  if name.is_empty() {
+    None
+  } else {
+    Some(name.to_string())
+  }
+}
+
+/// `package.json` `"name"` when it differs from the Nx project name.
+///
+/// Looks beside `project.json` (`project.root`). When `root` was stored as the
+/// source directory (`.../src`), also checks that directory's parent — that is
+/// where the package manifest sits.
+fn distinct_package_name(cwd: &Path, project: &Project) -> Option<String> {
+  let root = absolute_under_cwd(cwd, &project.root);
+  if let Some(name) = package_name_at(&root.join("package.json")) {
+    return (name != project.name).then_some(name);
+  }
+
+  let source = absolute_under_cwd(cwd, &project.source_root);
+  if !source.ends_with("src") {
+    return None;
+  }
+  let parent = source.parent()?;
+  if parent == root {
+    return None;
+  }
+  let name = package_name_at(&parent.join("package.json"))?;
+  (name != project.name).then_some(name)
+}
+
+/// Package names imports actually use, for projects whose Nx name differs.
+pub(crate) fn package_name_prefixes(cwd: &Path, projects: &[Project]) -> Vec<String> {
+  let mut names = Vec::new();
+  for project in projects {
+    if let Some(name) = distinct_package_name(cwd, project) {
+      if !names.iter().any(|existing| existing == &name) {
+        names.push(name);
+      }
+    }
+  }
+  names
+}
+
 /// Returns `true` if the specifier is potentially workspace-internal and should be
 /// passed to `oxc_resolver`. Relative and absolute specifiers always qualify.
-/// Bare specifiers qualify if they match a known project name **or** a tsconfig
-/// path alias (possibly as a deep-import prefix like `@scope/pkg/sub/path`).
+/// Bare specifiers qualify if they match a known project name **or** a prefix in
+/// `tsconfig_paths` (a tsconfig path key or a `package.json` name), including a
+/// deep-import prefix like `@scope/pkg/sub/path`.
 ///
-/// Both project names and tsconfig paths must be checked because they can differ:
+/// Both project names and those prefixes must be checked because they can differ:
 /// an Nx project named `ui-widgets` may be imported as `@acme/shared-ui-widgets`
-/// via a tsconfig path alias. Checking only project names would misclassify
-/// such imports as external and silently break cross-project reference tracking.
+/// via a tsconfig path or as `@acme/ui-widgets` via `package.json`. Checking
+/// only project names would misclassify such imports as external and silently
+/// break cross-project reference tracking.
 ///
 /// This avoids expensive filesystem I/O for external `node_modules` dependencies
 /// (e.g. `react`, `lodash`) that the resolver would attempt to resolve via
@@ -787,5 +868,164 @@ mod tests {
       prefixes
     );
     assert_eq!(prefixes.len(), 1);
+  }
+
+  #[test]
+  fn test_package_json_name_alias_resolves_subpath() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let src = cwd.join("libs/feature/src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("widget.ts"), "export const widget = 1;\n").unwrap();
+    fs::write(
+      cwd.join("libs/feature/package.json"),
+      r#"{ "name": "@scope/my-lib" }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "my-lib".to_string(),
+      root: PathBuf::from("libs/feature"),
+      source_root: PathBuf::from("libs/feature/src"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    let opts = create_resolve_options(cwd, &projects);
+    let target = alias_target(&opts, "@scope/my-lib").unwrap();
+    assert!(
+      target.ends_with("libs/feature/src"),
+      "package name should alias at the Nx source root, got: {target}"
+    );
+
+    let prefixes = package_name_prefixes(cwd, &projects);
+    assert!(is_workspace_specifier(
+      "@scope/my-lib/widget",
+      &projects,
+      &prefixes,
+    ));
+    assert!(
+      !is_workspace_specifier("@scope/my-lib/widget", &projects, &[],),
+      "without the package-name prefix the subpath is an external specifier"
+    );
+
+    let resolver = oxc_resolver::Resolver::new(opts);
+    let resolved = resolver
+      .resolve(cwd, "@scope/my-lib/widget")
+      .expect("package subpath should resolve to source");
+    assert!(
+      resolved.path().ends_with("widget.ts"),
+      "got {:?}",
+      resolved.path()
+    );
+  }
+
+  #[test]
+  fn test_package_name_alias_wins_over_colliding_nx_name() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    let decoy = cwd.join("libs/decoy/src");
+    fs::create_dir_all(&decoy).unwrap();
+    fs::write(decoy.join("widget.ts"), "export const widget = 'decoy';\n").unwrap();
+    fs::write(
+      cwd.join("libs/decoy/package.json"),
+      r#"{ "name": "@scope/my-lib" }"#,
+    )
+    .unwrap();
+
+    let feature = cwd.join("libs/feature/src");
+    fs::create_dir_all(&feature).unwrap();
+    fs::write(
+      feature.join("widget.ts"),
+      "export const widget = 'feature';\n",
+    )
+    .unwrap();
+    fs::write(
+      cwd.join("libs/feature/package.json"),
+      r#"{ "name": "@scope/my-lib" }"#,
+    )
+    .unwrap();
+
+    let decoy_project = Project {
+      name: "@scope/my-lib".to_string(),
+      root: PathBuf::from("libs/decoy"),
+      source_root: PathBuf::from("libs/decoy/src"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    };
+    let feature_project = Project {
+      name: "my-lib".to_string(),
+      root: PathBuf::from("libs/feature"),
+      source_root: PathBuf::from("libs/feature/src"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    };
+
+    for projects in [
+      vec![decoy_project.clone(), feature_project.clone()],
+      vec![feature_project, decoy_project],
+    ] {
+      let opts = create_resolve_options(cwd, &projects);
+      assert_eq!(
+        opts
+          .alias
+          .iter()
+          .filter(|(key, _)| key == "@scope/my-lib")
+          .count(),
+        1,
+        "a colliding Nx name and package.json name share one alias"
+      );
+      let target = alias_target(&opts, "@scope/my-lib").unwrap();
+      assert!(
+        target.ends_with("libs/feature/src"),
+        "package.json name should own the alias, got: {target}"
+      );
+      assert!(
+        alias_target(&opts, "my-lib")
+          .unwrap()
+          .ends_with("libs/feature/src"),
+        "the Nx name is still aliased when it does not collide"
+      );
+
+      let resolver = oxc_resolver::Resolver::new(opts);
+      let resolved = resolver
+        .resolve(cwd, "@scope/my-lib/widget")
+        .expect("colliding specifier should resolve");
+      let source = fs::read_to_string(resolved.path()).unwrap();
+      assert!(
+        source.contains("'feature'"),
+        "resolved the decoy project: {source}"
+      );
+    }
+  }
+
+  #[test]
+  fn test_package_name_read_from_parent_of_source_root() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join("libs/feature/src")).unwrap();
+    fs::write(
+      cwd.join("libs/feature/package.json"),
+      r#"{ "name": "@scope/my-lib" }"#,
+    )
+    .unwrap();
+
+    let projects = vec![Project {
+      name: "my-lib".to_string(),
+      root: PathBuf::from("libs/feature/src"),
+      source_root: PathBuf::from("libs/feature/src"),
+      ts_config: None,
+      implicit_dependencies: vec![],
+      targets: vec![],
+    }];
+
+    assert_eq!(
+      package_name_prefixes(cwd, &projects),
+      vec!["@scope/my-lib".to_string()]
+    );
   }
 }

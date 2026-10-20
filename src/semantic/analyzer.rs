@@ -168,10 +168,9 @@ pub struct WorkspaceAnalyzer {
   /// Without this index, every reference lookup had to scan the exports of every file
   /// in the workspace and resolve each re-export specifier.
   pub reexport_index: ReexportIndexMap,
-  /// tsconfig.base.json path alias keys (e.g. `@scope/my-lib`).
-  /// Used alongside project names for the `is_workspace_specifier` check because
-  /// Nx project names can differ from the npm package names / tsconfig aliases
-  /// that code actually imports.
+  /// Specifier prefixes that are workspace-internal even when they are not the
+  /// Nx project name: `tsconfig.base.json` path keys, plus `package.json` names
+  /// that differ from the project name (`@scope/my-lib`).
   pub tsconfig_path_prefixes: Vec<String>,
   /// Profiler for performance measurement
   pub profiler: Arc<Profiler>,
@@ -180,7 +179,8 @@ pub struct WorkspaceAnalyzer {
 impl WorkspaceAnalyzer {
   /// Create a new workspace analyzer
   pub fn new(projects: Vec<Project>, cwd: &Path, profiler: Arc<Profiler>) -> Result<Self> {
-    let tsconfig_path_prefixes = super::parse_tsconfig_path_prefixes(cwd);
+    let mut tsconfig_path_prefixes = super::parse_tsconfig_path_prefixes(cwd);
+    tsconfig_path_prefixes.extend(super::package_name_prefixes(cwd, &projects));
 
     let mut analyzer = Self {
       files: HashMap::new(),

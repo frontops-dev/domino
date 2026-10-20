@@ -1517,7 +1517,9 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
         AffectCause::ReExported { .. } => {
           // Re-exports are internal to a project, don't show as separate edges
         }
-        AffectCause::ImplicitDependency { depends_on } => {
+        // Both are declared (non-import) links, drawn with the same edge style
+        AffectCause::ImplicitDependency { depends_on }
+        | AffectCause::TargetConfigDependency { depends_on } => {
           relationships
             .entry(depends_on.clone())
             .or_default()
@@ -1952,7 +1954,19 @@ fn generate_details_html(report: &AffectedReport) -> String {
         AffectCause::ImplicitDependency { depends_on } => {
           html.push_str("<span class=\"cause-type implicit\">Implicit Dependency</span>");
           html.push_str("<div class=\"cause-details\">");
-          html.push_str(&format!("Depends on: <strong>{}</strong>", depends_on));
+          html.push_str(&format!(
+            "Depends on: <strong>{}</strong>",
+            html_escape(depends_on)
+          ));
+          html.push_str("</div>");
+        }
+        AffectCause::TargetConfigDependency { depends_on } => {
+          html.push_str("<span class=\"cause-type implicit\">Target Config Dependency</span>");
+          html.push_str("<div class=\"cause-details\">");
+          html.push_str(&format!(
+            "Named in a target's <code>inputs</code> / <code>dependsOn</code>: <strong>{}</strong>",
+            html_escape(depends_on)
+          ));
           html.push_str("</div>");
         }
         AffectCause::AssetChange {

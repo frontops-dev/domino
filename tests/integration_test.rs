@@ -210,6 +210,7 @@ impl TestBranch {
           source_root: PathBuf::from("proj1"),
           ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
           implicit_dependencies: vec![],
+          config_dependencies: vec![],
           targets: vec![],
         },
         Project {
@@ -218,6 +219,7 @@ impl TestBranch {
           source_root: PathBuf::from("proj2"),
           ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
           implicit_dependencies: vec![],
+          config_dependencies: vec![],
           targets: vec![],
         },
         Project {
@@ -226,6 +228,7 @@ impl TestBranch {
           source_root: PathBuf::from("proj3"),
           ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
           implicit_dependencies: vec!["proj1".to_string()],
+          config_dependencies: vec![],
           targets: vec![],
         },
       ],
@@ -454,6 +457,7 @@ export function anotherFn() {
         source_root: PathBuf::from("proj1"),
         ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -462,6 +466,7 @@ export function anotherFn() {
         source_root: PathBuf::from("proj2"),
         ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -470,6 +475,7 @@ export function anotherFn() {
         source_root: PathBuf::from("proj3"),
         ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
         implicit_dependencies: vec!["proj1".to_string()],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2028,6 +2034,7 @@ export function main() {
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2036,6 +2043,7 @@ export function main() {
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2135,6 +2143,7 @@ export function main() {
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2143,6 +2152,7 @@ export function main() {
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2261,6 +2271,7 @@ export function main() {
         source_root: PathBuf::from("lib"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2269,6 +2280,7 @@ export function main() {
         source_root: PathBuf::from("app"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2391,6 +2403,7 @@ export function run() {
         source_root: PathBuf::from("libs/my-lib/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2399,6 +2412,7 @@ export function run() {
         source_root: PathBuf::from("apps/my-app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2499,6 +2513,7 @@ export function run() {
         source_root: PathBuf::from("libs/feature/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2507,6 +2522,7 @@ export function run() {
         source_root: PathBuf::from("apps/web/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2619,6 +2635,7 @@ export function run() {
         source_root: PathBuf::from("proj-a/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2627,6 +2644,7 @@ export function run() {
         source_root: PathBuf::from("proj-b/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2635,6 +2653,7 @@ export function run() {
         source_root: PathBuf::from("proj-c/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2761,6 +2780,7 @@ export function Panel() {
         source_root: PathBuf::from("proj-a/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2769,6 +2789,7 @@ export function Panel() {
         source_root: PathBuf::from("proj-b/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2777,6 +2798,7 @@ export function Panel() {
         source_root: PathBuf::from("proj-c/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -2888,6 +2910,7 @@ export function run() {
         source_root: PathBuf::from("proj-a/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2896,6 +2919,7 @@ export function run() {
         source_root: PathBuf::from("proj-b/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2904,6 +2928,7 @@ export function run() {
         source_root: PathBuf::from("proj-c/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -3010,6 +3035,7 @@ export function main() {
         source_root: PathBuf::from("lib/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3018,6 +3044,7 @@ export function main() {
         source_root: PathBuf::from("app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3026,6 +3053,7 @@ export function main() {
         source_root: PathBuf::from("other/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -3132,6 +3160,7 @@ export function main() {
         source_root: PathBuf::from("lib/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3140,6 +3169,7 @@ export function main() {
         source_root: PathBuf::from("app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3148,6 +3178,7 @@ export function main() {
         source_root: PathBuf::from("other/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -3236,6 +3267,7 @@ fn test_shared_source_root_all_projects_affected() {
         source_root: PathBuf::from("projects/app-desktop/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3244,6 +3276,7 @@ fn test_shared_source_root_all_projects_affected() {
         source_root: PathBuf::from("projects/app-desktop/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -3369,6 +3402,7 @@ fn lockfile_projects() -> Vec<Project> {
       source_root: PathBuf::from("proj-a"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     },
     Project {
@@ -3377,6 +3411,7 @@ fn lockfile_projects() -> Vec<Project> {
       source_root: PathBuf::from("proj-b"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     },
     Project {
@@ -3385,6 +3420,7 @@ fn lockfile_projects() -> Vec<Project> {
       source_root: PathBuf::from("proj-c"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     },
   ]
@@ -3757,6 +3793,7 @@ export const mockData: SharedType = { name: 'test' };
         source_root: PathBuf::from("shared-types/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3765,6 +3802,7 @@ export const mockData: SharedType = { name: 'test' };
         source_root: PathBuf::from("ui-widgets/src"),
         ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -3880,6 +3918,7 @@ export const mockData: SharedType = { name: 'test' };
         source_root: PathBuf::from("shared-types/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -3888,6 +3927,7 @@ export const mockData: SharedType = { name: 'test' };
         source_root: PathBuf::from("ui-widgets/src"),
         ts_config: Some(widgets_dir.join("tsconfig.lib.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -4543,6 +4583,7 @@ export function unusedFn() {
         source_root: PathBuf::from("proj1"),
         ts_config: Some(PathBuf::from("proj1/tsconfig.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -4551,6 +4592,7 @@ export function unusedFn() {
         source_root: PathBuf::from("proj2"),
         ts_config: Some(PathBuf::from("proj2/tsconfig.json")),
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -4559,6 +4601,7 @@ export function unusedFn() {
         source_root: PathBuf::from("proj3"),
         ts_config: Some(PathBuf::from("proj3/tsconfig.json")),
         implicit_dependencies: vec!["proj1".to_string()],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -4641,6 +4684,7 @@ export function run() {
         source_root: PathBuf::from("libs/lib/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -4649,6 +4693,7 @@ export function run() {
         source_root: PathBuf::from("apps/app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ],
@@ -5268,6 +5313,7 @@ fn turbo_projects() -> Vec<Project> {
       source_root: PathBuf::from(format!("packages/{pkg}")),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     })
     .collect()
@@ -5716,6 +5762,7 @@ fn barrel_project(name: &str, source_root: &str) -> Project {
     source_root: PathBuf::from(source_root),
     ts_config: None,
     implicit_dependencies: vec![],
+    config_dependencies: vec![],
     targets: vec![],
   }
 }
@@ -6137,4 +6184,77 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
     report.global_triggers
   );
   assert_eq!(report.global_triggers[0].named_input, "sharedGlobals");
+}
+
+// ============================================================================
+// Project links declared in target config (inputs / dependsOn)
+// ============================================================================
+
+/// A TempNxRepo where lib-b's project.json declares `targets` (on `main`), and a
+/// change to lib-a is committed on the test branch. lib-b never imports lib-a,
+/// so any edge between them can only come from the target config.
+fn affected_after_lib_a_change(lib_b_targets: &str) -> Vec<String> {
+  let repo = TempNxRepo::new(r#"{}"#);
+  commit_on_main(
+    &repo,
+    "libs/lib-b/project.json",
+    &format!(r#"{{ "name": "lib-b", "targets": {lib_b_targets} }}"#),
+  );
+  repo.change_and_commit("libs/lib-a/src/index.ts", "export const a = 42;\n");
+  let mut affected = repo.get_affected();
+  affected.sort();
+  affected
+}
+
+#[test]
+fn test_depends_on_projects_link_marks_dependent() {
+  let affected = affected_after_lib_a_change(
+    r#"{ "deploy": { "dependsOn": [{ "projects": ["lib-a"], "target": "build" }] } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+#[test]
+fn test_inputs_projects_link_marks_dependent() {
+  let affected = affected_after_lib_a_change(
+    r#"{ "test": { "inputs": ["default", { "input": "production", "projects": ["lib-a"] }] } }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+}
+
+/// `self` and `dependencies` are Nx keywords, not project names: neither links
+/// lib-b to lib-a.
+#[test]
+fn test_self_and_dependencies_keywords_create_no_link() {
+  let affected = affected_after_lib_a_change(
+    r#"{
+      "build": { "dependsOn": [{ "projects": "self", "target": "prebuild" }] },
+      "test": { "inputs": [{ "input": "production", "projects": "dependencies" }] }
+    }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string()]);
+}
+
+/// Target config mixes strings and several object shapes. Unrecognised shapes
+/// must be skipped, never fail the project.json (which would drop lib-b from
+/// discovery entirely), while the recognised link still applies.
+#[test]
+fn test_mixed_shape_target_config_keeps_project_and_link() {
+  let affected = affected_after_lib_a_change(
+    r#"{
+      "build": {
+        "executor": "@nx/js:tsc",
+        "inputs": [
+          "production",
+          "^production",
+          { "fileset": "{projectRoot}/**/*.md" },
+          { "externalDependencies": ["typescript"] },
+          { "runtime": "node -v" },
+          { "input": "production", "projects": "lib-a" }
+        ],
+        "dependsOn": ["^build", { "target": "codegen", "dependencies": true }, 42]
+      }
+    }"#,
+  );
+  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
 }

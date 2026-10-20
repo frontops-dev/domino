@@ -2325,6 +2325,7 @@ type Props = ui.ButtonProps;
       source_root: PathBuf::from("src"),
       ts_config: None,
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     };
 
@@ -2524,6 +2525,7 @@ export function run() {
         source_root: PathBuf::from("libs/lib-a/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2532,6 +2534,7 @@ export function run() {
         source_root: PathBuf::from("libs/lib-b/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -2540,6 +2543,7 @@ export function run() {
         source_root: PathBuf::from("apps/app/src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];

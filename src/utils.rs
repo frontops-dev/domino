@@ -280,6 +280,7 @@ mod tests {
         source_root: "libs/core/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -288,6 +289,7 @@ mod tests {
         source_root: "libs/nx/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];
@@ -318,6 +320,7 @@ mod tests {
         source_root: "projects/app-desktop/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -326,6 +329,7 @@ mod tests {
         source_root: "projects/app-desktop/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -334,6 +338,7 @@ mod tests {
         source_root: "projects/other/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];
@@ -373,6 +378,7 @@ mod tests {
       source_root: "libs/ui-widgets/src".into(),
       ts_config: Some(lib_dir.join("tsconfig.lib.json")),
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -416,6 +422,7 @@ mod tests {
       source_root: "libs/ui-widgets/src".into(),
       ts_config: Some(lib_dir.join("tsconfig.lib.json")),
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -469,6 +476,7 @@ mod tests {
       source_root: "libs/simple".into(),
       ts_config: Some(lib_dir.join("tsconfig.lib.json")),
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -500,6 +508,7 @@ mod tests {
         source_root: "apps/my-app/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -508,6 +517,7 @@ mod tests {
         source_root: "libs/my-lib/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       // Project where root == sourceRoot (no fallback needed)
@@ -517,6 +527,7 @@ mod tests {
         source_root: "libs/simple".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];
@@ -577,6 +588,7 @@ mod tests {
       source_root: "libs/ui-widgets/src".into(),
       ts_config: Some(lib_dir.join("tsconfig.lib.json")),
       implicit_dependencies: vec![],
+      config_dependencies: vec![],
       targets: vec![],
     }];
 
@@ -626,6 +638,7 @@ mod tests {
         source_root: "apps/parent".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       // Nested child project with separate src dir
@@ -635,6 +648,7 @@ mod tests {
         source_root: "apps/parent/child/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];
@@ -682,6 +696,7 @@ mod tests {
         source_root: PathBuf::from("src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -690,6 +705,7 @@ mod tests {
         source_root: "libs/my-lib/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];
@@ -737,6 +753,7 @@ mod tests {
         source_root: PathBuf::from("src"),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
       Project {
@@ -745,6 +762,7 @@ mod tests {
         source_root: "libs/my-lib/src".into(),
         ts_config: None,
         implicit_dependencies: vec![],
+        config_dependencies: vec![],
         targets: vec![],
       },
     ];

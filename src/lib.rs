@@ -35,6 +35,10 @@ mod napi_bindings {
     pub source_root: String,
     pub ts_config: Option<String>,
     pub implicit_dependencies: Vec<String>,
+    /// Projects named in this project's target config (`inputs[].projects`,
+    /// `dependsOn[].projects`). Optional so callers that build projects by hand
+    /// keep working; `discoverProjects` always fills it.
+    pub config_dependencies: Option<Vec<String>>,
     pub targets: Vec<String>,
   }
 
@@ -46,6 +50,7 @@ mod napi_bindings {
         source_root: project.source_root.to_string_lossy().to_string(),
         ts_config: project.ts_config.map(|p| p.to_string_lossy().to_string()),
         implicit_dependencies: project.implicit_dependencies,
+        config_dependencies: Some(project.config_dependencies),
         targets: project.targets,
       }
     }
@@ -65,6 +70,7 @@ mod napi_bindings {
         source_root,
         ts_config: project.ts_config.map(PathBuf::from),
         implicit_dependencies: project.implicit_dependencies,
+        config_dependencies: project.config_dependencies.unwrap_or_default(),
         targets: project.targets,
       }
     }

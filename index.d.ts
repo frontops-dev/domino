@@ -28,5 +28,11 @@ export interface NapiProject {
   sourceRoot: string
   tsConfig?: string
   implicitDependencies: Array<string>
+  /**
+   * Projects named in this project's target config (`inputs[].projects`,
+   * `dependsOn[].projects`). Optional so callers that build projects by hand
+   * keep working; `discoverProjects` always fills it.
+   */
+  configDependencies?: Array<string>
   targets: Array<string>
 }

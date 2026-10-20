@@ -162,6 +162,7 @@ domino affected --lockfile-strategy full
 5. **Lockfile Analysis**: Detects dependency version changes and traces affected imports
 6. **Project Mapping**: Maps affected files to their owning projects
 7. **Implicit Dependencies**: Expands Nx `implicitDependencies` against known project **names**, including glob patterns (`app-*`, `integration-*-module`) and `!` exclusions — same idea as Nx/minimatch, not path globs
+8. **Target Config Links**: Follows projects named in a `project.json` target's `inputs` (`{ "input": "production", "projects": ["shared-config"] }`) and `dependsOn` (`{ "projects": ["api"], "target": "build" }`), which create no project-graph edge of their own. The `self` and `dependencies` keywords add no link, and tag selectors (`tag:x`) are not supported. Target config declared in `package.json#nx` is not read.
 
 ## Performance
 

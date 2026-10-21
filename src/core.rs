@@ -2,11 +2,12 @@ use crate::error::Result;
 use crate::git;
 use crate::lockfile;
 use crate::named_inputs;
+use crate::path_aliases;
 use crate::profiler::Profiler;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
   AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, GlobalTrigger,
-  LockfileStrategy, Project, ReportTotals, TrueAffectedConfig,
+  LockfileStrategy, Project, ReportTotals, RootTsconfigStrategy, TrueAffectedConfig,
 };
 use crate::utils::{self, ProjectIndex};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -148,9 +149,28 @@ fn find_affected_internal(
   // type, not only when a namedInputs / globalDependencies pattern lists it:
   // its path aliases feed module resolution for all projects. Appended after
   // the config-derived triggers so the report still names that config first.
+  // The `aliases` strategy narrows a paths-only change to the files using the
+  // changed aliases, traced in Step 5d once the analyzer exists.
   let root_tsconfig_triggers =
     named_inputs::root_tsconfig_triggers(&changed_files, &global_triggers);
-  global_triggers.extend(root_tsconfig_triggers);
+  let mut changed_aliases = Vec::new();
+  match config.root_tsconfig_strategy {
+    RootTsconfigStrategy::None => {}
+    RootTsconfigStrategy::Aliases if !root_tsconfig_triggers.is_empty() => {
+      match path_aliases::changed_aliases_between(&config.cwd, &merge_base, config.head.as_deref())
+      {
+        Some(aliases) => {
+          debug!(
+            "Root tsconfig changed only path aliases: {:?}",
+            aliases.iter().map(|a| &a.alias).collect::<Vec<_>>()
+          );
+          changed_aliases = aliases;
+        }
+        None => global_triggers.extend(root_tsconfig_triggers),
+      }
+    }
+    _ => global_triggers.extend(root_tsconfig_triggers),
+  }
 
   if !global_triggers.is_empty() && !generate_report {
     let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
@@ -690,6 +710,101 @@ fn find_affected_internal(
     }
   }
 
+  // Step 5d: Trace a root tsconfig change narrowed to its path aliases (Step 1b).
+  // A file is matched on its source text, so side-effect imports and require()
+  // count; its structured imports and re-exports of the alias are then traced.
+  if !changed_aliases.is_empty() {
+    // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
+    // marked, not traced.
+    let project_roots = config.projects.iter().map(|p| p.root.as_path());
+    for (file_path, mentioned) in
+      path_aliases::files_mentioning(&config.cwd, project_roots, &changed_aliases, |path| {
+        analyzer.files.contains_key(path)
+      })
+    {
+      mark_path_alias_user(
+        &project_index,
+        &file_path,
+        &mentioned,
+        &mut affected_packages,
+        generate_report.then_some(&mut project_causes),
+      );
+    }
+
+    let mut alias_visited = FxHashSet::default();
+    for (file_path, file_data) in &analyzer.files {
+      let mentioned: Vec<_> = changed_aliases
+        .iter()
+        .filter(|alias| alias.mentioned_in(file_data.source()))
+        .collect();
+      if mentioned.is_empty() {
+        continue;
+      }
+      mark_path_alias_user(
+        &project_index,
+        file_path,
+        &mentioned,
+        &mut affected_packages,
+        generate_report.then_some(&mut project_causes),
+      );
+
+      let uses_alias = |specifier: &str| mentioned.iter().any(|alias| alias.matches(specifier));
+      let mut symbols: Vec<String> = Vec::new();
+      for import in analyzer.imports.get(file_path).into_iter().flatten() {
+        if !uses_alias(&import.from_module) {
+          continue;
+        }
+        match analyzer.find_exported_symbols_using(file_path, &import.local_name) {
+          Ok(exports) if !exports.is_empty() => symbols.extend(exports),
+          Ok(_) => symbols.push(import.local_name.clone()),
+          Err(e) => debug!("Error finding exports using '{}': {}", import.local_name, e),
+        }
+      }
+      for export in analyzer.exports.get(file_path).into_iter().flatten() {
+        if !export.re_export_from.as_deref().is_some_and(uses_alias) {
+          continue;
+        }
+        if export.exported_name == "*" {
+          // `export *` names nothing itself: trace every name importers take
+          // from this file.
+          symbols.extend(
+            analyzer
+              .import_index
+              .keys()
+              .filter(|(source, _)| source == file_path)
+              .map(|(_, name)| name.clone()),
+          );
+        } else {
+          symbols.push(export.exported_name.clone());
+        }
+      }
+      symbols.sort();
+      symbols.dedup();
+
+      for sym in symbols {
+        let mut state = AffectedState {
+          affected_packages: &mut affected_packages,
+          project_causes: if generate_report {
+            Some(&mut project_causes)
+          } else {
+            None
+          },
+          visited: &mut alias_visited,
+        };
+        if let Err(e) = process_changed_symbol(
+          &analyzer,
+          &reference_finder,
+          file_path,
+          &sym,
+          &project_index,
+          &mut state,
+        ) {
+          debug!("Error tracing path-alias symbol '{}': {}", sym, e);
+        }
+      }
+    }
+  }
+
   // Step 6: Add implicit dependencies
   add_implicit_dependencies(
     &config.projects,
@@ -783,6 +898,33 @@ fn find_affected_internal(
     affected_projects,
     report,
   })
+}
+
+/// Mark the projects owning `file_path`, which uses the `mentioned` changed path
+/// aliases. Its imports now resolve elsewhere, so it counts as changed and the
+/// unfiltered (direct-change) ownership lookup applies.
+fn mark_path_alias_user(
+  project_index: &ProjectIndex,
+  file_path: &Path,
+  mentioned: &[&path_aliases::AliasPattern],
+  affected_packages: &mut FxHashSet<String>,
+  project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
+) {
+  let owners = project_index.get_owning_packages_by_path(file_path);
+  if let Some(causes) = project_causes {
+    for pkg in &owners {
+      for alias in mentioned {
+        causes
+          .entry(pkg.clone())
+          .or_default()
+          .push(AffectCause::TsconfigPathAlias {
+            alias: alias.alias.clone(),
+            importing_file: file_path.to_path_buf(),
+          });
+      }
+    }
+  }
+  affected_packages.extend(owners);
 }
 
 fn process_changed_symbol(

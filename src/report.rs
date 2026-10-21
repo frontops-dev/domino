@@ -1530,7 +1530,7 @@ fn generate_cytoscape_data(report: &AffectedReport) -> String {
         AffectCause::AssetChange { .. } => {
           direct_changes.insert(project.name.clone());
         }
-        AffectCause::LockfileChange { .. } => {
+        AffectCause::LockfileChange { .. } | AffectCause::TsconfigPathAlias { .. } => {
           direct_changes.insert(project.name.clone());
         }
         AffectCause::GlobalInvalidation { .. } => {
@@ -1831,7 +1831,8 @@ fn generate_details_html(report: &AffectedReport) -> String {
         // exactly the UX bug the global-invalidation work was about.
         AffectCause::DirectChange { .. }
         | AffectCause::AssetChange { .. }
-        | AffectCause::LockfileChange { .. } => has_direct = true,
+        | AffectCause::LockfileChange { .. }
+        | AffectCause::TsconfigPathAlias { .. } => has_direct = true,
         AffectCause::ImportedSymbol { .. } => has_imported = true,
         _ => {}
       }
@@ -2000,6 +2001,22 @@ fn generate_details_html(report: &AffectedReport) -> String {
           html.push_str(&format!(
             "Imported in: <span class=\"code-path\">{}</span>",
             importing_file.display()
+          ));
+          html.push_str("</div>");
+        }
+        AffectCause::TsconfigPathAlias {
+          alias,
+          importing_file,
+        } => {
+          html.push_str("<span class=\"cause-type lockfile\">Path Alias Change</span>");
+          html.push_str("<div class=\"cause-details\">");
+          html.push_str(&format!(
+            "Alias: <span class=\"symbol\">{}</span> in tsconfig.base.json<br/>",
+            html_escape(alias)
+          ));
+          html.push_str(&format!(
+            "Used in: <span class=\"code-path\">{}</span>",
+            html_escape(&importing_file.display().to_string())
           ));
           html.push_str("</div>");
         }

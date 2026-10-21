@@ -43,6 +43,48 @@ impl FromStr for LockfileStrategy {
   }
 }
 
+/// How a change to the workspace-root `tsconfig.base.json` affects projects
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum RootTsconfigStrategy {
+  /// Every project is affected
+  All,
+  /// When only `compilerOptions.paths` changed, mark the files that import an
+  /// added, removed or changed alias and trace them; any other change affects
+  /// every project
+  #[default]
+  Aliases,
+  /// The file is treated like any other root file (affects nothing by itself)
+  None,
+}
+
+impl fmt::Display for RootTsconfigStrategy {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      RootTsconfigStrategy::All => write!(f, "all"),
+      RootTsconfigStrategy::Aliases => write!(f, "aliases"),
+      RootTsconfigStrategy::None => write!(f, "none"),
+    }
+  }
+}
+
+impl FromStr for RootTsconfigStrategy {
+  type Err = String;
+
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    match s.to_lowercase().as_str() {
+      "all" => Ok(RootTsconfigStrategy::All),
+      "aliases" => Ok(RootTsconfigStrategy::Aliases),
+      "none" => Ok(RootTsconfigStrategy::None),
+      _ => Err(format!(
+        "Invalid root tsconfig strategy '{}'. Expected: all, aliases, none",
+        s
+      )),
+    }
+  }
+}
+
 /// A project in the workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -155,6 +197,10 @@ pub struct TrueAffectedConfig {
   pub projects: Vec<Project>,
   /// Lockfile change detection strategy
   pub lockfile_strategy: LockfileStrategy,
+  /// How a change to the workspace-root `tsconfig.base.json` affects projects.
+  /// A `namedInputs` entry that lists the file still invalidates globally
+  /// whatever the strategy.
+  pub root_tsconfig_strategy: RootTsconfigStrategy,
 }
 
 /// Result of the true affected analysis
@@ -291,6 +337,15 @@ pub enum AffectCause {
     /// The affected dependency name
     dependency: String,
     /// Source file that imports the dependency
+    importing_file: PathBuf,
+  },
+  /// A `tsconfig.base.json` path alias this file uses was added, removed or
+  /// re-targeted, so its import now resolves somewhere else
+  #[serde(rename = "tsconfig_path_alias")]
+  TsconfigPathAlias {
+    /// The alias key as written in `compilerOptions.paths`
+    alias: String,
+    /// Source file that uses the alias
     importing_file: PathBuf,
   },
   /// Global invalidation via Nx namedInputs (e.g., sharedGlobals)

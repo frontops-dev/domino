@@ -19,6 +19,11 @@ export interface FindAffectedOptions {
   enableProfiling?: boolean
   /** Lockfile change detection strategy: "none", "direct", "full" (default: "direct") */
   lockfileStrategy?: string
+  /**
+   * How a `tsconfig.base.json` change affects projects: "all", "aliases", "none"
+   * (default: "aliases")
+   */
+  rootTsconfigStrategy?: string
 }
 
 export interface NapiProject {

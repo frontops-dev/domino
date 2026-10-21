@@ -20,10 +20,10 @@ export interface FindAffectedOptions {
   /** Lockfile change detection strategy: "none", "direct", "full" (default: "direct") */
   lockfileStrategy?: string
   /**
-   * Treat a `tsconfig.base.json` change as affecting every project (default: true).
-   * Pass false when you narrow those changes yourself.
+   * How a `tsconfig.base.json` change affects projects: "all", "aliases", "none"
+   * (default: "aliases")
    */
-  rootTsconfigTrigger?: boolean
+  rootTsconfigStrategy?: string
 }
 
 export interface NapiProject {

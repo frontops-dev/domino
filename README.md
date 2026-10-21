@@ -20,7 +20,8 @@ domino is a drop-in replacement for the TypeScript version of [traf](https://git
 - **Lockfile Change Detection**: Detects dependency version changes in npm, yarn, pnpm, and bun lockfiles and traces affected projects
 - **Fast Oxc Parser**: 3-5x faster than TypeScript's compiler API
 - **Workspace Support**: Works with Nx, Turborepo, and generic npm/yarn/pnpm/bun workspaces
-- **Global Invalidation**: Honors Nx `namedInputs` workspace-root patterns (e.g. `sharedGlobals`) and Turborepo `globalDependencies` from `turbo.json` / `turbo.jsonc`, so a change to a shared root file marks every project affected. A change to the workspace-root `tsconfig.base.json` does the same in every workspace type, since its path aliases drive module resolution; turn that off with `--no-root-tsconfig-trigger` (Node: `rootTsconfigTrigger: false`) if you narrow those changes yourself
+- **Global Invalidation**: Honors Nx `namedInputs` workspace-root patterns (e.g. `sharedGlobals`) and Turborepo `globalDependencies` from `turbo.json` / `turbo.jsonc`, so a change to a shared root file marks every project affected
+- **Root tsconfig changes**: A change to the workspace-root `tsconfig.base.json` is handled in every workspace type by `--root-tsconfig-strategy` (Node: `rootTsconfigStrategy`). The default, `aliases`, narrows a change to `compilerOptions.paths` alone: files using an added, removed or re-targeted alias are affected, whether they import it, `require` it, side-effect-import it or re-export it (config and other non-source files in a project root count too), and what uses them is traced as usual. Any other change (another compiler option, `baseUrl`, `extends`, a child `paths` appearing or vanishing under `extends`, an unparseable file, or an alias key with a `*` other than a trailing `/*`) affects every project. `all` always affects every project; `none` treats the file like any other root file. A `namedInputs` entry that lists the file still invalidates globally whatever the strategy
 - **Module Resolution**: Uses oxc_resolver (same as Rolldown and Nova) for accurate module resolution
 
 ## Quick Start
@@ -122,7 +123,7 @@ domino affected --report report.html
 - `--debug`: Enable debug logging
 - `--cwd <PATH>`: Set the current working directory
 - `--lockfile-strategy <STRATEGY>`: Lockfile change detection strategy (default: `direct`)
-- `--no-root-tsconfig-trigger`: Don't treat a `tsconfig.base.json` change as affecting every project
+- `--root-tsconfig-strategy <STRATEGY>`: How a `tsconfig.base.json` change affects projects: `aliases`, `all` or `none` (default: `aliases`)
 
 ### Lockfile Change Detection
 

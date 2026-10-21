@@ -181,9 +181,9 @@ domino affected --report ./affected-report.html
 # Lockfile change detection strategy: none | direct | full (default: direct)
 domino affected --lockfile-strategy full
 
-# Don't treat a tsconfig.base.json change as affecting every project
-# (Node: findAffected({ rootTsconfigTrigger: false }))
-domino affected --no-root-tsconfig-trigger
+# How a tsconfig.base.json change affects projects: aliases | all | none
+# (default: aliases; Node: findAffected({ rootTsconfigStrategy: 'all' }))
+domino affected --root-tsconfig-strategy all
 
 # Set working directory
 domino affected --cwd /path/to/monorepo
@@ -215,6 +215,7 @@ The true-affected detection follows this pipeline (see `src/core.rs`):
 5. **Reference Finding** → Recursively find all cross-file references to those symbols using the import/export graph
 6. **Asset References** → Changed _non-source_ files (HTML templates, stylesheets, JSON, images) are matched back to the source files that reference them, which then re-enter reference finding
 7. **Lockfile Changes** → Diff the lockfile to find changed direct dependencies, expand them transitively, and mark the source files importing them
+7b. **Root tsconfig path aliases** → With the default `aliases` strategy, a `tsconfig.base.json` change limited to `compilerOptions.paths` is not global (decided in step 2): files mentioning a changed alias are marked and their imports and re-exports of it traced (Step 5d in `core.rs`)
 8. **Implicit Dependencies** → Pull in projects declared as implicit dependents of an affected project
 9. **Project Mapping & Union** → Map affected files back to their owning projects, and union the semantic result with the global-invalidation result from step 2
 
@@ -242,6 +243,9 @@ reflect the order features were added, not execution order (`Step 6` appears twi
 - **`src/lockfile.rs`**: Lockfile diffing for npm/yarn/pnpm/bun - detects changed direct
   dependencies, builds a reverse dependency graph for transitive impact, then maps results to the
   source files importing them. Refuses lockfiles over 256 MB to avoid OOM on constrained CI runners
+- **`src/path_aliases.rs`**: Diffs the root `tsconfig.base.json` between merge base and head and,
+  when only `compilerOptions.paths` changed, returns the added / removed / re-targeted aliases as
+  specifier matchers (`None` means "not narrowable, affect everything")
 - **`src/named_inputs.rs`**: Parses Nx `namedInputs` into compiled global-invalidation and negation
   glob patterns. Each pattern retains the `namedInput` name it came from so reports can echo the
   term the user actually wrote in `nx.json`

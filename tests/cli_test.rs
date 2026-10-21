@@ -191,8 +191,8 @@ export function unusedFn() {
 }
 
 #[test]
-fn test_no_root_tsconfig_trigger_flag() {
-  let branch = TestBranch::new("test-no-root-tsconfig-trigger");
+fn test_root_tsconfig_strategy_flag() {
+  let branch = TestBranch::new("test-root-tsconfig-strategy");
   let tsconfig = fs::read_to_string(fixture_path().join("tsconfig.base.json")).unwrap();
   branch.make_change(
     "tsconfig.base.json",
@@ -211,14 +211,24 @@ fn test_no_root_tsconfig_trigger_flag() {
     serde_json::from_slice(&output.stdout).expect("Output should be a JSON array")
   };
 
-  let all = affected(&[]);
-  assert!(
-    all.iter().any(|p| p == "proj1") && all.iter().any(|p| p == "proj2"),
-    "a root tsconfig change should affect every project by default, got: {all:?}"
-  );
+  // A compiler-option change is not narrowed: the default (aliases) and `all`
+  // both affect every project; `none` affects nothing.
+  for extra in [&[][..], &["--root-tsconfig-strategy", "all"][..]] {
+    let all = affected(extra);
+    assert!(
+      all.iter().any(|p| p == "proj1") && all.iter().any(|p| p == "proj2"),
+      "{extra:?}: a compiler-option change should affect every project, got: {all:?}"
+    );
+  }
   assert_eq!(
-    affected(&["--no-root-tsconfig-trigger"]),
+    affected(&["--root-tsconfig-strategy", "none"]),
     Vec::<String>::new()
+  );
+
+  let invalid = branch.run_domino(&["affected", "--root-tsconfig-strategy", "some"]);
+  assert!(
+    !invalid.status.success(),
+    "an unknown strategy should be rejected"
   );
 }
 

@@ -4,6 +4,7 @@ mod error;
 mod git;
 mod lockfile;
 mod named_inputs;
+mod path_aliases;
 mod profiler;
 mod report;
 mod semantic;

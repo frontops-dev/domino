@@ -6,6 +6,7 @@ pub mod error;
 pub mod git;
 pub mod lockfile;
 pub mod named_inputs;
+pub mod path_aliases;
 pub mod profiler;
 pub mod report;
 pub mod semantic;
@@ -86,9 +87,9 @@ mod napi_bindings {
     pub enable_profiling: Option<bool>,
     /// Lockfile change detection strategy: "none", "direct", "full" (default: "direct")
     pub lockfile_strategy: Option<String>,
-    /// Treat a `tsconfig.base.json` change as affecting every project (default: true).
-    /// Pass false when you narrow those changes yourself.
-    pub root_tsconfig_trigger: Option<bool>,
+    /// How a `tsconfig.base.json` change affects projects: "all", "aliases", "none"
+    /// (default: "aliases")
+    pub root_tsconfig_strategy: Option<String>,
   }
 
   #[napi(object)]
@@ -111,13 +112,23 @@ mod napi_bindings {
       .transpose()?
       .unwrap_or_default();
 
+    let root_tsconfig_strategy = options
+      .root_tsconfig_strategy
+      .as_deref()
+      .map(|s| {
+        s.parse::<RootTsconfigStrategy>()
+          .map_err(Error::from_reason)
+      })
+      .transpose()?
+      .unwrap_or_default();
+
     let config = TrueAffectedConfig {
       cwd,
       base: options.base,
       head: options.head,
       projects,
       lockfile_strategy,
-      root_tsconfig_trigger: options.root_tsconfig_trigger.unwrap_or(true),
+      root_tsconfig_strategy,
     };
 
     let result =

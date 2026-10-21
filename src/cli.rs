@@ -1,7 +1,7 @@
 use crate::core;
 use crate::error::Result;
 use crate::profiler::Profiler;
-use crate::types::{LockfileStrategy, TrueAffectedConfig};
+use crate::types::{LockfileStrategy, RootTsconfigStrategy, TrueAffectedConfig};
 use crate::workspace;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -62,9 +62,9 @@ enum Commands {
     #[arg(long, default_value = "direct")]
     lockfile_strategy: LockfileStrategy,
 
-    /// Don't treat a tsconfig.base.json change as affecting every project
-    #[arg(long)]
-    no_root_tsconfig_trigger: bool,
+    /// How a tsconfig.base.json change affects projects: all, aliases, none
+    #[arg(long, default_value = "aliases")]
+    root_tsconfig_strategy: RootTsconfigStrategy,
   },
 }
 
@@ -102,7 +102,7 @@ pub fn run() -> Result<()> {
       profile,
       report,
       lockfile_strategy,
-      no_root_tsconfig_trigger,
+      root_tsconfig_strategy,
     } => {
       let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
@@ -161,7 +161,7 @@ pub fn run() -> Result<()> {
         head,
         projects,
         lockfile_strategy,
-        root_tsconfig_trigger: !no_root_tsconfig_trigger,
+        root_tsconfig_strategy,
       };
 
       // Use the report-generating version if --report is specified

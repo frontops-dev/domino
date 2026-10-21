@@ -31,7 +31,7 @@ test('discoverProjects exposes project links declared in target config', (t) => 
   t.deepEqual(web?.configDependencies, ['api'])
 })
 
-test('findAffected can skip the root tsconfig trigger', (t) => {
+test('findAffected applies the root tsconfig strategy', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'domino-root-tsconfig-'))
   t.teardown(() => rmSync(root, { recursive: true, force: true }))
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' })
@@ -42,6 +42,8 @@ test('findAffected can skip the root tsconfig trigger', (t) => {
     writeFileSync(join(root, 'libs', name, 'project.json'), JSON.stringify({ name, sourceRoot: `libs/${name}/src` }))
     writeFileSync(join(root, 'libs', name, 'src/index.ts'), 'export const value = 1\n')
   }
+  // lib-b imports an alias that only exists once the branch adds it.
+  writeFileSync(join(root, 'libs/lib-b/src/index.ts'), "import { value } from '@acme/a'\nexport const b = value\n")
   writeFileSync(join(root, 'tsconfig.base.json'), '{ "compilerOptions": { "paths": {} } }')
   git('init', '-q', '-b', 'main')
   git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init')
@@ -56,6 +58,11 @@ test('findAffected can skip the root tsconfig trigger', (t) => {
 
   const options = { cwd: root, base: 'main', projects: discoverProjects(root), lockfileStrategy: 'none' }
 
-  t.deepEqual(findAffected(options).affectedProjects.sort(), ['lib-a', 'lib-b'])
-  t.deepEqual(findAffected({ ...options, rootTsconfigTrigger: false }).affectedProjects, [])
+  // Default (aliases): only the project importing the added alias.
+  t.deepEqual(findAffected(options).affectedProjects, ['lib-b'])
+  t.deepEqual(findAffected({ ...options, rootTsconfigStrategy: 'all' }).affectedProjects.sort(), ['lib-a', 'lib-b'])
+  t.deepEqual(findAffected({ ...options, rootTsconfigStrategy: 'none' }).affectedProjects, [])
+  t.throws(() => findAffected({ ...options, rootTsconfigStrategy: 'some' }), {
+    message: /Invalid root tsconfig strategy/,
+  })
 })

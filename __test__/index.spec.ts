@@ -1,4 +1,5 @@
 import test from 'ava'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,4 +29,33 @@ test('discoverProjects exposes project links declared in target config', (t) => 
 
   const web = discoverProjects(root).find((p) => p.name === 'web')
   t.deepEqual(web?.configDependencies, ['api'])
+})
+
+test('findAffected can skip the root tsconfig trigger', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'domino-root-tsconfig-'))
+  t.teardown(() => rmSync(root, { recursive: true, force: true }))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' })
+
+  writeFileSync(join(root, 'nx.json'), '{}')
+  for (const name of ['lib-a', 'lib-b']) {
+    mkdirSync(join(root, 'libs', name, 'src'), { recursive: true })
+    writeFileSync(join(root, 'libs', name, 'project.json'), JSON.stringify({ name, sourceRoot: `libs/${name}/src` }))
+    writeFileSync(join(root, 'libs', name, 'src/index.ts'), 'export const value = 1\n')
+  }
+  writeFileSync(join(root, 'tsconfig.base.json'), '{ "compilerOptions": { "paths": {} } }')
+  git('init', '-q', '-b', 'main')
+  git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init')
+  git('add', '.')
+  git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'base')
+  git('checkout', '-q', '-b', 'feature')
+  writeFileSync(
+    join(root, 'tsconfig.base.json'),
+    '{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }',
+  )
+  git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-am', 'alias')
+
+  const options = { cwd: root, base: 'main', projects: discoverProjects(root), lockfileStrategy: 'none' }
+
+  t.deepEqual(findAffected(options).affectedProjects.sort(), ['lib-a', 'lib-b'])
+  t.deepEqual(findAffected({ ...options, rootTsconfigTrigger: false }).affectedProjects, [])
 })

@@ -20,7 +20,7 @@ domino is a drop-in replacement for the TypeScript version of [traf](https://git
 - **Lockfile Change Detection**: Detects dependency version changes in npm, yarn, pnpm, and bun lockfiles and traces affected projects
 - **Fast Oxc Parser**: 3-5x faster than TypeScript's compiler API
 - **Workspace Support**: Works with Nx, Turborepo, and generic npm/yarn/pnpm/bun workspaces
-- **Global Invalidation**: Honors Nx `namedInputs` workspace-root patterns (e.g. `sharedGlobals`) and Turborepo `globalDependencies` from `turbo.json` / `turbo.jsonc`, so a change to a shared root file marks every project affected
+- **Global Invalidation**: Honors Nx `namedInputs` workspace-root patterns (e.g. `sharedGlobals`) and Turborepo `globalDependencies` from `turbo.json` / `turbo.jsonc`, so a change to a shared root file marks every project affected. A change to the workspace-root `tsconfig.base.json` does the same in every workspace type, since its path aliases drive module resolution; turn that off with `--no-root-tsconfig-trigger` (Node: `rootTsconfigTrigger: false`) if you narrow those changes yourself
 - **Module Resolution**: Uses oxc_resolver (same as Rolldown and Nova) for accurate module resolution
 
 ## Quick Start
@@ -122,6 +122,7 @@ domino affected --report report.html
 - `--debug`: Enable debug logging
 - `--cwd <PATH>`: Set the current working directory
 - `--lockfile-strategy <STRATEGY>`: Lockfile change detection strategy (default: `direct`)
+- `--no-root-tsconfig-trigger`: Don't treat a `tsconfig.base.json` change as affecting every project
 
 ### Lockfile Change Detection
 

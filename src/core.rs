@@ -148,9 +148,12 @@ fn find_affected_internal(
   // type, not only when a namedInputs / globalDependencies pattern lists it:
   // its path aliases feed module resolution for all projects. Appended after
   // the config-derived triggers so the report still names that config first.
-  let root_tsconfig_triggers =
-    named_inputs::root_tsconfig_triggers(&changed_files, &global_triggers);
-  global_triggers.extend(root_tsconfig_triggers);
+  // Callers that narrow root tsconfig changes themselves can switch it off.
+  if config.root_tsconfig_trigger {
+    let root_tsconfig_triggers =
+      named_inputs::root_tsconfig_triggers(&changed_files, &global_triggers);
+    global_triggers.extend(root_tsconfig_triggers);
+  }
 
   if !global_triggers.is_empty() && !generate_report {
     let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();

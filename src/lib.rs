@@ -86,6 +86,9 @@ mod napi_bindings {
     pub enable_profiling: Option<bool>,
     /// Lockfile change detection strategy: "none", "direct", "full" (default: "direct")
     pub lockfile_strategy: Option<String>,
+    /// Treat a `tsconfig.base.json` change as affecting every project (default: true).
+    /// Pass false when you narrow those changes yourself.
+    pub root_tsconfig_trigger: Option<bool>,
   }
 
   #[napi(object)]
@@ -114,6 +117,7 @@ mod napi_bindings {
       head: options.head,
       projects,
       lockfile_strategy,
+      root_tsconfig_trigger: options.root_tsconfig_trigger.unwrap_or(true),
     };
 
     let result =

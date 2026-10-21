@@ -155,6 +155,11 @@ pub struct TrueAffectedConfig {
   pub projects: Vec<Project>,
   /// Lockfile change detection strategy
   pub lockfile_strategy: LockfileStrategy,
+  /// Treat a change to the workspace-root `tsconfig.base.json` as affecting
+  /// every project. Turn it off when the caller narrows those changes itself
+  /// (e.g. to projects importing a changed path alias). A `namedInputs` entry
+  /// that lists the file still invalidates globally either way.
+  pub root_tsconfig_trigger: bool,
 }
 
 /// Result of the true affected analysis

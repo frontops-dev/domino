@@ -181,6 +181,10 @@ domino affected --report ./affected-report.html
 # Lockfile change detection strategy: none | direct | full (default: direct)
 domino affected --lockfile-strategy full
 
+# Don't treat a tsconfig.base.json change as affecting every project
+# (Node: findAffected({ rootTsconfigTrigger: false }))
+domino affected --no-root-tsconfig-trigger
+
 # Set working directory
 domino affected --cwd /path/to/monorepo
 ```

@@ -61,6 +61,10 @@ enum Commands {
     /// Lockfile change detection strategy: none, direct, full
     #[arg(long, default_value = "direct")]
     lockfile_strategy: LockfileStrategy,
+
+    /// Don't treat a tsconfig.base.json change as affecting every project
+    #[arg(long)]
+    no_root_tsconfig_trigger: bool,
   },
 }
 
@@ -98,6 +102,7 @@ pub fn run() -> Result<()> {
       profile,
       report,
       lockfile_strategy,
+      no_root_tsconfig_trigger,
     } => {
       let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
 
@@ -156,6 +161,7 @@ pub fn run() -> Result<()> {
         head,
         projects,
         lockfile_strategy,
+        root_tsconfig_trigger: !no_root_tsconfig_trigger,
       };
 
       // Use the report-generating version if --report is specified

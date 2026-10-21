@@ -191,6 +191,38 @@ export function unusedFn() {
 }
 
 #[test]
+fn test_no_root_tsconfig_trigger_flag() {
+  let branch = TestBranch::new("test-no-root-tsconfig-trigger");
+  let tsconfig = fs::read_to_string(fixture_path().join("tsconfig.base.json")).unwrap();
+  branch.make_change(
+    "tsconfig.base.json",
+    &tsconfig.replacen(
+      r#""baseUrl": ".","#,
+      r#""baseUrl": ".", "strict": true,"#,
+      1,
+    ),
+  );
+
+  let affected = |extra: &[&str]| -> Vec<String> {
+    let mut args = vec!["affected", "--base", "main", "--json"];
+    args.extend_from_slice(extra);
+    let output = branch.run_domino(&args);
+    assert!(output.status.success(), "Command should succeed");
+    serde_json::from_slice(&output.stdout).expect("Output should be a JSON array")
+  };
+
+  let all = affected(&[]);
+  assert!(
+    all.iter().any(|p| p == "proj1") && all.iter().any(|p| p == "proj2"),
+    "a root tsconfig change should affect every project by default, got: {all:?}"
+  );
+  assert_eq!(
+    affected(&["--no-root-tsconfig-trigger"]),
+    Vec::<String>::new()
+  );
+}
+
+#[test]
 fn test_json_output_with_no_changes() {
   let branch = TestBranch::new("test-json-no-changes");
 

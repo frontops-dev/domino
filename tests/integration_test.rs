@@ -233,6 +233,7 @@ impl TestBranch {
         },
       ],
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_trigger: true,
     };
 
     // Create a profiler (disabled for tests)
@@ -480,6 +481,7 @@ export function anotherFn() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2048,6 +2050,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2157,6 +2160,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2285,6 +2289,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2417,6 +2422,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2527,6 +2533,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2658,6 +2665,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2803,6 +2811,7 @@ export function Panel() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2933,6 +2942,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3058,6 +3068,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3183,6 +3194,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3281,6 +3293,7 @@ fn test_shared_source_root_all_projects_affected() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3462,6 +3475,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3515,6 +3529,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Full,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3573,6 +3588,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3622,6 +3638,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3660,6 +3677,7 @@ fn test_lockfile_no_change_zero_impact() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3807,6 +3825,7 @@ export const mockData: SharedType = { name: 'test' };
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3932,6 +3951,7 @@ export const mockData: SharedType = { name: 'test' };
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4091,6 +4111,7 @@ impl TempNxRepo {
       head: None,
       projects,
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_trigger: true,
     };
 
     let profiler = Arc::new(Profiler::new(false));
@@ -4107,6 +4128,7 @@ impl TempNxRepo {
       head: None,
       projects,
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_trigger: true,
     };
 
     let profiler = Arc::new(Profiler::new(false));
@@ -4463,6 +4485,7 @@ fn test_workspace_root_project_not_over_attributed() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4536,6 +4559,7 @@ fn test_spec_file_change_affects_owning_project() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4606,6 +4630,7 @@ export function unusedFn() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4698,6 +4723,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   (tmp, root, config)
@@ -4847,6 +4873,7 @@ fn test_dependency_manifest_in_shared_globals_does_not_globally_invalidate() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4898,6 +4925,7 @@ fn test_non_manifest_shared_global_still_globally_invalidates() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4957,6 +4985,7 @@ fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5023,6 +5052,7 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5160,6 +5190,7 @@ export function run() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5326,6 +5357,7 @@ fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffe
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   }
 }
 
@@ -5774,6 +5806,7 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
   let profiler = Arc::new(Profiler::new(false));
   find_affected(config, profiler)
@@ -6171,6 +6204,7 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
     head: None,
     projects: domino::workspace::discover_projects(repo.root()).unwrap(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: true,
   };
   let report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
     .expect("find_affected_with_report failed")
@@ -6184,6 +6218,86 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
     report.global_triggers
   );
   assert_eq!(report.global_triggers[0].named_input, "sharedGlobals");
+}
+
+/// Run `repo` with the root-tsconfig trigger switched off.
+fn affected_without_root_tsconfig_trigger(repo: &TempNxRepo) -> Vec<String> {
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: false,
+  };
+  let mut affected = find_affected(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+  affected
+}
+
+/// With the trigger off, a root tsconfig change is an ordinary root file again:
+/// callers that narrow alias changes themselves need Domino not to widen them.
+#[test]
+fn test_root_tsconfig_trigger_opt_out_affects_nothing() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  commit_on_main(
+    &repo,
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": {} } }"#,
+  );
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }"#,
+  );
+
+  assert_eq!(
+    affected_without_root_tsconfig_trigger(&repo),
+    Vec::<String>::new()
+  );
+
+  // The report path must agree: no global trigger, nothing affected.
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_trigger: false,
+  };
+  let result = find_affected_with_report(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected_with_report failed");
+  assert!(result.affected_projects.is_empty());
+  assert!(result
+    .report
+    .expect("expected a report")
+    .global_triggers
+    .is_empty());
+}
+
+/// The opt-out covers only the built-in trigger. A namedInput that lists the
+/// root tsconfig is the user's own declaration and still invalidates globally.
+#[test]
+fn test_root_tsconfig_trigger_opt_out_keeps_declared_named_input() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"]
+      }
+    }"#,
+  );
+  commit_on_main(&repo, "tsconfig.base.json", r#"{ "compilerOptions": {} }"#);
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "strict": true } }"#,
+  );
+
+  assert_eq!(
+    affected_without_root_tsconfig_trigger(&repo),
+    vec!["lib-a".to_string(), "lib-b".to_string()]
+  );
 }
 
 // ============================================================================

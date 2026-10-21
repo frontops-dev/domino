@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, warn};
 
-const GLOB_MATCH_OPTIONS: MatchOptions = MatchOptions {
+pub(super) const GLOB_MATCH_OPTIONS: MatchOptions = MatchOptions {
   case_sensitive: true,
   require_literal_separator: true,
   require_literal_leading_dot: false,
@@ -19,8 +19,31 @@ struct PnpmWorkspace {
 
 #[derive(Debug, Deserialize)]
 struct PackageJson {
-  name: String,
-  workspaces: Option<Vec<String>>,
+  /// Optional: a private monorepo root routinely declares `workspaces` and no `name`, and
+  /// requiring it here made the whole repo parse as a non-workspace.
+  name: Option<String>,
+  workspaces: Option<Workspaces>,
+}
+
+/// Yarn Classic allows an object with a `packages` list beside `nohoist`, and npm/pnpm/bun
+/// the plain array. Accepting only the array made an otherwise valid Yarn root parse as a
+/// non-workspace.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Workspaces {
+  Packages(Vec<String>),
+  Config {
+    #[serde(default)]
+    packages: Vec<String>,
+  },
+}
+
+impl Workspaces {
+  fn into_packages(self) -> Vec<String> {
+    match self {
+      Self::Packages(packages) | Self::Config { packages } => packages,
+    }
+  }
 }
 
 /// Check if the current directory is a generic workspace (npm/yarn/pnpm/bun)
@@ -112,7 +135,7 @@ pub fn get_workspace_patterns(cwd: &Path) -> Result<Vec<String>> {
       .map_err(|e| DominoError::Parse(format!("Failed to parse package.json: {}", e)))?;
 
     if let Some(workspaces) = pkg_json.workspaces {
-      return Ok(workspaces);
+      return Ok(workspaces.into_packages());
     }
   }
 
@@ -133,8 +156,12 @@ fn parse_package_json(path: &Path, cwd: &Path) -> Result<Project> {
     .unwrap_or(project_dir)
     .to_path_buf();
 
+  let name = pkg_json.name.ok_or_else(|| {
+    DominoError::Parse(format!("package.json without a name: {}", path.display()))
+  })?;
+
   Ok(Project {
-    name: pkg_json.name,
+    name,
     root: source_root.clone(),
     source_root,
     ts_config: None,

@@ -1,5 +1,5 @@
 import test from 'ava'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,7 +31,11 @@ test('discoverProjects exposes project links declared in target config', (t) => 
   t.deepEqual(web?.configDependencies, ['api'])
 })
 
-test('findAffected applies the root tsconfig strategy', (t) => {
+// findAffected diffs with git; the Linux binding-test containers have none.
+const hasGit = spawnSync('git', ['--version']).status === 0
+const testWithGit = hasGit ? test : test.skip
+
+testWithGit('findAffected applies the root tsconfig strategy', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'domino-root-tsconfig-'))
   t.teardown(() => rmSync(root, { recursive: true, force: true }))
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' })

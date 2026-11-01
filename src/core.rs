@@ -799,11 +799,11 @@ fn find_affected_internal(
         if !uses_alias(&import.from_module) {
           continue;
         }
-        match analyzer.find_exported_symbols_using(file_path, &import.local_name) {
-          Ok(exports) if !exports.is_empty() => symbols.extend(exports),
-          Ok(_) => symbols.push(import.local_name.clone()),
-          Err(e) => debug!("Error finding exports using '{}': {}", import.local_name, e),
-        }
+        // Traced as a changed symbol: through the code in this file that uses
+        // the binding, private helpers included, to the exports built on it,
+        // and through a re-export of the binding itself. An unused import
+        // reaches nothing; the file is still marked above.
+        symbols.push(import.local_name.clone());
       }
       for export in analyzer.exports.get(file_path).into_iter().flatten() {
         if !export.re_export_from.as_deref().is_some_and(uses_alias) {

@@ -6842,6 +6842,75 @@ fn test_root_tsconfig_aliases_report() {
   );
 }
 
+/// Re-targets `@acme/a` in a workspace where lib-x (`@acme/x`) has `source` as
+/// its index and each `(project, name)` consumer imports `name` from `@acme/x`,
+/// and returns the affected projects.
+fn affected_by_retargeting_through(source: &str, consumers: &[(&str, &str)]) -> Vec<String> {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let project = |name: &str| format!(r#"{{ "name": "{name}", "sourceRoot": "libs/{name}/src" }}"#);
+  let mut owned = vec![("libs/lib-x/project.json".to_string(), project("lib-x"))];
+  for (consumer, name) in consumers {
+    owned.push((format!("libs/{consumer}/project.json"), project(consumer)));
+    owned.push((
+      format!("libs/{consumer}/src/index.ts"),
+      format!("import {{ {name} }} from '@acme/x';\n\nexport const user = {name};\n"),
+    ));
+  }
+  let tsconfig = |a_target: &str| {
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ "@acme/a": ["{a_target}"], "@acme/x": ["libs/lib-x/src/index.ts"] }} }} }}"#
+    )
+  };
+  let base = tsconfig(A_INDEX);
+  let mut files: Vec<(&str, &str)> = owned
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+    ("libs/lib-x/src/index.ts", source),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+  affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases)
+}
+
+/// An imported binding of a changed alias is traced like a changed symbol:
+/// through the private code that uses it, even when an export also uses it
+/// directly, and through a re-export of the binding itself. An export that
+/// does not touch it stays unaffected.
+#[test]
+fn test_root_tsconfig_aliases_traces_the_imported_binding() {
+  let cases = [
+    (
+      "helper beside a direct use",
+      "import { a } from '@acme/a';\n\nconst helper = () => a;\n\nexport const direct = a;\n\nexport const viaHelper = helper();\n\nexport const other = 1;\n",
+      vec![("lib-direct", "direct"), ("lib-helper", "viaHelper"), ("lib-other", "other")],
+      vec!["lib-direct", "lib-helper", "lib-x"],
+    ),
+    (
+      "helper only",
+      "import { a } from '@acme/a';\n\nconst helper = () => a;\n\nexport const viaHelper = helper();\n\nexport const other = 1;\n",
+      vec![("lib-helper", "viaHelper"), ("lib-other", "other")],
+      vec!["lib-helper", "lib-x"],
+    ),
+    (
+      "binding re-exported",
+      "import { a } from '@acme/a';\n\nexport { a };\n\nexport const other = 1;\n",
+      vec![("lib-binding", "a"), ("lib-other", "other")],
+      vec!["lib-binding", "lib-x"],
+    ),
+  ];
+  for (case, source, consumers, expected) in cases {
+    assert_eq!(
+      affected_by_retargeting_through(source, &consumers),
+      names(&expected),
+      "case: {case}"
+    );
+  }
+}
+
 /// A namedInput that lists the root tsconfig is the user's own declaration and
 /// invalidates globally whatever the strategy.
 #[test]

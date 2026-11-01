@@ -13,7 +13,7 @@ use crate::types::{
 use crate::utils::{self, ProjectIndex};
 use oxc_ast::AstKind;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -721,9 +721,10 @@ fn find_affected_internal(
   // is traced instead.
   if !changed_aliases.is_empty() {
     // Report users per (project, alias), so a widely used alias yields one
-    // cause per project rather than one per file.
-    let mut alias_users: Option<FxHashMap<(String, String), BTreeSet<PathBuf>>> =
-      generate_report.then(FxHashMap::default);
+    // cause per project rather than one per file. Ordered, so each project's
+    // causes come out sorted by alias without relying on a later sort.
+    let mut alias_users: Option<BTreeMap<(String, String), BTreeSet<PathBuf>>> =
+      generate_report.then(BTreeMap::default);
     // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
     // marked, not traced.
     let projects = config
@@ -989,7 +990,7 @@ fn mark_path_alias_user(
   file_path: &Path,
   mentioned: &[&path_aliases::AliasPattern],
   affected_packages: &mut FxHashSet<String>,
-  alias_users: Option<&mut FxHashMap<(String, String), BTreeSet<PathBuf>>>,
+  alias_users: Option<&mut BTreeMap<(String, String), BTreeSet<PathBuf>>>,
 ) {
   let owners = project_index.get_owning_packages_by_path(file_path);
   if let Some(users) = alias_users {

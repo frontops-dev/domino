@@ -6968,6 +6968,65 @@ fn test_root_tsconfig_aliases_report_one_entry_per_project_and_alias() {
   );
 }
 
+/// A project using several changed aliases lists their causes sorted by alias,
+/// so the report and JSON output are stable from run to run.
+#[test]
+fn test_root_tsconfig_aliases_report_orders_causes_by_alias() {
+  let aliases = [
+    "@acme/q", "@acme/c", "@acme/x", "@acme/a", "@acme/m", "@acme/f",
+  ];
+  let tsconfig = |target: &str| {
+    let paths: Vec<String> = aliases
+      .iter()
+      .map(|alias| format!(r#""{alias}": ["{target}"]"#))
+      .collect();
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ {} }} }} }}"#,
+      paths.join(", ")
+    )
+  };
+  let users: Vec<(String, String)> = aliases
+    .iter()
+    .enumerate()
+    .map(|(i, alias)| {
+      (
+        format!("libs/lib-b/src/user-{i}.ts"),
+        format!("import {{ a }} from '{alias}';\n\nexport const user{i} = a;\n"),
+      )
+    })
+    .collect();
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  let mut files: Vec<(&str, &str)> = users
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  let report = alias_strategy_report(&repo);
+  let lib_b = report
+    .projects
+    .iter()
+    .find(|p| p.name == "lib-b")
+    .expect("lib-b should be affected");
+  let listed: Vec<&str> = lib_b
+    .causes
+    .iter()
+    .filter_map(|cause| match cause {
+      AffectCause::TsconfigPathAlias { alias, .. } => Some(alias.as_str()),
+      _ => None,
+    })
+    .collect();
+  let mut sorted = aliases.to_vec();
+  sorted.sort();
+  assert_eq!(listed, sorted);
+}
+
 /// Re-targets `@acme/a` in a workspace where lib-x (`@acme/x`) has `source` as
 /// its index and each `(project, name)` consumer imports `name` from `@acme/x`,
 /// and returns the affected projects.

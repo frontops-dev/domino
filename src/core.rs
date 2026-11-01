@@ -811,8 +811,18 @@ fn find_affected_internal(
         }
         if export.exported_name == "*" {
           // `export *` names nothing itself: trace every name importers take
-          // from this file.
-          symbols.extend(names_imported_from_file());
+          // from this file, except those the file exports explicitly, which
+          // shadow anything the star would pass through.
+          let exports = analyzer.exports.get(file_path).into_iter().flatten();
+          let explicit: FxHashSet<&str> = exports
+            .map(|export| export.exported_name.as_str())
+            .filter(|name| *name != "*")
+            .collect();
+          symbols.extend(
+            names_imported_from_file()
+              .into_iter()
+              .filter(|name| !explicit.contains(name.as_str())),
+          );
         } else {
           symbols.push(export.exported_name.clone());
         }

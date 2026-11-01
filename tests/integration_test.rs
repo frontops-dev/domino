@@ -7062,6 +7062,19 @@ fn test_root_tsconfig_aliases_re_exports_stay_precise() {
   }
 }
 
+/// `export {} from` a changed alias names nothing, so like a side-effect
+/// import it has no binding to follow and every export of the file is traced.
+#[test]
+fn test_root_tsconfig_aliases_empty_re_export_traces_every_export() {
+  assert_eq!(
+    affected_by_retargeting_through(
+      "export {} from '@acme/a';\n\nexport const other = 1;\n",
+      &[("lib-user", "other")]
+    ),
+    names(&["lib-user", "lib-x"])
+  );
+}
+
 /// A namedInput that lists the root tsconfig is the user's own declaration and
 /// invalidates globally whatever the strategy.
 #[test]

@@ -716,8 +716,9 @@ fn find_affected_internal(
   // Step 5d: Trace a root tsconfig change narrowed to its path aliases (Step 1b).
   // A file is matched on its source text, so side-effect imports and require()
   // count; its structured imports and re-exports of the alias are then traced.
-  // A mention that is neither (require(), import(), a side-effect import) has
-  // no binding to follow, so every export of that file is traced instead.
+  // A mention that is neither (require(), import(), a side-effect import,
+  // `export {} from`) has no binding to follow, so every export of that file
+  // is traced instead.
   if !changed_aliases.is_empty() {
     // Report users per (project, alias), so a widely used alias yields one
     // cause per project rather than one per file.
@@ -1002,7 +1003,8 @@ fn mark_path_alias_user(
 
 /// Byte offsets (at the opening quote) of the specifiers in `file_data` that
 /// Step 5d can trace through a binding: those of imports that bind a name and
-/// of re-exports. Side-effect imports, `import()` and `require()` are left out.
+/// of re-exports that name something (`export *` included). Side-effect
+/// imports, `export {} from`, `import()` and `require()` are left out.
 fn structured_specifier_offsets(file_data: &FileSemanticData) -> FxHashSet<usize> {
   file_data
     .semantic()
@@ -1014,7 +1016,9 @@ fn structured_specifier_offsets(file_data: &FileSemanticData) -> FxHashSet<usize
       {
         Some(decl.source.span)
       }
-      AstKind::ExportNamedDeclaration(decl) => decl.source.as_ref().map(|s| s.span),
+      AstKind::ExportNamedDeclaration(decl) if !decl.specifiers.is_empty() => {
+        decl.source.as_ref().map(|s| s.span)
+      }
       AstKind::ExportAllDeclaration(decl) => Some(decl.source.span),
       _ => None,
     })

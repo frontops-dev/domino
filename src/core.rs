@@ -736,6 +736,9 @@ fn find_affected_internal(
     }
 
     let mut alias_visited = FxHashSet::default();
+    // Names importers take from each file, built on first use: only files that
+    // reach an alias without a binding, or through `export *`, need it.
+    let mut names_imported_by_source: Option<FxHashMap<&Path, Vec<&String>>> = None;
     for (file_path, file_data) in &analyzer.files {
       let mentioned: Vec<_> = changed_aliases
         .iter()
@@ -753,12 +756,20 @@ fn find_affected_internal(
       );
 
       let uses_alias = |specifier: &str| mentioned.iter().any(|alias| alias.matches(specifier));
-      let names_imported_from_file = || {
-        analyzer
-          .import_index
-          .keys()
-          .filter(|(source, _)| source == file_path)
-          .map(|(_, name)| name.clone())
+      let mut names_imported_from_file = || {
+        names_imported_by_source
+          .get_or_insert_with(|| {
+            let mut by_source: FxHashMap<&Path, Vec<&String>> = FxHashMap::default();
+            for (source, name) in analyzer.import_index.keys() {
+              by_source.entry(source.as_path()).or_default().push(name);
+            }
+            by_source
+          })
+          .get(file_path.as_path())
+          .into_iter()
+          .flatten()
+          .map(|name| (*name).clone())
+          .collect::<Vec<_>>()
       };
       let mut symbols: Vec<String> = Vec::new();
 

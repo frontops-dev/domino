@@ -53,6 +53,8 @@ jobs:
         run: node --test tests/publish-preview.test.js
       - name: Test version sync script
         run: node --test tests/sync-version.test.js
+      - name: Test release re-run script
+        run: node --test tests/release-rerun.test.js
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -432,11 +434,21 @@ jobs:
           # A release tag already on HEAD means this is a re-run of that release (for
           # example after the version commit failed). Reuse its version: bumping from
           # it would publish a duplicate. The claim below re-pushes the same tag, publish
-          # skips what npm already has, and the version commit gets another try.
-          HEAD_TAG=$(git tag --points-at HEAD --list "v[0-9]*" | sort -V | tail -1)
-          if [ -n "$HEAD_TAG" ]; then
-            echo "HEAD is already released as ${HEAD_TAG}; re-running that release"
-            echo "next_version=${HEAD_TAG#v}" >> "$GITHUB_OUTPUT"
+          # skips what npm already has, and the version commit gets another try. If a
+          # newer release has shipped since, publishing would move `latest` backwards,
+          # so the release is skipped instead — without failing, since nothing is wrong.
+          RERUN=$(node scripts/release-rerun.js)
+          read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
+          if [ "$RERUN_ACTION" = "superseded" ]; then
+            echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$RERUN_ACTION" = "reuse" ]; then
+            echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
+            echo "bump=rerun" >> "$GITHUB_OUTPUT"
+            echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -503,7 +515,7 @@ jobs:
           echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
       - name: Bump version
         id: bump
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
         run: |
           npm version ${{ steps.version.outputs.next_version }} --no-git-tag-version --ignore-scripts --allow-same-version
           node scripts/sync-version.js
@@ -512,7 +524,7 @@ jobs:
           echo "Bumped to $NEW_VERSION"
       - name: Claim version
         id: claim
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
         run: |
           TAG="v${{ steps.bump.outputs.new_version }}"
           # Compare-and-swap on the tag: creating a remote ref is atomic and reversible,

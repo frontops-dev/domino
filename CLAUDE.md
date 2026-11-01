@@ -393,6 +393,8 @@ This allows:
   `package.json` (covered by `tests/sync-version.test.js`, run in the CI `lint` job).
 - A release that published but failed to push its version commit can be re-run safely: a
   release tag already on the commit makes the publish job reuse that version instead of bumping.
+  If a newer release has shipped since, the re-run skips publishing instead of moving `latest`
+  backwards (`scripts/release-rerun.js`, covered by `tests/release-rerun.test.js`).
 - Every push to `main` publishes a release unless the commit message contains `[skip release]`.
   Put it in the squash message to batch several merges into one release: CI still runs on each,
   and the next unmarked merge releases them all, bumping from every commit since the last tag.

@@ -55,6 +55,8 @@ jobs:
         run: node --test tests/sync-version.test.js
       - name: Test release re-run script
         run: node --test tests/release-rerun.test.js
+      - name: Test npm propagation wait script
+        run: node --test tests/wait-for-npm.test.js
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -569,24 +571,14 @@ jobs:
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
-          # Retry yarn install to handle npm registry propagation delay after publish. A
-          # single platform package has taken about 7 minutes to appear, so allow 20.
-          MAX_ATTEMPTS=80
-          SLEEP_SECONDS=15
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
-              break
-            fi
-            if [ $attempt -lt $MAX_ATTEMPTS ]; then
-              echo "yarn install attempt $attempt failed, retrying in ${SLEEP_SECONDS}s..."
-              sleep $SLEEP_SECONDS
-            else
-              echo "::error::yarn install failed after $MAX_ATTEMPTS attempts over $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
-              echo "::error::Registry propagation may still be incomplete or there is a configuration issue"
-              echo "::error::The release is published and tagged; re-run this job to push the version commit"
-              exit 1
-            fi
-          done
+          # The platform packages just published take a while to appear on the registry
+          # (2.0.5 took about 11 minutes, 2.1.0's darwin-arm64 about 7), and yarn install
+          # fails until they do. Poll for each one — up to 20 minutes, failing at once on
+          # errors that are not propagation — then install once.
+          if ! node scripts/wait-for-npm.js || ! YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+            echo "::error::The release is published and tagged; re-run this job to push the version commit"
+            exit 1
+          fi
           git add package.json Cargo.toml index.js yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           # The tag was already pushed to claim the version, so only the commit is left.

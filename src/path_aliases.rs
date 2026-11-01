@@ -73,6 +73,12 @@ impl AliasPattern {
     // The substring check is a cheap filter: most files never mention the alias.
     source.contains(self.prefix.as_str()) && self.quoted.is_match(source)
   }
+
+  /// Byte offsets of the string literals [`Self::mentioned_in`] finds, each at
+  /// its opening quote (where the parser's span for that literal starts).
+  pub fn mention_offsets<'s>(&'s self, source: &'s str) -> impl Iterator<Item = usize> + 's {
+    self.quoted.find_iter(source).map(|m| m.start())
+  }
 }
 
 /// The aliases a change from `base` to `head` added, removed or re-targeted,
@@ -328,6 +334,18 @@ mod tests {
     assert!(pattern.mentioned_in("const a = await import(`@acme/a`);"));
     assert!(!pattern.mentioned_in("import '@acme/a/sub';"));
     assert!(!pattern.mentioned_in("import '@acme/ab';"));
+  }
+
+  #[test]
+  fn mention_offsets_point_at_each_opening_quote() {
+    let pattern = AliasPattern::new("@acme/a").unwrap();
+    let source = "import { a } from '@acme/a';\nconst b = require(\"@acme/a\");\n";
+
+    let offsets: Vec<usize> = pattern.mention_offsets(source).collect();
+    assert_eq!(offsets, vec![18, 47]);
+    assert!(offsets
+      .iter()
+      .all(|&o| source[o..].starts_with(['\'', '"'])));
   }
 
   #[test]

@@ -4,12 +4,14 @@ use crate::lockfile;
 use crate::named_inputs;
 use crate::path_aliases;
 use crate::profiler::Profiler;
+use crate::semantic::analyzer::FileSemanticData;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
   AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, GlobalTrigger,
   LockfileStrategy, Project, ReportTotals, RootTsconfigStrategy, TrueAffectedConfig,
 };
 use crate::utils::{self, ProjectIndex};
+use oxc_ast::AstKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -713,6 +715,8 @@ fn find_affected_internal(
   // Step 5d: Trace a root tsconfig change narrowed to its path aliases (Step 1b).
   // A file is matched on its source text, so side-effect imports and require()
   // count; its structured imports and re-exports of the alias are then traced.
+  // A mention that is neither (require(), import(), a side-effect import) has
+  // no binding to follow, so every export of that file is traced instead.
   if !changed_aliases.is_empty() {
     // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
     // marked, not traced.
@@ -749,7 +753,37 @@ fn find_affected_internal(
       );
 
       let uses_alias = |specifier: &str| mentioned.iter().any(|alias| alias.matches(specifier));
+      let names_imported_from_file = || {
+        analyzer
+          .import_index
+          .keys()
+          .filter(|(source, _)| source == file_path)
+          .map(|(_, name)| name.clone())
+      };
       let mut symbols: Vec<String> = Vec::new();
+
+      // Compared by offset rather than by specifier: the same specifier can be
+      // both imported and `require`d in one file.
+      let structured = structured_specifier_offsets(file_data);
+      let has_unstructured_mention = mentioned.iter().any(|alias| {
+        alias
+          .mention_offsets(file_data.source())
+          .any(|offset| !structured.contains(&offset))
+      });
+      if has_unstructured_mention {
+        symbols.extend(
+          analyzer
+            .exports
+            .get(file_path)
+            .into_iter()
+            .flatten()
+            .map(|export| export.exported_name.clone())
+            .filter(|name| name != "*"),
+        );
+        // Names an `export *` passes through are recorded only by importers.
+        symbols.extend(names_imported_from_file());
+      }
+
       for import in analyzer.imports.get(file_path).into_iter().flatten() {
         if !uses_alias(&import.from_module) {
           continue;
@@ -767,13 +801,7 @@ fn find_affected_internal(
         if export.exported_name == "*" {
           // `export *` names nothing itself: trace every name importers take
           // from this file.
-          symbols.extend(
-            analyzer
-              .import_index
-              .keys()
-              .filter(|(source, _)| source == file_path)
-              .map(|(_, name)| name.clone()),
-          );
+          symbols.extend(names_imported_from_file());
         } else {
           symbols.push(export.exported_name.clone());
         }
@@ -925,6 +953,28 @@ fn mark_path_alias_user(
     }
   }
   affected_packages.extend(owners);
+}
+
+/// Byte offsets (at the opening quote) of the specifiers in `file_data` that
+/// Step 5d can trace through a binding: those of imports that bind a name and
+/// of re-exports. Side-effect imports, `import()` and `require()` are left out.
+fn structured_specifier_offsets(file_data: &FileSemanticData) -> FxHashSet<usize> {
+  file_data
+    .semantic()
+    .nodes()
+    .iter()
+    .filter_map(|node| match node.kind() {
+      AstKind::ImportDeclaration(decl)
+        if decl.specifiers.as_ref().is_some_and(|s| !s.is_empty()) =>
+      {
+        Some(decl.source.span)
+      }
+      AstKind::ExportNamedDeclaration(decl) => decl.source.as_ref().map(|s| s.span),
+      AstKind::ExportAllDeclaration(decl) => Some(decl.source.span),
+      _ => None,
+    })
+    .map(|span| span.start as usize)
+    .collect()
 }
 
 fn process_changed_symbol(

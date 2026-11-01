@@ -6506,6 +6506,162 @@ fn test_root_tsconfig_aliases_wildcard_alias() {
   );
 }
 
+/// `tsconfig.base.json` for the alias-consumer fixture, with `@acme/a` and
+/// `@acme/b` pointing at the given targets.
+fn alias_consumer_tsconfig(a_target: &str, b_target: &str) -> String {
+  let consumers: String = ["req", "side", "dyn", "same", "mixed", "struct"]
+    .iter()
+    .map(|n| format!(",\n      \"@acme/{n}\": [\"libs/lib-{n}/src/index.ts\"]"))
+    .collect();
+  format!(
+    r#"{{
+  "compilerOptions": {{
+    "baseUrl": ".",
+    "paths": {{
+      "@acme/a": ["{a_target}"],
+      "@acme/b": ["{b_target}"]{consumers}
+    }}
+  }}
+}}"#
+  )
+}
+
+const B_INDEX: &str = "libs/lib-b/src/index.ts";
+const B_OTHER: &str = "libs/lib-b/src/other.ts";
+
+/// A workspace where each lib-X reaches `@acme/a` in one way and lib-X-user
+/// imports an export of lib-X:
+///
+/// - lib-req `require`s `@acme/a`
+/// - lib-side side-effect-imports `@acme/a`
+/// - lib-dyn dynamically `import()`s `@acme/a`
+/// - lib-same imports `a` from `@acme/a` and also `require`s it; the user takes
+///   the export built from the `require`
+/// - lib-mixed imports `b` from `@acme/b` and `require`s `@acme/a`; the user
+///   takes the export built from the `require`
+/// - lib-struct only imports `a` from `@acme/a`; the user takes an export that
+///   does not use it (precision: lib-struct-user is not affected)
+fn alias_consumer_repo() -> TempNxRepo {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let project = |name: &str| format!(r#"{{ "name": "{name}", "sourceRoot": "libs/{name}/src" }}"#);
+  let libs = ["b", "req", "side", "dyn", "same", "mixed", "struct"];
+  let projects: Vec<(String, String)> = libs
+    .iter()
+    .flat_map(|n| [format!("lib-{n}"), format!("lib-{n}-user")])
+    .filter(|name| name != "lib-b-user")
+    .map(|name| (format!("libs/{name}/project.json"), project(&name)))
+    .collect();
+  let user = |n: &str, export: &str| {
+    (
+      format!("libs/lib-{n}-user/src/index.ts"),
+      format!("import {{ {export} }} from '@acme/{n}';\n\nexport const user = {export};\n"),
+    )
+  };
+  let users = [
+    user("req", "req"),
+    user("side", "side"),
+    user("dyn", "loadA"),
+    user("same", "late"),
+    user("mixed", "ma"),
+    user("struct", "unrelated"),
+  ];
+  let tsconfig = alias_consumer_tsconfig(A_INDEX, B_INDEX);
+  let mut files: Vec<(&str, &str)> = projects
+    .iter()
+    .chain(users.iter())
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", tsconfig.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+    (B_OTHER, "export const b = 3;\n"),
+    (
+      "libs/lib-req/src/index.ts",
+      "const { a } = require('@acme/a');\n\nexport const req = a;\n",
+    ),
+    (
+      "libs/lib-side/src/index.ts",
+      "import '@acme/a';\n\nexport const side = 1;\n",
+    ),
+    (
+      "libs/lib-dyn/src/index.ts",
+      "export const loadA = () => import('@acme/a');\n",
+    ),
+    (
+      "libs/lib-same/src/index.ts",
+      "import { a } from '@acme/a';\nconst { a: late } = require('@acme/a');\n\nexport const early = a;\n\nexport { late };\n",
+    ),
+    (
+      "libs/lib-mixed/src/index.ts",
+      "import { b } from '@acme/b';\nconst { a } = require('@acme/a');\n\nexport const mb = b;\n\nexport const ma = a;\n",
+    ),
+    (
+      "libs/lib-struct/src/index.ts",
+      "import { a } from '@acme/a';\n\nexport const sa = a;\n\nexport const unrelated = 0;\n",
+    ),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo
+}
+
+/// A file that reaches a changed alias through `require()`, a side-effect
+/// import or `import()` has no imported binding to follow, so every export of
+/// it is traced. A structured import in the same file does not hide another
+/// use of the same alias. A file whose only use is a structured import stays
+/// precise.
+#[test]
+fn test_root_tsconfig_aliases_traces_exports_of_unstructured_users() {
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_OTHER, B_INDEX),
+  );
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&[
+      "lib-dyn",
+      "lib-dyn-user",
+      "lib-mixed",
+      "lib-mixed-user",
+      "lib-req",
+      "lib-req-user",
+      "lib-same",
+      "lib-same-user",
+      "lib-side",
+      "lib-side-user",
+      "lib-struct",
+    ])
+  );
+}
+
+/// A structured import of one changed alias does not stand in for a `require`
+/// of another changed alias in the same file.
+#[test]
+fn test_root_tsconfig_aliases_traces_exports_of_mixed_users() {
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_INDEX, B_OTHER),
+  );
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-mixed"]),
+    "only @acme/b changed: lib-mixed's structured import is traced precisely"
+  );
+
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_OTHER, B_OTHER),
+  );
+  let affected = affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases);
+  assert!(
+    affected.contains(&"lib-mixed-user".to_string()),
+    "affected: {affected:?}"
+  );
+}
+
 /// Comments and trailing commas (valid tsconfig) still narrow.
 #[test]
 fn test_root_tsconfig_aliases_jsonc() {

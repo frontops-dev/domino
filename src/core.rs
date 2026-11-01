@@ -783,7 +783,11 @@ fn find_affected_internal(
       let mut symbols: Vec<String> = Vec::new();
 
       // Compared by offset rather than by specifier: the same specifier can be
-      // both imported and `require`d in one file.
+      // both imported and `require`d in one file. Any quoted mention that is
+      // not a structured specifier counts, including one in a comment, a
+      // `jest.mock('@alias')` or a `declare module '@alias'`, so such a file
+      // has every export traced: an over-selection accepted for never missing
+      // a real use.
       let structured = structured_specifier_offsets(file_data);
       let has_unstructured_mention = mentioned.iter().any(|alias| {
         alias

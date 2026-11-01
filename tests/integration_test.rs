@@ -6911,6 +6911,24 @@ fn test_root_tsconfig_aliases_traces_the_imported_binding() {
   }
 }
 
+/// A file that re-exports a changed alias is traced through the re-exported
+/// names only: a consumer of an unrelated export of the same file stays
+/// unaffected.
+#[test]
+fn test_root_tsconfig_aliases_re_exports_stay_precise() {
+  let cases = [(
+    "named re-export",
+    "export { a } from '@acme/a';\n\nexport const other = 1;\n",
+  )];
+  for (case, source) in cases {
+    assert_eq!(
+      affected_by_retargeting_through(source, &[("lib-forwarded", "a"), ("lib-other", "other")]),
+      names(&["lib-forwarded", "lib-x"]),
+      "case: {case}"
+    );
+  }
+}
+
 /// A namedInput that lists the root tsconfig is the user's own declaration and
 /// invalidates globally whatever the strategy.
 #[test]

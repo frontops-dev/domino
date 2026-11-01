@@ -725,9 +725,12 @@ fn find_affected_internal(
       generate_report.then(FxHashMap::default);
     // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
     // marked, not traced.
-    let project_roots = config.projects.iter().map(|p| p.root.as_path());
+    let projects = config
+      .projects
+      .iter()
+      .map(|p| (p.root.as_path(), p.source_root.as_path()));
     for (file_path, mentioned) in
-      path_aliases::files_mentioning(&config.cwd, project_roots, &changed_aliases, |path| {
+      path_aliases::files_mentioning(&config.cwd, projects, &changed_aliases, |path| {
         analyzer.files.contains_key(path)
       })
     {

@@ -169,29 +169,41 @@ pub fn changed_aliases_between(
 /// other files that cannot hold a mention, so a file is rejected as soon as
 /// its first chunk is not UTF-8, and only read in full otherwise.
 ///
-/// A workspace-root project (root `""`, `"."` or `"./"`) is not scanned:
-/// walking it would read the whole repository, every nested project is
-/// scanned through its own root, and a hit in the root itself could never
-/// change the result (see the skip below).
+/// `projects` are `(root, sourceRoot)` pairs. A project is scanned through
+/// its root, except a workspace-root project (root `""`, `"."` or `"./"`):
+/// walking that would read the whole repository, and every nested project is
+/// scanned through its own root anyway. Such a project is scanned through its
+/// sourceRoot instead, unless that is the workspace root too (see the skip
+/// below).
 pub fn files_mentioning<'a>(
   cwd: &Path,
-  project_roots: impl IntoIterator<Item = &'a Path>,
+  projects: impl IntoIterator<Item = (&'a Path, &'a Path)>,
   aliases: &'a [AliasPattern],
   analyzed: impl Fn(&Path) -> bool,
 ) -> Vec<(PathBuf, Vec<&'a AliasPattern>)> {
   const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
-  // Skip the workspace root (`""`, `"."` or `"./"`). A hit there is owned
-  // like a direct edit to that file, and that never adds a project:
-  // - a root project with a sourceRoot (`src`) owns no top-level file, since
-  //   ProjectIndex keeps workspace roots out of its root fallback;
+  // Never walk the workspace root itself. A hit there is owned like a direct
+  // edit to that file, and outside a workspace-root project's sourceRoot that
+  // never adds a project:
+  // - one with a sourceRoot (`src`) owns no file outside it, since
+  //   ProjectIndex keeps workspace roots out of its root fallback, so only its
+  //   sourceRoot is walked (a project nested there is walked twice, but each
+  //   file is reported once and ProjectIndex attributes it);
   // - one with sourceRoot `.` owns nothing, as no relative path starts with
   //   a `.` component;
   // - one without a sourceRoot (`""`) owns every path, so it already owns the
   //   changed `tsconfig.base.json` that put us here.
-  let roots: BTreeSet<&Path> = project_roots
+  let roots: BTreeSet<&Path> = projects
     .into_iter()
-    .filter(|root| !root.components().all(|c| c == Component::CurDir))
+    .map(|(root, source_root)| {
+      if is_workspace_root(root) {
+        source_root
+      } else {
+        root
+      }
+    })
+    .filter(|dir| !is_workspace_root(dir))
     .collect();
   if aliases.is_empty() {
     return Vec::new();
@@ -252,6 +264,11 @@ pub fn files_mentioning<'a>(
     }
   }
   found
+}
+
+/// Whether `path` names the workspace root: `""`, `"."` or `"./"`.
+fn is_workspace_root(path: &Path) -> bool {
+  path.components().all(|c| c == Component::CurDir)
 }
 
 /// The contents of `path` (`len` bytes long), or `None` when it cannot be
@@ -441,7 +458,8 @@ mod tests {
   }
 
   /// Writes `files` under a fresh workspace and returns the paths
-  /// [`files_mentioning`] reports for `@acme/a` when scanning `roots`.
+  /// [`files_mentioning`] reports for `@acme/a` when scanning projects whose
+  /// sourceRoot is their root.
   fn mentioning(files: &[(&str, &str)], roots: &[&str]) -> Vec<String> {
     let files: Vec<(&str, &[u8])> = files.iter().map(|(p, c)| (*p, c.as_bytes())).collect();
     mentioning_bytes(&files, roots)
@@ -449,6 +467,12 @@ mod tests {
 
   /// [`mentioning`] for file contents that need not be UTF-8.
   fn mentioning_bytes(files: &[(&str, &[u8])], roots: &[&str]) -> Vec<String> {
+    let projects: Vec<(&str, &str)> = roots.iter().map(|root| (*root, *root)).collect();
+    mentioning_in_projects(files, &projects)
+  }
+
+  /// [`mentioning_bytes`] for `(root, sourceRoot)` pairs.
+  fn mentioning_in_projects(files: &[(&str, &[u8])], projects: &[(&str, &str)]) -> Vec<String> {
     let dir = tempfile::TempDir::new().unwrap();
     for (path, content) in files {
       let path = dir.path().join(path);
@@ -456,13 +480,15 @@ mod tests {
       std::fs::write(path, content).unwrap();
     }
     let aliases = vec![AliasPattern::new("@acme/a").unwrap()];
-    let mut found: Vec<String> =
-      files_mentioning(dir.path(), roots.iter().map(Path::new), &aliases, |path| {
-        path.extension().is_some_and(|e| e == "ts") && path.starts_with("src")
-      })
-      .into_iter()
-      .map(|(path, _)| path.to_string_lossy().replace('\\', "/"))
-      .collect();
+    let projects = projects
+      .iter()
+      .map(|(root, source_root)| (Path::new(*root), Path::new(*source_root)));
+    let mut found: Vec<String> = files_mentioning(dir.path(), projects, &aliases, |path| {
+      path.extension().is_some_and(|e| e == "ts") && path.starts_with("src")
+    })
+    .into_iter()
+    .map(|(path, _)| path.to_string_lossy().replace('\\', "/"))
+    .collect();
     found.sort();
     found
   }
@@ -489,6 +515,39 @@ mod tests {
     assert_eq!(
       mentioning(&files, &[".", "libs/lib-x"]),
       vec!["libs/lib-x/jest.config.ts"]
+    );
+  }
+
+  #[test]
+  fn a_workspace_root_project_is_scanned_through_its_source_root() {
+    let files: [(&str, &[u8]); 5] = [
+      ("jest.config.json", MENTION.as_bytes()),
+      ("tools/script.js", MENTION.as_bytes()),
+      ("src/App.vue", MENTION.as_bytes()),
+      ("src/main.ts", MENTION.as_bytes()),
+      ("src/libs/lib-z/jest.config.json", MENTION.as_bytes()),
+    ];
+
+    for root in [".", "", "./"] {
+      assert_eq!(
+        mentioning_in_projects(&files, &[(root, "src")]),
+        vec!["src/App.vue", "src/libs/lib-z/jest.config.json"],
+        "root {root:?}"
+      );
+      // A sourceRoot that is itself the workspace root is not walked either.
+      assert_eq!(
+        mentioning_in_projects(&files, &[(root, root)]),
+        Vec::<String>::new(),
+        "root {root:?}"
+      );
+    }
+    // A project nested under the sourceRoot is walked twice, reported once.
+    assert_eq!(
+      mentioning_in_projects(
+        &files,
+        &[("", "src"), ("src/libs/lib-z", "src/libs/lib-z/src")]
+      ),
+      vec!["src/App.vue", "src/libs/lib-z/jest.config.json"]
     );
   }
 
@@ -591,9 +650,10 @@ mod tests {
       AliasPattern::new("@acme/a").unwrap(),
       AliasPattern::new("@acme/b/*").unwrap(),
     ];
+    let lib_x = Path::new("libs/lib-x");
 
     let mut found: Vec<(String, Vec<&str>)> =
-      files_mentioning(dir.path(), [Path::new("libs/lib-x")], &aliases, |_| false)
+      files_mentioning(dir.path(), [(lib_x, lib_x)], &aliases, |_| false)
         .into_iter()
         .map(|(path, hits)| {
           (
@@ -610,7 +670,7 @@ mod tests {
         ("libs/lib-x/b.js".to_string(), vec!["@acme/b/*"]),
       ]
     );
-    assert!(files_mentioning(dir.path(), [Path::new("libs/lib-x")], &[], |_| false).is_empty());
+    assert!(files_mentioning(dir.path(), [(lib_x, lib_x)], &[], |_| false).is_empty());
   }
 
   #[test]

@@ -6487,6 +6487,55 @@ fn test_root_tsconfig_aliases_workspace_root_project() {
   );
 }
 
+/// A workspace-root project with sourceRoot `src` owns no top-level file, so
+/// it is affected only through a file under `src` mentioning the alias: here
+/// `src/App.vue`, which the analyzer does not parse. lib-x, nested under
+/// `src` without mentioning the alias, stays unaffected; lib-y, whose config
+/// mentions it, is affected.
+#[test]
+fn test_root_tsconfig_aliases_workspace_root_project_with_source_root() {
+  let tsconfig = |target: &str| {
+    format!(r#"{{ "compilerOptions": {{ "paths": {{ "@acme/a": ["{target}"] }} }} }}"#)
+  };
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  let mention = r#"{ "moduleNameMapper": { "@acme/a": "<rootDir>/libs/lib-a/src/index.ts" } }"#;
+  commit_files_on_main(
+    &repo,
+    &[
+      (
+        "project.json",
+        r#"{ "name": "workspace", "sourceRoot": "src" }"#,
+      ),
+      ("tsconfig.base.json", base.as_str()),
+      (A_OTHER, "export const a = 2;\n"),
+      ("src/main.ts", "export const main = 1;\n"),
+      (
+        "src/App.vue",
+        "<script setup lang=\"ts\">\nimport { a } from '@acme/a';\n</script>\n",
+      ),
+      (
+        "src/libs/lib-x/project.json",
+        r#"{ "name": "lib-x", "sourceRoot": "src/libs/lib-x/src" }"#,
+      ),
+      ("src/libs/lib-x/src/index.ts", "export const x = 1;\n"),
+      ("src/libs/lib-x/jest.config.json", r#"{ "preset": "jest" }"#),
+      (
+        "libs/lib-y/project.json",
+        r#"{ "name": "lib-y", "sourceRoot": "libs/lib-y/src" }"#,
+      ),
+      ("libs/lib-y/src/index.ts", "export const y = 1;\n"),
+      ("libs/lib-y/jest.config.json", mention),
+    ],
+  );
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-y", "workspace"])
+  );
+}
+
 /// Aliases is the default strategy.
 #[test]
 fn test_root_tsconfig_aliases_is_the_default() {

@@ -437,12 +437,17 @@ jobs:
           # example after the version commit failed). Reuse its version: bumping from
           # it would publish a duplicate. The claim below re-pushes the same tag, publish
           # skips what npm already has, and the version commit gets another try. If a
-          # newer release has shipped since, publishing would move `latest` backwards,
-          # so the release is skipped instead — without failing, since nothing is wrong.
+          # newer release has shipped since — or, with no tag on HEAD, the newest release
+          # is not an ancestor of HEAD — publishing would move `latest` backwards, so the
+          # release is skipped instead, without failing, since nothing is wrong.
           RERUN=$(node scripts/release-rerun.js)
           read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
           if [ "$RERUN_ACTION" = "superseded" ]; then
-            echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+            if [ "$RERUN_VERSION" = "-" ]; then
+              echo "::notice::HEAD is behind v${NEWEST_VERSION}, which is not an ancestor — skipping release"
+            else
+              echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+            fi
             echo "superseded=true" >> "$GITHUB_OUTPUT"
             echo "bump=none" >> "$GITHUB_OUTPUT"
             exit 0

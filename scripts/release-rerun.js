@@ -4,7 +4,11 @@
 // HEAD means it is: the newest one is reused instead of bumping from it, which would
 // publish a duplicate. An older one has been superseded by a later release, and
 // publishing it again would move npm's `latest` dist-tag backwards, so the job must
-// stop instead. Prints `<action> [version] [newest]` for the workflow to read.
+// stop instead. The same holds without a tag on HEAD: the newest release must be an
+// ancestor of HEAD, or HEAD is a stale commit (say, one whose run was cancelled while
+// queued) and bumping from its own last tag would publish a version below the newest.
+// Prints `<action> [version] [newest]` for the workflow to read, with `-` as the
+// version of a superseded HEAD that carries no release tag.
 
 const { execFileSync } = require('child_process')
 
@@ -54,24 +58,30 @@ function compareVersions(a, b) {
   return leftIds.length - rightIds.length
 }
 
-function newestVersion(tags) {
+function newestVersion(tags, { prereleases = true } = {}) {
   const versions = tags
     .map(parseTag)
-    .filter(Boolean)
+    .filter((tag) => tag && (prereleases || !tag.prerelease))
     .map((tag) => tag.version)
   return versions.sort(compareVersions).pop()
 }
 
-function decideRerun(headTags, allTags) {
+// `isAncestor(tag)` says whether the tag's commit is an ancestor of HEAD.
+function decideRerun(headTags, allTags, isAncestor) {
   const version = newestVersion(headTags)
-  if (!version) {
-    return { action: 'none' }
+  // A prerelease never supersedes a release, but one on HEAD competes with the
+  // prereleases that followed it.
+  const newest = newestVersion(allTags, { prereleases: Boolean(version && parseTag(`v${version}`).prerelease) })
+  if (version) {
+    if (compareVersions(version, newest) < 0) {
+      return { action: 'superseded', version, newest }
+    }
+    return { action: 'reuse', version }
   }
-  const newest = newestVersion(allTags)
-  if (compareVersions(version, newest) < 0) {
-    return { action: 'superseded', version, newest }
+  if (newest && !isAncestor(`v${newest}`)) {
+    return { action: 'superseded', newest }
   }
-  return { action: 'reuse', version }
+  return { action: 'none' }
 }
 
 function gitTags(...args) {
@@ -80,10 +90,24 @@ function gitTags(...args) {
     .filter(Boolean)
 }
 
+// `git merge-base --is-ancestor` exits 1 for "no"; any other failure is a real error.
+function isAncestorOfHead(tag) {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', `refs/tags/${tag}`, 'HEAD'], { stdio: 'ignore' })
+    return true
+  } catch (err) {
+    if (err.status === 1) {
+      return false
+    }
+    throw err
+  }
+}
+
 if (require.main === module) {
   try {
-    const { action, version = '', newest = '' } = decideRerun(gitTags('--points-at', 'HEAD'), gitTags())
-    console.log([action, version, newest].join(' ').trim())
+    const { action, version, newest = '' } = decideRerun(gitTags('--points-at', 'HEAD'), gitTags(), isAncestorOfHead)
+    const fields = action === 'superseded' ? [action, version || '-', newest] : [action, version || '']
+    console.log(fields.join(' ').trim())
   } catch (err) {
     console.error(err.message)
     process.exit(1)

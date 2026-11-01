@@ -18,6 +18,10 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use tracing::debug;
 
+/// How much of a file is read to reject one that is not UTF-8 before reading
+/// the rest.
+const CHUNK_BYTES: usize = 8 * 1024;
+
 /// A `compilerOptions.paths` key, compiled for matching import specifiers.
 #[derive(Debug)]
 pub struct AliasPattern {
@@ -64,6 +68,12 @@ impl AliasPattern {
     } else {
       specifier == self.prefix
     }
+  }
+
+  /// The literal text every mention contains: the whole key, or for a
+  /// `prefix/*` key everything up to and including `/`.
+  pub fn prefix(&self) -> &str {
+    &self.prefix
   }
 
   /// Whether `source` has a string literal holding a matching specifier. This
@@ -155,7 +165,9 @@ pub fn changed_aliases_between(
 /// root outside its analyzed source files: `jest.config.ts`, `.storybook/`,
 /// e2e folders, `.vue` files. `.gitignore` is honoured, `.git` and
 /// `node_modules` are never entered, and files over 2 MiB and files that are
-/// not UTF-8 are skipped.
+/// not UTF-8 are skipped. Most files in a project root are images, fonts and
+/// other files that cannot hold a mention, so a file is rejected as soon as
+/// its first chunk is not UTF-8, and only read in full otherwise.
 ///
 /// A workspace-root project (root `""`, `"."` or `"./"`) is not scanned:
 /// walking it would read the whole repository, every nested project is
@@ -181,6 +193,19 @@ pub fn files_mentioning<'a>(
     .into_iter()
     .filter(|root| !root.components().all(|c| c == Component::CurDir))
     .collect();
+  if aliases.is_empty() {
+    return Vec::new();
+  }
+  // Every mention contains its alias's prefix, so one byte search for any of
+  // them settles most files without decoding them.
+  let any_prefix = aliases
+    .iter()
+    .map(|a| regex::escape(a.prefix()))
+    .collect::<Vec<_>>()
+    .join("|");
+  let Ok(any_prefix) = regex::bytes::Regex::new(&any_prefix) else {
+    return Vec::new();
+  };
   let mut seen = BTreeSet::new();
   let mut found = Vec::new();
   for root in roots {
@@ -203,19 +228,51 @@ pub fn files_mentioning<'a>(
       if analyzed(relative) || !seen.insert(relative.to_path_buf()) {
         continue;
       }
-      if entry.metadata().map_or(true, |m| m.len() > MAX_FILE_BYTES) {
-        continue;
-      }
-      let Ok(text) = std::fs::read_to_string(entry.path()) else {
+      let Some(len) = entry
+        .metadata()
+        .ok()
+        .map(|m| m.len())
+        .filter(|&len| len <= MAX_FILE_BYTES)
+      else {
         continue;
       };
-      let mentioned: Vec<_> = aliases.iter().filter(|a| a.mentioned_in(&text)).collect();
+      let Some(bytes) = read_if_utf8_start(entry.path(), len) else {
+        continue;
+      };
+      if !any_prefix.is_match(&bytes) {
+        continue;
+      }
+      let Ok(text) = std::str::from_utf8(&bytes) else {
+        continue;
+      };
+      let mentioned: Vec<_> = aliases.iter().filter(|a| a.mentioned_in(text)).collect();
       if !mentioned.is_empty() {
         found.push((relative.to_path_buf(), mentioned));
       }
     }
   }
   found
+}
+
+/// The contents of `path` (`len` bytes long), or `None` when it cannot be
+/// read or its first [`CHUNK_BYTES`] are not UTF-8. The rest is not validated
+/// here.
+fn read_if_utf8_start(path: &Path, len: u64) -> Option<Vec<u8>> {
+  use std::io::Read;
+
+  let mut file = std::fs::File::open(path).ok()?;
+  let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?.saturating_add(1));
+  (&mut file)
+    .take(CHUNK_BYTES as u64)
+    .read_to_end(&mut bytes)
+    .ok()?;
+  // An error with no `error_len` is a character cut off at the chunk end,
+  // which the rest of the file may complete.
+  if std::str::from_utf8(&bytes).is_err_and(|e| e.error_len().is_some()) {
+    return None;
+  }
+  file.read_to_end(&mut bytes).ok()?;
+  Some(bytes)
 }
 
 /// tsconfig is JSONC: strip a byte-order mark, comments and trailing commas,
@@ -386,6 +443,12 @@ mod tests {
   /// Writes `files` under a fresh workspace and returns the paths
   /// [`files_mentioning`] reports for `@acme/a` when scanning `roots`.
   fn mentioning(files: &[(&str, &str)], roots: &[&str]) -> Vec<String> {
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(p, c)| (*p, c.as_bytes())).collect();
+    mentioning_bytes(&files, roots)
+  }
+
+  /// [`mentioning`] for file contents that need not be UTF-8.
+  fn mentioning_bytes(files: &[(&str, &[u8])], roots: &[&str]) -> Vec<String> {
     let dir = tempfile::TempDir::new().unwrap();
     for (path, content) in files {
       let path = dir.path().join(path);
@@ -456,6 +519,98 @@ mod tests {
       mentioning(&files, &["libs/lib-x"]),
       vec!["libs/lib-x/e2e/app.cy.js"]
     );
+  }
+
+  #[test]
+  fn binary_files_without_a_mention_are_skipped() {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend((0..=255u8).cycle().take(64 * 1024));
+    let files: [(&str, &[u8]); 2] = [
+      ("libs/lib-x/assets/logo.png", &png),
+      ("libs/lib-x/jest.config.js", MENTION.as_bytes()),
+    ];
+
+    assert_eq!(
+      mentioning_bytes(&files, &["libs/lib-x"]),
+      vec!["libs/lib-x/jest.config.js"]
+    );
+  }
+
+  #[test]
+  fn a_mention_in_a_file_that_is_not_utf8_is_skipped() {
+    let mut early = b"\xff\xfe".to_vec();
+    early.extend_from_slice(MENTION.as_bytes());
+    // Valid well past the first chunk read, invalid only at the end.
+    let mut late = MENTION.as_bytes().to_vec();
+    late.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    late.push(0xff);
+    let files: [(&str, &[u8]); 2] = [
+      ("libs/lib-x/early.js", &early),
+      ("libs/lib-x/late.js", &late),
+    ];
+
+    assert_eq!(
+      mentioning_bytes(&files, &["libs/lib-x"]),
+      Vec::<String>::new()
+    );
+  }
+
+  #[test]
+  fn a_character_split_across_chunk_reads_is_still_utf8() {
+    // Every boundary a 4-byte character can straddle near the chunk size.
+    let files: Vec<(String, Vec<u8>)> = (0..4)
+      .map(|shift| {
+        let mut content = vec![b'x'; CHUNK_BYTES - shift];
+        content.extend_from_slice("\u{1f600}".as_bytes());
+        content.extend_from_slice(MENTION.as_bytes());
+        (format!("libs/lib-x/file{shift}.js"), content)
+      })
+      .collect();
+    let files: Vec<(&str, &[u8])> = files
+      .iter()
+      .map(|(p, c)| (p.as_str(), c.as_slice()))
+      .collect();
+
+    assert_eq!(
+      mentioning_bytes(&files, &["libs/lib-x"]),
+      (0..4)
+        .map(|shift| format!("libs/lib-x/file{shift}.js"))
+        .collect::<Vec<_>>()
+    );
+  }
+
+  #[test]
+  fn each_file_reports_only_the_aliases_it_mentions() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let lib = dir.path().join("libs/lib-x");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("a.js"), "require('@acme/a');").unwrap();
+    std::fs::write(lib.join("b.js"), "require('@acme/b/x');").unwrap();
+    std::fs::write(lib.join("none.js"), "require('@acme/c');").unwrap();
+    let aliases = vec![
+      AliasPattern::new("@acme/a").unwrap(),
+      AliasPattern::new("@acme/b/*").unwrap(),
+    ];
+
+    let mut found: Vec<(String, Vec<&str>)> =
+      files_mentioning(dir.path(), [Path::new("libs/lib-x")], &aliases, |_| false)
+        .into_iter()
+        .map(|(path, hits)| {
+          (
+            path.to_string_lossy().replace('\\', "/"),
+            hits.iter().map(|a| a.alias.as_str()).collect(),
+          )
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+      found,
+      vec![
+        ("libs/lib-x/a.js".to_string(), vec!["@acme/a"]),
+        ("libs/lib-x/b.js".to_string(), vec!["@acme/b/*"]),
+      ]
+    );
+    assert!(files_mentioning(dir.path(), [Path::new("libs/lib-x")], &[], |_| false).is_empty());
   }
 
   #[test]

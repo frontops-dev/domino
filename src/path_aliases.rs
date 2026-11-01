@@ -164,10 +164,13 @@ pub fn changed_aliases_between(
 /// `cwd`, each with the aliases it mentions. Covers whatever lives in a project
 /// root outside its analyzed source files: `jest.config.ts`, `.storybook/`,
 /// e2e folders, `.vue` files. `.gitignore` is honoured, `.git` and
-/// `node_modules` are never entered, and files over 2 MiB and files that are
-/// not UTF-8 are skipped. Most files in a project root are images, fonts and
-/// other files that cannot hold a mention, so a file is rejected as soon as
-/// its first chunk is not UTF-8, and only read in full otherwise.
+/// `node_modules` are never entered, and files over 2 MiB and files whose
+/// first [`CHUNK_BYTES`] are not UTF-8 are skipped. Most files in a project
+/// root are images, fonts and other files that cannot hold a mention, so a
+/// file is rejected as soon as its first chunk is not UTF-8, and only read in
+/// full otherwise. Past that chunk, invalid bytes are replaced rather than
+/// rejected: a stray latin-1 byte must not hide a mention, and a miss costs
+/// more than an over-selection.
 ///
 /// `projects` are `(root, sourceRoot)` pairs. A project is scanned through
 /// its root, except a workspace-root project (root `""`, `"."` or `"./"`):
@@ -254,10 +257,8 @@ pub fn files_mentioning<'a>(
       if !any_prefix.is_match(&bytes) {
         continue;
       }
-      let Ok(text) = std::str::from_utf8(&bytes) else {
-        continue;
-      };
-      let mentioned: Vec<_> = aliases.iter().filter(|a| a.mentioned_in(text)).collect();
+      let text = String::from_utf8_lossy(&bytes);
+      let mentioned: Vec<_> = aliases.iter().filter(|a| a.mentioned_in(&text)).collect();
       if !mentioned.is_empty() {
         found.push((relative.to_path_buf(), mentioned));
       }
@@ -273,12 +274,14 @@ fn is_workspace_root(path: &Path) -> bool {
 
 /// The contents of `path` (`len` bytes long), or `None` when it cannot be
 /// read or its first [`CHUNK_BYTES`] are not UTF-8. The rest is not validated
-/// here.
+/// here. Only the first chunk is allocated until it passes, so a large binary
+/// is rejected without allocating its whole length.
 fn read_if_utf8_start(path: &Path, len: u64) -> Option<Vec<u8>> {
   use std::io::Read;
 
+  let len = usize::try_from(len).ok()?;
   let mut file = std::fs::File::open(path).ok()?;
-  let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?.saturating_add(1));
+  let mut bytes = Vec::with_capacity(CHUNK_BYTES.min(len.saturating_add(1)));
   (&mut file)
     .take(CHUNK_BYTES as u64)
     .read_to_end(&mut bytes)
@@ -288,6 +291,10 @@ fn read_if_utf8_start(path: &Path, len: u64) -> Option<Vec<u8>> {
   if std::str::from_utf8(&bytes).is_err_and(|e| e.error_len().is_some()) {
     return None;
   }
+  // `len` comes from metadata read earlier, so the file may have changed
+  // since; it only sizes the allocation. The extra byte spares the final read
+  // that finds the end of the file a reallocation.
+  bytes.reserve(len.saturating_sub(bytes.len()).saturating_add(1));
   file.read_to_end(&mut bytes).ok()?;
   Some(bytes)
 }
@@ -596,10 +603,11 @@ mod tests {
   }
 
   #[test]
-  fn a_mention_in_a_file_that_is_not_utf8_is_skipped() {
+  fn only_a_file_whose_first_chunk_is_not_utf8_is_skipped() {
     let mut early = b"\xff\xfe".to_vec();
     early.extend_from_slice(MENTION.as_bytes());
-    // Valid well past the first chunk read, invalid only at the end.
+    // Valid well past the first chunk read, invalid only at the end: a stray
+    // latin-1 byte in a source file, which must not hide its mention.
     let mut late = MENTION.as_bytes().to_vec();
     late.extend(std::iter::repeat_n(b'x', 64 * 1024));
     late.push(0xff);
@@ -610,7 +618,7 @@ mod tests {
 
     assert_eq!(
       mentioning_bytes(&files, &["libs/lib-x"]),
-      Vec::<String>::new()
+      vec!["libs/lib-x/late.js"]
     );
   }
 

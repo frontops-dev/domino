@@ -15,7 +15,7 @@ use crate::semantic::ROOT_TSCONFIG_FILE;
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::debug;
 
 /// A `compilerOptions.paths` key, compiled for matching import specifiers.
@@ -153,8 +153,14 @@ pub fn changed_aliases_between(
 /// Files the analyzer did not parse that mention a changed alias, relative to
 /// `cwd`, each with the aliases it mentions. Covers whatever lives in a project
 /// root outside its analyzed source files: `jest.config.ts`, `.storybook/`,
-/// e2e folders, `.vue` files. `.gitignore` is honoured; files over 2 MiB and
-/// files that are not UTF-8 are skipped.
+/// e2e folders, `.vue` files. `.gitignore` is honoured, `.git` and
+/// `node_modules` are never entered, and files over 2 MiB and files that are
+/// not UTF-8 are skipped.
+///
+/// A workspace-root project (root `""`, `"."` or `"./"`) is not scanned:
+/// walking it would read the whole repository, every nested project is
+/// scanned through its own root, and a hit in the root itself could never
+/// change the result (see the skip below).
 pub fn files_mentioning<'a>(
   cwd: &Path,
   project_roots: impl IntoIterator<Item = &'a Path>,
@@ -163,13 +169,29 @@ pub fn files_mentioning<'a>(
 ) -> Vec<(PathBuf, Vec<&'a AliasPattern>)> {
   const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
-  let roots: BTreeSet<&Path> = project_roots.into_iter().collect();
+  // Skip the workspace root (`""`, `"."` or `"./"`). A hit there is owned
+  // like a direct edit to that file, and that never adds a project:
+  // - a root project with a sourceRoot (`src`) owns no top-level file, since
+  //   ProjectIndex keeps workspace roots out of its root fallback;
+  // - one with sourceRoot `.` owns nothing, as no relative path starts with
+  //   a `.` component;
+  // - one without a sourceRoot (`""`) owns every path, so it already owns the
+  //   changed `tsconfig.base.json` that put us here.
+  let roots: BTreeSet<&Path> = project_roots
+    .into_iter()
+    .filter(|root| !root.components().all(|c| c == Component::CurDir))
+    .collect();
   let mut seen = BTreeSet::new();
   let mut found = Vec::new();
   for root in roots {
+    // Hidden entries stay in (`.storybook/`), but `.git` holds git's own
+    // data, not project files, and the ignore crate only skips it while
+    // hidden entries are skipped. `node_modules` is third-party code, pruned
+    // even where it is not gitignored, as the analyzer prunes it.
     let walker = ignore::WalkBuilder::new(cwd.join(root))
       .hidden(false)
       .require_git(false)
+      .filter_entry(|entry| !matches!(entry.file_name().to_str(), Some(".git" | "node_modules")))
       .build();
     for entry in walker.flatten() {
       if !entry.file_type().is_some_and(|t| t.is_file()) {
@@ -359,6 +381,81 @@ mod tests {
     assert!(pattern.mentioned_in("import '@acme/a/polyfill';"));
     assert!(!pattern.mentioned_in("import '@acme/a';"));
     assert!(!pattern.mentioned_in("import '@acme/a/';"));
+  }
+
+  /// Writes `files` under a fresh workspace and returns the paths
+  /// [`files_mentioning`] reports for `@acme/a` when scanning `roots`.
+  fn mentioning(files: &[(&str, &str)], roots: &[&str]) -> Vec<String> {
+    let dir = tempfile::TempDir::new().unwrap();
+    for (path, content) in files {
+      let path = dir.path().join(path);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, content).unwrap();
+    }
+    let aliases = vec![AliasPattern::new("@acme/a").unwrap()];
+    let mut found: Vec<String> =
+      files_mentioning(dir.path(), roots.iter().map(Path::new), &aliases, |path| {
+        path.extension().is_some_and(|e| e == "ts") && path.starts_with("src")
+      })
+      .into_iter()
+      .map(|(path, _)| path.to_string_lossy().replace('\\', "/"))
+      .collect();
+    found.sort();
+    found
+  }
+
+  const MENTION: &str = "require('@acme/a');\n";
+
+  #[test]
+  fn a_workspace_root_project_is_not_scanned() {
+    let files = [
+      ("jest.config.ts", MENTION),
+      ("src/main.ts", MENTION),
+      ("libs/lib-x/jest.config.ts", MENTION),
+      ("tools/script.js", MENTION),
+    ];
+
+    for root in [".", "", "./"] {
+      assert_eq!(
+        mentioning(&files, &[root]),
+        Vec::<String>::new(),
+        "root {root:?}"
+      );
+    }
+    // A nested project's files are found through its own root.
+    assert_eq!(
+      mentioning(&files, &[".", "libs/lib-x"]),
+      vec!["libs/lib-x/jest.config.ts"]
+    );
+  }
+
+  #[test]
+  fn git_directories_are_never_scanned() {
+    let files = [
+      (".git/HEAD", MENTION),
+      (".git/logs/HEAD", MENTION),
+      ("libs/lib-x/.git/HEAD", MENTION),
+      ("libs/lib-x/.storybook/main.js", MENTION),
+    ];
+
+    assert_eq!(
+      mentioning(&files, &[".", "libs/lib-x"]),
+      vec!["libs/lib-x/.storybook/main.js"]
+    );
+  }
+
+  #[test]
+  fn node_modules_is_never_scanned() {
+    let files = [
+      ("node_modules/dep/index.js", MENTION),
+      ("libs/lib-x/node_modules/dep/index.js", MENTION),
+      ("libs/lib-x/e2e/app.cy.js", MENTION),
+    ];
+
+    assert_eq!(
+      mentioning(&files, &["libs/lib-x"]),
+      vec!["libs/lib-x/e2e/app.cy.js"]
+    );
   }
 
   #[test]

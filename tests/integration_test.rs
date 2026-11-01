@@ -6443,6 +6443,50 @@ fn test_root_tsconfig_aliases_changed_target() {
   );
 }
 
+/// A workspace-root project with no sourceRoot owns every path, so it is
+/// affected through the changed `tsconfig.base.json` it owns; its root is not
+/// scanned, and its top-level config mentioning the alias changes nothing.
+/// Nested projects are judged by their own roots: lib-y, whose non-analyzed
+/// config mentions the alias, is affected; lib-x, which never mentions it, is
+/// not.
+#[test]
+fn test_root_tsconfig_aliases_workspace_root_project() {
+  let tsconfig = |target: &str| {
+    format!(r#"{{ "compilerOptions": {{ "paths": {{ "@acme/a": ["{target}"] }} }} }}"#)
+  };
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  // JSON configs, which the analyzer does not parse, so only the scan sees them.
+  let mention = r#"{ "moduleNameMapper": { "@acme/a": "<rootDir>/libs/lib-a/src/index.ts" } }"#;
+  commit_files_on_main(
+    &repo,
+    &[
+      ("project.json", r#"{ "name": "workspace" }"#),
+      ("tsconfig.base.json", base.as_str()),
+      ("jest.config.json", mention),
+      (A_OTHER, "export const a = 2;\n"),
+      (
+        "libs/lib-x/project.json",
+        r#"{ "name": "lib-x", "sourceRoot": "libs/lib-x/src" }"#,
+      ),
+      ("libs/lib-x/src/index.ts", "export const x = 1;\n"),
+      ("libs/lib-x/jest.config.json", r#"{ "preset": "jest" }"#),
+      (
+        "libs/lib-y/project.json",
+        r#"{ "name": "lib-y", "sourceRoot": "libs/lib-y/src" }"#,
+      ),
+      ("libs/lib-y/src/index.ts", "export const y = 1;\n"),
+      ("libs/lib-y/jest.config.json", mention),
+    ],
+  );
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-y", "workspace"])
+  );
+}
+
 /// Aliases is the default strategy.
 #[test]
 fn test_root_tsconfig_aliases_is_the_default() {

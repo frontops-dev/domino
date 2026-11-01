@@ -2006,7 +2006,8 @@ fn generate_details_html(report: &AffectedReport) -> String {
         }
         AffectCause::TsconfigPathAlias {
           alias,
-          importing_file,
+          importing_files,
+          file_count,
         } => {
           html.push_str("<span class=\"cause-type lockfile\">Path Alias Change</span>");
           html.push_str("<div class=\"cause-details\">");
@@ -2014,10 +2015,20 @@ fn generate_details_html(report: &AffectedReport) -> String {
             "Alias: <span class=\"symbol\">{}</span> in tsconfig.base.json<br/>",
             html_escape(alias)
           ));
-          html.push_str(&format!(
-            "Used in: <span class=\"code-path\">{}</span>",
-            html_escape(&importing_file.display().to_string())
-          ));
+          let listed: Vec<String> = importing_files
+            .iter()
+            .map(|file| {
+              format!(
+                "<span class=\"code-path\">{}</span>",
+                html_escape(&file.display().to_string())
+              )
+            })
+            .collect();
+          html.push_str(&format!("Used in: {}", listed.join(", ")));
+          let unlisted = file_count.saturating_sub(importing_files.len());
+          if unlisted > 0 {
+            html.push_str(&format!(" and {unlisted} more"));
+          }
           html.push_str("</div>");
         }
         AffectCause::GlobalInvalidation { file, named_input } => {
@@ -2603,6 +2614,34 @@ mod tests {
     let html = generate_html(&synth_normal_report());
     assert!(html.contains("https://github.com/frontops-dev/domino/issues"));
     assert!(html.contains("https://github.com/frontops-dev/domino/blob/main/LICENSE"));
+  }
+
+  #[test]
+  fn path_alias_cause_lists_its_files_escaped_and_counts_the_rest() {
+    let report = AffectedReport {
+      projects: vec![make_project(
+        "app-client",
+        vec![AffectCause::TsconfigPathAlias {
+          alias: "@acme/<ui>".to_string(),
+          importing_files: vec![
+            PathBuf::from("apps/client/src/a&b.ts"),
+            PathBuf::from("apps/client/src/main.ts"),
+          ],
+          file_count: 9,
+        }],
+      )],
+      global_triggers: Vec::new(),
+      totals: empty_totals(),
+      version: env!("CARGO_PKG_VERSION"),
+      run_started_at_unix_secs: synth_recent_timestamp(),
+    };
+    let html = generate_html(&report);
+
+    assert!(html.contains("@acme/&lt;ui&gt;"));
+    assert!(html.contains(
+      "Used in: <span class=\"code-path\">apps/client/src/a&amp;b.ts</span>, \
+       <span class=\"code-path\">apps/client/src/main.ts</span> and 7 more"
+    ));
   }
 
   #[test]

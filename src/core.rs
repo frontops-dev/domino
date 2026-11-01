@@ -13,6 +13,7 @@ use crate::types::{
 use crate::utils::{self, ProjectIndex};
 use oxc_ast::AstKind;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -718,6 +719,10 @@ fn find_affected_internal(
   // A mention that is neither (require(), import(), a side-effect import) has
   // no binding to follow, so every export of that file is traced instead.
   if !changed_aliases.is_empty() {
+    // Report users per (project, alias), so a widely used alias yields one
+    // cause per project rather than one per file.
+    let mut alias_users: Option<FxHashMap<(String, String), BTreeSet<PathBuf>>> =
+      generate_report.then(FxHashMap::default);
     // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
     // marked, not traced.
     let project_roots = config.projects.iter().map(|p| p.root.as_path());
@@ -731,7 +736,7 @@ fn find_affected_internal(
         &file_path,
         &mentioned,
         &mut affected_packages,
-        generate_report.then_some(&mut project_causes),
+        alias_users.as_mut(),
       );
     }
 
@@ -752,7 +757,7 @@ fn find_affected_internal(
         file_path,
         &mentioned,
         &mut affected_packages,
-        generate_report.then_some(&mut project_causes),
+        alias_users.as_mut(),
       );
 
       let uses_alias = |specifier: &str| mentioned.iter().any(|alias| alias.matches(specifier));
@@ -852,6 +857,20 @@ fn find_affected_internal(
         }
       }
     }
+
+    for ((project, alias), files) in alias_users.into_iter().flatten() {
+      project_causes
+        .entry(project)
+        .or_default()
+        .push(AffectCause::TsconfigPathAlias {
+          alias,
+          file_count: files.len(),
+          importing_files: files
+            .into_iter()
+            .take(MAX_PATH_ALIAS_FILES_LISTED)
+            .collect(),
+        });
+    }
   }
 
   // Step 6: Add implicit dependencies
@@ -949,27 +968,29 @@ fn find_affected_internal(
   })
 }
 
+/// Most files a [`AffectCause::TsconfigPathAlias`] lists; the rest are only
+/// counted, so an alias used across a large project keeps the report small.
+pub const MAX_PATH_ALIAS_FILES_LISTED: usize = 5;
+
 /// Mark the projects owning `file_path`, which uses the `mentioned` changed path
 /// aliases. Its imports now resolve elsewhere, so it counts as changed and the
-/// unfiltered (direct-change) ownership lookup applies.
+/// unfiltered (direct-change) ownership lookup applies. When reporting, the file
+/// is collected under each (owning project, alias) in `alias_users`.
 fn mark_path_alias_user(
   project_index: &ProjectIndex,
   file_path: &Path,
   mentioned: &[&path_aliases::AliasPattern],
   affected_packages: &mut FxHashSet<String>,
-  project_causes: Option<&mut FxHashMap<String, Vec<AffectCause>>>,
+  alias_users: Option<&mut FxHashMap<(String, String), BTreeSet<PathBuf>>>,
 ) {
   let owners = project_index.get_owning_packages_by_path(file_path);
-  if let Some(causes) = project_causes {
+  if let Some(users) = alias_users {
     for pkg in &owners {
       for alias in mentioned {
-        causes
-          .entry(pkg.clone())
+        users
+          .entry((pkg.clone(), alias.alias.clone()))
           .or_default()
-          .push(AffectCause::TsconfigPathAlias {
-            alias: alias.alias.clone(),
-            importing_file: file_path.to_path_buf(),
-          });
+          .insert(file_path.to_path_buf());
       }
     }
   }

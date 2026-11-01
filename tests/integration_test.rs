@@ -1,10 +1,10 @@
 mod common;
 
-use domino::core::{find_affected, find_affected_with_report};
+use domino::core::{find_affected, find_affected_with_report, MAX_PATH_ALIAS_FILES_LISTED};
 use domino::profiler::Profiler;
 use domino::report::generate_html_report;
 use domino::types::{
-  AffectCause, LockfileStrategy, Project, RootTsconfigStrategy, TrueAffectedConfig,
+  AffectCause, AffectedReport, LockfileStrategy, Project, RootTsconfigStrategy, TrueAffectedConfig,
 };
 use domino::workspace;
 use std::fs;
@@ -6805,13 +6805,8 @@ fn test_root_tsconfig_all_and_none_strategies() {
   );
 }
 
-/// The report names the alias and the file that uses it, and records no global
-/// trigger.
-#[test]
-fn test_root_tsconfig_aliases_report() {
-  let repo = alias_repo();
-  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
-
+/// Report for `repo` under the `aliases` root-tsconfig strategy.
+fn alias_strategy_report(repo: &TempNxRepo) -> AffectedReport {
   let config = TrueAffectedConfig {
     cwd: repo.root().to_path_buf(),
     base: "main".to_string(),
@@ -6820,10 +6815,20 @@ fn test_root_tsconfig_aliases_report() {
     lockfile_strategy: LockfileStrategy::None,
     root_tsconfig_strategy: RootTsconfigStrategy::Aliases,
   };
-  let report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
+  find_affected_with_report(config, Arc::new(Profiler::new(false)))
     .expect("find_affected_with_report failed")
     .report
-    .expect("expected a report");
+    .expect("expected a report")
+}
+
+/// The report names the alias and the file that uses it, and records no global
+/// trigger.
+#[test]
+fn test_root_tsconfig_aliases_report() {
+  let repo = alias_repo();
+  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
+
+  let report = alias_strategy_report(&repo);
 
   assert!(report.global_triggers.is_empty());
   let lib_b = report
@@ -6834,11 +6839,83 @@ fn test_root_tsconfig_aliases_report() {
   assert!(
     lib_b.causes.iter().any(|cause| matches!(
       cause,
-      AffectCause::TsconfigPathAlias { alias, importing_file }
-        if alias == "@acme/a" && importing_file == std::path::Path::new("libs/lib-b/src/index.ts")
+      AffectCause::TsconfigPathAlias { alias, importing_files, file_count }
+        if alias == "@acme/a"
+          && importing_files == &[PathBuf::from("libs/lib-b/src/index.ts")]
+          && *file_count == 1
     )),
     "causes: {:?}",
     lib_b.causes
+  );
+}
+
+/// Many files of one project using the same changed alias give one report
+/// entry for that project and alias; a second alias gets its own entry.
+#[test]
+fn test_root_tsconfig_aliases_report_one_entry_per_project_and_alias() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let tsconfig = |a_target: &str, z_target: &str| {
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ "@acme/a": ["{a_target}"], "@acme/z": ["{z_target}"] }} }} }}"#
+    )
+  };
+  let base = tsconfig(A_INDEX, "libs/lib-a/src/z.ts");
+  let users: Vec<(String, String)> = (0..8)
+    .map(|i| {
+      (
+        format!("libs/lib-b/src/user-{i}.ts"),
+        format!("import {{ a }} from '@acme/a';\n\nexport const user{i} = a;\n"),
+      )
+    })
+    .collect();
+  let mut files: Vec<(&str, &str)> = users
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\nexport const z = 2;\n"),
+    ("libs/lib-a/src/z.ts", "export const z = 1;\n"),
+    (
+      "libs/lib-b/src/z-user.ts",
+      "import { z } from '@acme/z';\n\nexport const zUser = z;\n",
+    ),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER, A_OTHER));
+
+  let report = alias_strategy_report(&repo);
+  let lib_b = report
+    .projects
+    .iter()
+    .find(|p| p.name == "lib-b")
+    .expect("lib-b should be affected");
+  let entries_for = |wanted: &str| -> Vec<&AffectCause> {
+    lib_b
+      .causes
+      .iter()
+      .filter(
+        |cause| matches!(cause, AffectCause::TsconfigPathAlias { alias, .. } if alias == wanted),
+      )
+      .collect()
+  };
+
+  let user = |i: usize| PathBuf::from(format!("libs/lib-b/src/user-{i}.ts"));
+  assert_eq!(
+    entries_for("@acme/a"),
+    [&AffectCause::TsconfigPathAlias {
+      alias: "@acme/a".to_string(),
+      importing_files: (0..MAX_PATH_ALIAS_FILES_LISTED).map(user).collect(),
+      file_count: 8,
+    }],
+  );
+  assert_eq!(
+    entries_for("@acme/z"),
+    [&AffectCause::TsconfigPathAlias {
+      alias: "@acme/z".to_string(),
+      importing_files: vec![PathBuf::from("libs/lib-b/src/z-user.ts")],
+      file_count: 1,
+    }],
   );
 }
 

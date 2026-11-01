@@ -345,8 +345,11 @@ pub enum AffectCause {
   TsconfigPathAlias {
     /// The alias key as written in `compilerOptions.paths`
     alias: String,
-    /// Source file that uses the alias
-    importing_file: PathBuf,
+    /// The project's files that use the alias, sorted, capped at
+    /// `core::MAX_PATH_ALIAS_FILES_LISTED`
+    importing_files: Vec<PathBuf>,
+    /// How many of the project's files use the alias, listed or not
+    file_count: usize,
   },
   /// Global invalidation via Nx namedInputs (e.g., sharedGlobals)
   #[serde(rename = "global_invalidation")]

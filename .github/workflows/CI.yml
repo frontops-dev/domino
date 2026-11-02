@@ -51,6 +51,12 @@ jobs:
         run: cargo clippy
       - name: Test publish-preview script
         run: node --test tests/publish-preview.test.js
+      - name: Test version sync script
+        run: node --test tests/sync-version.test.js
+      - name: Test release re-run script
+        run: node --test tests/release-rerun.test.js
+      - name: Test npm propagation wait script
+        run: node --test tests/wait-for-npm.test.js
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -422,10 +428,46 @@ jobs:
           if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
             echo "Current commit is a version commit, skipping bump"
             echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "bump=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "is_release=false" >> $GITHUB_OUTPUT
+
+          # A release tag already on HEAD means this is a re-run of that release (for
+          # example after the version commit failed). Reuse its version: bumping from
+          # it would publish a duplicate. The claim below re-pushes the same tag, publish
+          # skips what npm already has, and the version commit gets another try. If a
+          # newer release has shipped since — or, with no tag on HEAD, the newest release
+          # is not an ancestor of HEAD — publishing would move `latest` backwards, so the
+          # release is skipped instead, without failing, since nothing is wrong.
+          RERUN=$(node scripts/release-rerun.js)
+          read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
+          # Anything but the three known actions (empty output included) stops the
+          # step: falling through to a normal bump could publish a duplicate release.
+          case "$RERUN_ACTION" in
+            superseded)
+              if [ "$RERUN_VERSION" = "-" ]; then
+                echo "::notice::HEAD is behind v${NEWEST_VERSION}, which is not an ancestor — skipping release"
+              else
+                echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+              fi
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              echo "bump=none" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            reuse)
+              echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
+              echo "bump=rerun" >> "$GITHUB_OUTPUT"
+              echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            none) ;;
+            *)
+              echo "::error::unexpected release-rerun output: $RERUN"
+              exit 1
+              ;;
+          esac
 
           LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
@@ -490,16 +532,16 @@ jobs:
           echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
       - name: Bump version
         id: bump
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
         run: |
           npm version ${{ steps.version.outputs.next_version }} --no-git-tag-version --ignore-scripts --allow-same-version
-          node scripts/sync-cargo-version.js
+          node scripts/sync-version.js
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
       - name: Claim version
         id: claim
-        if: steps.version.outputs.is_release != 'true'
+        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
         run: |
           TAG="v${{ steps.bump.outputs.new_version }}"
           # Compare-and-swap on the tag: creating a remote ref is atomic and reversible,
@@ -544,23 +586,32 @@ jobs:
           # generate-packages.js bumps optionalDependencies to the new version — refresh lockfile
           # so CI (yarn install --frozen-lockfile) does not fail on the version commit.
           # Yarn defaults to immutable installs on CI, so allow lockfile updates here.
-          # Retry yarn install to handle npm registry propagation delay after publish.
-          MAX_ATTEMPTS=24
-          SLEEP_SECONDS=15
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
-              break
-            fi
-            if [ $attempt -lt $MAX_ATTEMPTS ]; then
-              echo "yarn install attempt $attempt failed, retrying in ${SLEEP_SECONDS}s..."
-              sleep $SLEEP_SECONDS
-            else
-              echo "::error::yarn install failed after $MAX_ATTEMPTS attempts over $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
-              echo "::error::Registry propagation may still be incomplete or there is a configuration issue"
-              exit 1
-            fi
-          done
-          git add package.json Cargo.toml yarn.lock
+          # The platform packages just published take a while to appear on the registry
+          # (2.0.5 took about 11 minutes, 2.1.0's darwin-arm64 about 7), and yarn install
+          # fails until they do. Poll for each one — up to 20 minutes, failing at once on
+          # errors that are not propagation — then install. npm view seeing a package does
+          # not prove yarn does: the registry CDN caches each Accept variant separately, so
+          # the install still gets a few tries.
+          INSTALLED=false
+          if node scripts/wait-for-npm.js; then
+            for i in 1 2 3; do
+              if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+                INSTALLED=true
+                break
+              fi
+              if [ "$i" -lt 3 ]; then
+                echo "yarn install attempt $i failed — retrying in 30s"
+                sleep 30
+              else
+                echo "yarn install attempt $i failed — giving up"
+              fi
+            done
+          fi
+          if [ "$INSTALLED" != "true" ]; then
+            echo "::error::The release is published and tagged; re-run this job to push the version commit"
+            exit 1
+          fi
+          git add package.json Cargo.toml index.js yarn.lock
           git commit -m "${{ steps.bump.outputs.new_version }}"
           # The tag was already pushed to claim the version, so only the commit is left.
           # A feature commit can land on main while we publish, so rebase and retry.

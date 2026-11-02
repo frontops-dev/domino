@@ -579,8 +579,23 @@ jobs:
           # The platform packages just published take a while to appear on the registry
           # (2.0.5 took about 11 minutes, 2.1.0's darwin-arm64 about 7), and yarn install
           # fails until they do. Poll for each one — up to 20 minutes, failing at once on
-          # errors that are not propagation — then install once.
-          if ! node scripts/wait-for-npm.js || ! YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+          # errors that are not propagation — then install. npm view seeing a package does
+          # not prove yarn does: the registry CDN caches each Accept variant separately, so
+          # the install still gets a few tries.
+          INSTALLED=false
+          if node scripts/wait-for-npm.js; then
+            for i in 1 2 3; do
+              if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
+                INSTALLED=true
+                break
+              fi
+              if [ "$i" -lt 3 ]; then
+                echo "yarn install attempt $i failed — retrying in 30s"
+                sleep 30
+              fi
+            done
+          fi
+          if [ "$INSTALLED" != "true" ]; then
             echo "::error::The release is published and tagged; re-run this job to push the version commit"
             exit 1
           fi

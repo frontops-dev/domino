@@ -57,6 +57,8 @@ jobs:
         run: node --test tests/release-rerun.test.js
       - name: Test npm propagation wait script
         run: node --test tests/wait-for-npm.test.js
+      - name: Test binary version check script
+        run: node --test tests/check-binary-version.test.js
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -115,6 +117,157 @@ jobs:
           fi
 
           echo "PR title is valid: $TITLE"
+  release-version:
+    name: Release version
+    # Decides the release version before anything is compiled. The version is built
+    # into the binaries (`CARGO_PKG_VERSION`: --version, the JSON output and report
+    # headers), so building first and bumping in publish shipped every release with
+    # the previous release's version. This job always runs, since build needs it;
+    # release=false means nothing will be published: a pull request, `[skip release]`,
+    # a version commit or a superseded re-run.
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      next_version: ${{ steps.version.outputs.next_version }}
+      bump: ${{ steps.version.outputs.bump }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Determine version bump
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "Not a push to main, nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # `[skip release]` anywhere in the pushed commit's message skips publishing but
+          # still runs the full build and test matrix. The next unmarked push releases the
+          # skipped commits too: the bump reads every commit subject since the last tag.
+          if [[ "$HEAD_COMMIT_MESSAGE" == *"[skip release]"* ]]; then
+            echo "[skip release] in the commit message, nothing to release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --force --tags origin main
+
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+
+          if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
+            echo "Current commit is a version commit, skipping bump"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A release tag already on HEAD means this is a re-run of that release (for
+          # example after the version commit failed). Reuse its version: bumping from
+          # it would publish a duplicate. The publish job's claim re-pushes the same tag,
+          # npm publish skips what is already there, and the version commit gets another
+          # try. If a
+          # newer release has shipped since — or, with no tag on HEAD, the newest release
+          # is not an ancestor of HEAD — publishing would move `latest` backwards, so the
+          # release is skipped instead, without failing, since nothing is wrong.
+          RERUN=$(node scripts/release-rerun.js)
+          read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
+          # Anything but the three known actions (empty output included) stops the
+          # step: falling through to a normal bump could publish a duplicate release.
+          case "$RERUN_ACTION" in
+            superseded)
+              if [ "$RERUN_VERSION" = "-" ]; then
+                echo "::notice::HEAD is behind v${NEWEST_VERSION}, which is not an ancestor — skipping release"
+              else
+                echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+              fi
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              echo "bump=none" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            reuse)
+              echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              echo "bump=rerun" >> "$GITHUB_OUTPUT"
+              echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            none) ;;
+            *)
+              echo "::error::unexpected release-rerun output: $RERUN"
+              exit 1
+              ;;
+          esac
+
+          LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*" 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tags found, using all commits"
+            SUBJECTS=$(git log --format="%s" --no-merges)
+            BODIES=$(git log --format="%b" --no-merges)
+          else
+            echo "Last tag: $LAST_TAG"
+            SUBJECTS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
+            BODIES=$(git log "${LAST_TAG}..HEAD" --format="%b" --no-merges)
+          fi
+
+          echo "=== Commits since last tag ==="
+          echo "$SUBJECTS"
+          echo "=== End commits ==="
+
+          BUMP="patch"
+          BUMP_REASON="default (no feat: or breaking changes detected)"
+
+          if echo "$SUBJECTS" | grep -qE "^[a-z]+(\(.+\))?!:"; then
+            BUMP="major"
+            BREAKING_SUBJECT=$(echo "$SUBJECTS" | grep -E "^[a-z]+(\(.+\))?!:" | head -1)
+            BUMP_REASON="breaking change in commit subject: ${BREAKING_SUBJECT}"
+          elif echo "$BODIES" | grep -qE "^BREAKING[ -]CHANGE:"; then
+            BUMP="major"
+            BUMP_REASON="BREAKING CHANGE footer found in commit body"
+          elif echo "$SUBJECTS" | grep -qE "^feat(\(.+\))?:"; then
+            BUMP="minor"
+            BUMP_REASON="feat: commit detected"
+          fi
+
+          echo ""
+          echo "##################################################"
+          echo "# Version bump: $BUMP"
+          echo "# Reason: $BUMP_REASON"
+          echo "##################################################"
+
+          if [ "$BUMP" = "major" ]; then
+            CURRENT_VERSION=$(node -p "require('./package.json').version")
+            NEXT_MAJOR=$((${CURRENT_VERSION%%.*} + 1)).0.0
+            echo ""
+            echo "::warning::MAJOR version bump detected: ${CURRENT_VERSION} → ${NEXT_MAJOR}"
+            echo "::warning::Triggered by: ${BUMP_REASON}"
+            echo "::warning::If this is unintentional, check commit messages for accidental '!:' suffix or 'BREAKING CHANGE:' footer"
+          fi
+
+          # Bump from the last tag rather than from package.json: a queued run's checkout
+          # can still carry the pre-bump version even though a release already happened.
+          BASE_VERSION="${LAST_TAG#v}"
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION=$(node -p "require('./package.json').version")
+          fi
+          NEXT_VERSION=$(node -e 'const [b,t]=process.argv.slice(1);const [x,y,z]=b.split(".").map(Number);console.log(t==="major"?`${x+1}.0.0`:t==="minor"?`${x}.${y+1}.0`:`${x}.${y}.${z+1}`)' "$BASE_VERSION" "$BUMP")
+
+          echo "Next version: $BASE_VERSION -> $NEXT_VERSION"
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
   build:
     strategy:
       fail-fast: false
@@ -142,6 +295,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             build: yarn build --target aarch64-unknown-linux-gnu --use-napi-cross
     name: stable - ${{ matrix.settings.target }} - node@22
+    needs: release-version
     runs-on: ${{ matrix.settings.host }}
     steps:
       - uses: actions/checkout@v6
@@ -208,6 +362,13 @@ jobs:
           sudo apt-get install -y build-essential pkg-config perl
       - name: Install dependencies
         run: yarn install --frozen-lockfile
+      # Before both builds: the addon and the CLI binary each compile the version in.
+      - name: Set release version
+        if: needs.release-version.outputs.release == 'true'
+        run: |
+          npm version "${{ needs.release-version.outputs.next_version }}" --no-git-tag-version --ignore-scripts --allow-same-version
+          node scripts/sync-version.js
+        shell: bash
       - name: Build native addon
         env:
           PKG_CONFIG_ALLOW_CROSS: 1
@@ -380,10 +541,8 @@ jobs:
           path: pr-metadata.json
   publish:
     name: Publish
-    # `[skip release]` anywhere in the pushed commit's message skips publishing but
-    # still runs the full build and test matrix. The next unmarked push releases the
-    # skipped commits too: the bump reads every commit subject since the last tag.
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip release]')
+    # The release-version job decides whether and what to release; see there.
+    if: github.event_name == 'push' && needs.release-version.outputs.release == 'true'
     runs-on: ubuntu-latest
     # Main-branch runs are no longer cancelled, so several can be in flight at once.
     # Releases must still happen one at a time: queue publishes instead of overlapping
@@ -395,6 +554,7 @@ jobs:
       contents: write
       id-token: write
     needs:
+      - release-version
       - lint
       - test
       - test-macOS-windows-binding
@@ -416,35 +576,18 @@ jobs:
         uses: actions/download-artifact@v6
         with:
           path: artifacts
-      - name: Determine version bump
+      - name: Confirm release version
         id: version
+        env:
+          PLANNED_VERSION: ${{ needs.release-version.outputs.next_version }}
         run: |
-          # Re-fetch tags: this checkout was made when the job was queued, so it can
-          # predate a tag an earlier main-branch run pushed while we were waiting.
+          # Re-fetch tags: this job is queued behind earlier releases, so one may have
+          # shipped since release-version decided the version the binaries were built with.
           git fetch --force --tags origin main
-
-          COMMIT_MSG=$(git log -1 --pretty=%s)
-
-          if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
-            echo "Current commit is a version commit, skipping bump"
-            echo "is_release=true" >> $GITHUB_OUTPUT
-            echo "bump=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "is_release=false" >> $GITHUB_OUTPUT
-
-          # A release tag already on HEAD means this is a re-run of that release (for
-          # example after the version commit failed). Reuse its version: bumping from
-          # it would publish a duplicate. The claim below re-pushes the same tag, publish
-          # skips what npm already has, and the version commit gets another try. If a
-          # newer release has shipped since — or, with no tag on HEAD, the newest release
-          # is not an ancestor of HEAD — publishing would move `latest` backwards, so the
-          # release is skipped instead, without failing, since nothing is wrong.
+          # Check again here, where releases run one at a time: a newer release may now
+          # supersede this commit, and publishing it would move `latest` backwards.
           RERUN=$(node scripts/release-rerun.js)
           read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
-          # Anything but the three known actions (empty output included) stops the
-          # step: falling through to a normal bump could publish a duplicate release.
           case "$RERUN_ACTION" in
             superseded)
               if [ "$RERUN_VERSION" = "-" ]; then
@@ -453,14 +596,13 @@ jobs:
                 echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
               fi
               echo "superseded=true" >> "$GITHUB_OUTPUT"
-              echo "bump=none" >> "$GITHUB_OUTPUT"
               exit 0
               ;;
             reuse)
-              echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
-              echo "bump=rerun" >> "$GITHUB_OUTPUT"
-              echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
-              exit 0
+              if [ "$RERUN_VERSION" != "$PLANNED_VERSION" ]; then
+                echo "::error::HEAD was released as v${RERUN_VERSION}, but the binaries were built for v${PLANNED_VERSION}; use \"Re-run all jobs\""
+                exit 1
+              fi
               ;;
             none) ;;
             *)
@@ -468,80 +610,32 @@ jobs:
               exit 1
               ;;
           esac
-
-          LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            LAST_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*" 2>/dev/null || echo "")
+          if [ -z "$PLANNED_VERSION" ]; then
+            echo "::error::release-version decided to release but gave no version"
+            exit 1
           fi
-
-          if [ -z "$LAST_TAG" ]; then
-            echo "No previous tags found, using all commits"
-            SUBJECTS=$(git log --format="%s" --no-merges)
-            BODIES=$(git log --format="%b" --no-merges)
-          else
-            echo "Last tag: $LAST_TAG"
-            SUBJECTS=$(git log "${LAST_TAG}..HEAD" --format="%s" --no-merges)
-            BODIES=$(git log "${LAST_TAG}..HEAD" --format="%b" --no-merges)
-          fi
-
-          echo "=== Commits since last tag ==="
-          echo "$SUBJECTS"
-          echo "=== End commits ==="
-
-          BUMP="patch"
-          BUMP_REASON="default (no feat: or breaking changes detected)"
-
-          if echo "$SUBJECTS" | grep -qE "^[a-z]+(\(.+\))?!:"; then
-            BUMP="major"
-            BREAKING_SUBJECT=$(echo "$SUBJECTS" | grep -E "^[a-z]+(\(.+\))?!:" | head -1)
-            BUMP_REASON="breaking change in commit subject: ${BREAKING_SUBJECT}"
-          elif echo "$BODIES" | grep -qE "^BREAKING[ -]CHANGE:"; then
-            BUMP="major"
-            BUMP_REASON="BREAKING CHANGE footer found in commit body"
-          elif echo "$SUBJECTS" | grep -qE "^feat(\(.+\))?:"; then
-            BUMP="minor"
-            BUMP_REASON="feat: commit detected"
-          fi
-
-          echo ""
-          echo "##################################################"
-          echo "# Version bump: $BUMP"
-          echo "# Reason: $BUMP_REASON"
-          echo "##################################################"
-
-          if [ "$BUMP" = "major" ]; then
-            CURRENT_VERSION=$(node -p "require('./package.json').version")
-            NEXT_MAJOR=$((${CURRENT_VERSION%%.*} + 1)).0.0
-            echo ""
-            echo "::warning::MAJOR version bump detected: ${CURRENT_VERSION} → ${NEXT_MAJOR}"
-            echo "::warning::Triggered by: ${BUMP_REASON}"
-            echo "::warning::If this is unintentional, check commit messages for accidental '!:' suffix or 'BREAKING CHANGE:' footer"
-          fi
-
-          # Bump from the last tag rather than from package.json: a queued run's checkout
-          # can still carry the pre-bump version even though a release already happened.
-          BASE_VERSION="${LAST_TAG#v}"
-          if [ -z "$BASE_VERSION" ]; then
-            BASE_VERSION=$(node -p "require('./package.json').version")
-          fi
-          NEXT_VERSION=$(node -e 'const [b,t]=process.argv.slice(1);const [x,y,z]=b.split(".").map(Number);console.log(t==="major"?`${x+1}.0.0`:t==="minor"?`${x}.${y+1}.0`:`${x}.${y}.${z+1}`)' "$BASE_VERSION" "$BUMP")
-
-          echo "Next version: $BASE_VERSION -> $NEXT_VERSION"
-
-          echo "bump=$BUMP" >> $GITHUB_OUTPUT
-          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing v${PLANNED_VERSION}"
+          echo "next_version=${PLANNED_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Bump version
         id: bump
-        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
+        if: steps.version.outputs.superseded != 'true'
         run: |
           npm version ${{ steps.version.outputs.next_version }} --no-git-tag-version --ignore-scripts --allow-same-version
           node scripts/sync-version.js
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
+      # Fails closed before the claim, the last reversible step: a binary built with any
+      # other version would ship it in --version and every report.
+      - name: Check binary version
+        if: steps.version.outputs.superseded != 'true'
+        run: |
+          BINARY=artifacts/bindings-x86_64-unknown-linux-gnu/domino-x86_64-unknown-linux-gnu
+          chmod +x "$BINARY"
+          node scripts/check-binary-version.js "$BINARY" "${{ steps.bump.outputs.new_version }}"
       - name: Claim version
         id: claim
-        if: steps.version.outputs.is_release != 'true' && steps.version.outputs.superseded != 'true'
+        if: steps.version.outputs.superseded != 'true'
         run: |
           TAG="v${{ steps.bump.outputs.new_version }}"
           # Compare-and-swap on the tag: creating a remote ref is atomic and reversible,
@@ -553,7 +647,11 @@ jobs:
             echo "Claimed ${TAG}"
             echo "claimed=true" >> $GITHUB_OUTPUT
           else
-            echo "::notice::${TAG} is already claimed by another run — skipping release"
+            # The version was decided before this run waited its turn, so a run that
+            # released just before it can have taken the same one. Nothing is published
+            # wrong: this run's commits wait for the next release. "Re-run all jobs"
+            # releases them now; "Re-run failed jobs" would reuse the stale version.
+            echo "::warning::${TAG} was claimed by another run, so this commit is not released yet — it goes out with the next release, or now with \"Re-run all jobs\" (not \"Re-run failed jobs\")"
             echo "claimed=false" >> $GITHUB_OUTPUT
           fi
       - name: Generate packages

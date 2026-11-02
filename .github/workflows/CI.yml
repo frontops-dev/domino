@@ -428,6 +428,7 @@ jobs:
           if echo "$COMMIT_MSG" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+$"; then
             echo "Current commit is a version commit, skipping bump"
             echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "bump=none" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 

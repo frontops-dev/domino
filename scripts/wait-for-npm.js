@@ -18,9 +18,10 @@ function platformPackages(manifest) {
   return Object.keys(manifest.optionalDependencies || {}).filter((name) => name.startsWith(`${manifest.name}-`))
 }
 
-// `npm view <pkg>@<version> version` prints the version once it is visible, prints
-// nothing when the package exists but the version has not propagated, and fails with
-// E404 when the package itself is not visible yet.
+// `npm view <pkg>@<version> version` prints the version once it is visible. Until then
+// it fails with E404, both when the package itself is not visible and when it exists
+// without that version (npm 11 reports "No match found for version"); older npm
+// versions print nothing and exit 0 for the latter, so empty output also counts.
 function classifyView({ status, stdout, stderr }, version) {
   const printed = (stdout || '').trim()
   if (status === 0) {

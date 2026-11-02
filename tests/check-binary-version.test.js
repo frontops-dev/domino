@@ -26,7 +26,11 @@ describe('parseVersionOutput', () => {
   })
 })
 
-describe('main', () => {
+// The stand-in binaries are shell scripts, which Windows cannot execute directly. The
+// check itself only runs on the Linux publish runner, where these suites do run.
+const shellScripts = process.platform === 'win32' && 'needs executable shell scripts'
+
+describe('main', { skip: shellScripts }, () => {
   let dir
   // A stand-in for the release binary: a shell script that answers --version.
   const fakeBinary = (name, script) => {
@@ -90,7 +94,7 @@ describe('main', () => {
   })
 })
 
-describe('command line', () => {
+describe('command line', { skip: shellScripts }, () => {
   const script = path.join(__dirname, '..', 'scripts', 'check-binary-version.js')
   let dir
   before(() => {

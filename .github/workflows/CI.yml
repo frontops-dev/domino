@@ -701,12 +701,11 @@ jobs:
           # errors that are not propagation — then install. npm view seeing a package does
           # not prove yarn does: the registry CDN caches each Accept variant separately, so
           # the install still gets a few tries.
-          INSTALLED=false
-          if node scripts/wait-for-npm.js; then
+          VERSION="${{ steps.bump.outputs.new_version }}"
+          install() {
             for i in 1 2 3; do
               if YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install; then
-                INSTALLED=true
-                break
+                return 0
               fi
               if [ "$i" -lt 3 ]; then
                 echo "yarn install attempt $i failed — retrying in 30s"
@@ -715,13 +714,17 @@ jobs:
                 echo "yarn install attempt $i failed — giving up"
               fi
             done
-          fi
-          if [ "$INSTALLED" != "true" ]; then
+            return 1
+          }
+          commit_version() {
+            git add package.json Cargo.toml index.js yarn.lock
+            git commit -m "$VERSION"
+          }
+          if ! node scripts/wait-for-npm.js || ! install; then
             echo "::error::The release is published and tagged; re-run this job to push the version commit"
             exit 1
           fi
-          git add package.json Cargo.toml index.js yarn.lock
-          git commit -m "${{ steps.bump.outputs.new_version }}"
+          commit_version
           # The tag was already pushed to claim the version, so only the commit is left.
           # A feature commit can land on main while we publish, so rebase and retry.
           for i in 1 2 3; do
@@ -730,12 +733,24 @@ jobs:
             fi
             echo "push attempt $i was rejected — rebasing onto origin/main"
             git fetch origin main
-            # A version commit from an earlier release can land after this checkout,
-            # touching the same version lines. -X theirs resolves only those conflicting
-            # hunks, in favour of this (newer) version commit being replayed.
-            git rebase -X theirs origin/main || {
-              echo "::error::v${{ steps.bump.outputs.new_version }} is published and tagged, but the version commit conflicts with main and must be pushed manually"
+            if git rebase origin/main; then
+              continue
+            fi
+            # It conflicts when main gained another version commit after this checkout,
+            # as after a "Re-run all jobs" behind a quicker release. Rather than resolve
+            # hunks, which could drop a change main made next to the version lines,
+            # make the version commit again on top of main, with the same steps.
+            git rebase --abort
+            echo "the version commit conflicts with main — making it again on origin/main"
+            git checkout -q --detach origin/main
+            npm version "$VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
+            node scripts/sync-version.js
+            node scripts/generate-packages.js
+            if ! install; then
+              echo "::error::v${VERSION} is published and tagged, but the version commit could not be remade on main; re-run this job"
               exit 1
-            }
+            fi
+            commit_version
           done
+          echo "::error::v${VERSION} is published and tagged, but the version commit was rejected 3 times; re-run this job"
           exit 1

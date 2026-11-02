@@ -1,5 +1,4 @@
 use glob::Pattern;
-use json_strip_comments::StripComments;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -114,12 +113,17 @@ fn glob_match_options() -> glob::MatchOptions {
 }
 
 fn read_tsconfig_file(path: &Path) -> Option<TsconfigFile> {
-  let content = match std::fs::read_to_string(path) {
+  let mut content = match std::fs::read_to_string(path) {
     Ok(c) => c,
     Err(_) => return None,
   };
-  let stripped = StripComments::new(content.as_bytes());
-  match serde_json::from_reader(stripped) {
+  // Strip in place: the streaming `StripComments` reader cannot look ahead, so
+  // it leaves trailing commas (valid tsconfig) in and the parse fails.
+  if let Err(e) = json_strip_comments::strip(&mut content) {
+    warn!("Failed to parse tsconfig at {}: {}", path.display(), e);
+    return None;
+  }
+  match serde_json::from_str(&content) {
     Ok(t) => Some(t),
     Err(e) => {
       warn!("Failed to parse tsconfig at {}: {}", path.display(), e);
@@ -283,6 +287,28 @@ mod tests {
       TsconfigExcludes::parse(&lib_dir.join("tsconfig.lib.json"), cwd).expect("should parse JSONC");
     assert!(excludes.is_excluded(Path::new("libs/my-lib/src/index.spec.ts")));
     assert!(excludes.is_excluded(Path::new("libs/my-lib/src/Button.stories.tsx")));
+  }
+
+  #[test]
+  fn test_tsconfig_with_trailing_commas() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let lib_dir = cwd.join("libs/my-lib");
+    fs::create_dir_all(&lib_dir).unwrap();
+
+    fs::write(
+      lib_dir.join("tsconfig.lib.json"),
+      r#"{
+        "exclude": [
+          "**/*.spec.ts",
+        ],
+      }"#,
+    )
+    .unwrap();
+
+    let excludes = TsconfigExcludes::parse(&lib_dir.join("tsconfig.lib.json"), cwd)
+      .expect("trailing commas are valid tsconfig");
+    assert!(excludes.is_excluded(Path::new("libs/my-lib/src/index.spec.ts")));
   }
 
   #[test]

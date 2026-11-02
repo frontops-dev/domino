@@ -1,9 +1,11 @@
 mod common;
 
-use domino::core::{find_affected, find_affected_with_report};
+use domino::core::{find_affected, find_affected_with_report, MAX_PATH_ALIAS_FILES_LISTED};
 use domino::profiler::Profiler;
 use domino::report::generate_html_report;
-use domino::types::{LockfileStrategy, Project, TrueAffectedConfig};
+use domino::types::{
+  AffectCause, AffectedReport, LockfileStrategy, Project, RootTsconfigStrategy, TrueAffectedConfig,
+};
 use domino::workspace;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -233,6 +235,7 @@ impl TestBranch {
         },
       ],
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_strategy: Default::default(),
     };
 
     // Create a profiler (disabled for tests)
@@ -480,6 +483,7 @@ export function anotherFn() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2048,6 +2052,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2157,6 +2162,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2285,6 +2291,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2417,6 +2424,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2527,6 +2535,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2658,6 +2667,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2803,6 +2813,7 @@ export function Panel() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -2933,6 +2944,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3058,6 +3070,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3183,6 +3196,7 @@ export function main() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3281,6 +3295,7 @@ fn test_shared_source_root_all_projects_affected() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3462,6 +3477,7 @@ fn test_lockfile_direct_strategy_detects_importing_project() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3515,6 +3531,7 @@ fn test_lockfile_full_strategy_traces_reference_chain() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Full,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3573,6 +3590,7 @@ fn test_lockfile_none_strategy_ignores_lockfile_changes() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3622,6 +3640,7 @@ fn test_lockfile_transitive_dep_change_resolves_to_direct() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3660,6 +3679,7 @@ fn test_lockfile_no_change_zero_impact() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3807,6 +3827,7 @@ export const mockData: SharedType = { name: 'test' };
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -3932,6 +3953,7 @@ export const mockData: SharedType = { name: 'test' };
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4011,13 +4033,19 @@ fn test_large_single_export_deduplication() {
 
 /// Helper to create a temporary Nx monorepo with namedInputs support
 struct TempNxRepo {
-  dir: TempDir,
+  /// Keeps the directory alive
+  _dir: TempDir,
+  /// Canonical root: the resolver returns canonical paths, so a root reached
+  /// through a symlink (macOS `/var` -> `/private/var`) would drop every
+  /// cross-file import
+  root: PathBuf,
 }
 
 impl TempNxRepo {
   fn new(nx_json: &str) -> Self {
     let dir = TempDir::new().unwrap();
-    let root = dir.path();
+    let canonical_root = dir.path().canonicalize().unwrap();
+    let root = canonical_root.as_path();
 
     // Init git
     git_in(root, &["init", "-q"]);
@@ -4063,11 +4091,14 @@ impl TempNxRepo {
     // Create test branch
     git_in(root, &["checkout", "-q", "-b", "test-branch"]);
 
-    Self { dir }
+    Self {
+      _dir: dir,
+      root: canonical_root,
+    }
   }
 
   fn root(&self) -> &std::path::Path {
-    self.dir.path()
+    &self.root
   }
 
   fn change_and_commit(&self, file: &str, content: &str) {
@@ -4091,6 +4122,7 @@ impl TempNxRepo {
       head: None,
       projects,
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_strategy: Default::default(),
     };
 
     let profiler = Arc::new(Profiler::new(false));
@@ -4107,6 +4139,7 @@ impl TempNxRepo {
       head: None,
       projects,
       lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_strategy: Default::default(),
     };
 
     let profiler = Arc::new(Profiler::new(false));
@@ -4463,6 +4496,7 @@ fn test_workspace_root_project_not_over_attributed() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4536,6 +4570,7 @@ fn test_spec_file_change_affects_owning_project() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4606,6 +4641,7 @@ export function unusedFn() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4698,6 +4734,7 @@ export function run() {
       },
     ],
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   (tmp, root, config)
@@ -4847,6 +4884,7 @@ fn test_dependency_manifest_in_shared_globals_does_not_globally_invalidate() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4898,6 +4936,7 @@ fn test_non_manifest_shared_global_still_globally_invalidates() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -4957,6 +4996,7 @@ fn test_manifest_only_change_without_lockfile_still_globally_invalidates() {
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::Direct,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5023,6 +5063,7 @@ fn test_lockfile_in_shared_globals_with_none_strategy_still_globally_invalidates
     head: None,
     projects: lockfile_projects(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5160,6 +5201,7 @@ export function run() {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
 
   let profiler = Arc::new(Profiler::new(false));
@@ -5326,6 +5368,7 @@ fn turbo_config_for(root: &Path, projects: Vec<Project>, base: &str) -> TrueAffe
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   }
 }
 
@@ -5774,6 +5817,7 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
     head: None,
     projects,
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
   let profiler = Arc::new(Profiler::new(false));
   find_affected(config, profiler)
@@ -6074,7 +6118,8 @@ fn commit_on_main(repo: &TempNxRepo, file: &str, content: &str) {
 }
 
 /// The workspace-root tsconfig drives path-alias resolution for every project,
-/// so changing it affects all of them, even with no namedInputs configured.
+/// so with the `all` strategy changing it affects all of them, even with no
+/// namedInputs configured.
 #[test]
 fn test_root_tsconfig_change_affects_all_projects() {
   let repo = TempNxRepo::new(r#"{}"#);
@@ -6089,9 +6134,10 @@ fn test_root_tsconfig_change_affects_all_projects() {
     r#"{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }"#,
   );
 
-  let mut affected = repo.get_affected();
-  affected.sort();
-  assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::All),
+    vec!["lib-a".to_string(), "lib-b".to_string()]
+  );
 }
 
 /// Only the workspace-root tsconfig is global. A project's own tsconfig.json is
@@ -6113,14 +6159,16 @@ fn test_nested_tsconfig_change_affects_only_owning_project() {
   assert_eq!(repo.get_affected(), vec!["lib-a".to_string()]);
 }
 
-/// A root tsconfig change must reach every project in a generic (non-Nx,
-/// non-Turbo) workspace too, where no namedInputs / globalDependencies config
-/// exists. The trigger short-circuits before resolution runs, so this checks
-/// the trigger fires outside the tool-config path, not alias resolution itself
-/// (that is `test_tsconfig_path_alias_differs_from_project_name`).
+/// With the `all` strategy a root tsconfig change must reach every project in a
+/// generic (non-Nx, non-Turbo) workspace too, where no namedInputs /
+/// globalDependencies config exists. The trigger short-circuits before
+/// resolution runs, so this checks the trigger fires outside the tool-config
+/// path, not alias resolution itself (that is
+/// `test_tsconfig_path_alias_differs_from_project_name`).
 #[test]
 fn test_root_tsconfig_change_in_generic_workspace_affects_all() {
-  let (_tmp, root, config) = scaffold_lib_app_repo("export const widget = () => 1;\n");
+  let (_tmp, root, mut config) = scaffold_lib_app_repo("export const widget = () => 1;\n");
+  config.root_tsconfig_strategy = RootTsconfigStrategy::All;
 
   git_in(&root, &["checkout", "-b", "feature"]);
   fs::write(
@@ -6144,6 +6192,41 @@ fn test_root_tsconfig_change_in_generic_workspace_affects_all() {
     .affected_projects;
   affected.sort();
   assert_eq!(affected, vec!["app".to_string(), "lib".to_string()]);
+}
+
+/// The `aliases` strategy in a generic workspace, where the project name
+/// (`lib`) differs from the alias its importer uses (`@scope/lib`): re-targeting
+/// the alias affects the importer only.
+#[test]
+fn test_root_tsconfig_aliases_in_generic_workspace() {
+  let (_tmp, root, config) = scaffold_lib_app_repo("export const widget = () => 1;\n");
+  fs::write(
+    root.join("libs/lib/src/v2.ts"),
+    "export const widget = () => 2;\n",
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "add v2"]);
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("tsconfig.base.json"),
+    r#"{
+  "compilerOptions": {
+    "paths": {
+      "@scope/lib": ["libs/lib/src/v2.ts"]
+    }
+  }
+}"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "point the alias at v2"]);
+
+  let affected = find_affected(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected failed")
+    .affected_projects;
+  assert_eq!(affected, vec!["app".to_string()]);
 }
 
 /// When sharedGlobals already lists the root tsconfig, the report must carry a
@@ -6171,6 +6254,7 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
     head: None,
     projects: domino::workspace::discover_projects(repo.root()).unwrap(),
     lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
   };
   let report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
     .expect("find_affected_with_report failed")
@@ -6184,6 +6268,901 @@ fn test_root_tsconfig_in_shared_globals_reports_one_trigger() {
     report.global_triggers
   );
   assert_eq!(report.global_triggers[0].named_input, "sharedGlobals");
+}
+
+/// Commit every `(path, content)` in `files` on `main` in one commit and
+/// fast-forward `test-branch` onto it.
+fn commit_files_on_main(repo: &TempNxRepo, files: &[(&str, &str)]) {
+  let root = repo.root();
+  git_in(root, &["checkout", "-q", "main"]);
+  for (file, content) in files {
+    let path = root.join(file);
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, content).unwrap();
+  }
+  git_in(root, &["add", "."]);
+  git_in(root, &["commit", "-q", "-m", "add files"]);
+  git_in(root, &["checkout", "-q", "test-branch"]);
+  git_in(root, &["merge", "-q", "--ff-only", "main"]);
+}
+
+/// Run `repo` with an explicit root-tsconfig strategy, sorted.
+fn affected_with_root_tsconfig_strategy(
+  repo: &TempNxRepo,
+  strategy: RootTsconfigStrategy,
+) -> Vec<String> {
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: strategy,
+  };
+  let mut affected = find_affected(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+  affected
+}
+
+fn names(projects: &[&str]) -> Vec<String> {
+  projects.iter().map(|p| p.to_string()).collect()
+}
+
+/// `tsconfig.base.json` for the alias fixture, with `extra` spliced into
+/// `compilerOptions.paths` and `options` into `compilerOptions`.
+fn alias_tsconfig(a_target: &str, extra: &str, options: &str) -> String {
+  format!(
+    r#"{{
+  "compilerOptions": {{{options}
+    "baseUrl": ".",
+    "paths": {{
+      "@acme/a": ["{a_target}"],
+      "@acme/a/*": ["libs/lib-a/src/*"],
+      "@acme/b": ["libs/lib-b/src/index.ts"],
+      "@acme/g": ["libs/lib-g/src/index.ts"],
+      "@acme/i": ["libs/lib-i/src/index.ts"],
+      "@acme/m": ["libs/lib-m/src/index.ts"]{extra}
+    }}
+  }}
+}}"#
+  )
+}
+
+const A_INDEX: &str = "libs/lib-a/src/index.ts";
+const A_OTHER: &str = "libs/lib-a/src/other.ts";
+
+/// A workspace where many projects reach `@acme/a` in different ways. On top of
+/// TempNxRepo's lib-a / lib-b (project names that differ from the aliases):
+///
+/// - lib-b imports `a` from `@acme/a`; its `b` uses it, its `unrelated` does not
+/// - lib-c uses `b`, lib-d uses only `unrelated` (precision: d is not affected)
+/// - lib-e side-effect-imports `@acme/a/polyfill` (the `@acme/a/*` alias)
+/// - lib-f `require`s `@acme/a`
+/// - lib-g `export *`s `@acme/a`; lib-h imports `a` from that barrel
+/// - lib-i re-exports `a` as `ia`; lib-j imports `ia`
+/// - lib-k imports `@acme/new`, an alias that does not exist yet
+/// - lib-l mentions `@acme/a` only in `jest.config.ts`, outside its sourceRoot
+/// - lib-m `export *`s lib-g's barrel (`@acme/g`); lib-n imports `a` from it
+fn alias_repo() -> TempNxRepo {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let project = |name: &str| format!(r#"{{ "name": "{name}", "sourceRoot": "libs/{name}/src" }}"#);
+  let projects: Vec<(String, String)> =
+    ["c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n"]
+      .iter()
+      .map(|n| {
+        let name = format!("lib-{n}");
+        (format!("libs/{name}/project.json"), project(&name))
+      })
+      .collect();
+  let tsconfig = alias_tsconfig(A_INDEX, "", "");
+  let mut files: Vec<(&str, &str)> = projects
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", tsconfig.as_str()),
+    (A_OTHER, "export const a = 2;\nexport const polyfill = 0;\n"),
+    ("libs/lib-a/src/polyfill.ts", "export const polyfill = 1;\n"),
+    (
+      "libs/lib-b/project.json",
+      r#"{ "name": "lib-b", "sourceRoot": "libs/lib-b/src" }"#,
+    ),
+    (
+      "libs/lib-b/src/index.ts",
+      "import { a } from '@acme/a';\n\nexport const b = a + 1;\n\nexport const unrelated = 0;\n",
+    ),
+    (
+      "libs/lib-c/src/index.ts",
+      "import { b } from '@acme/b';\n\nexport const c = b;\n",
+    ),
+    (
+      "libs/lib-d/src/index.ts",
+      "import { unrelated } from '@acme/b';\n\nexport const d = unrelated;\n",
+    ),
+    (
+      "libs/lib-e/src/index.ts",
+      "import '@acme/a/polyfill';\n\nexport const e = 1;\n",
+    ),
+    (
+      "libs/lib-f/src/index.ts",
+      "const { a } = require('@acme/a');\n\nexport const f = a;\n",
+    ),
+    ("libs/lib-g/src/index.ts", "export * from '@acme/a';\n"),
+    (
+      "libs/lib-h/src/index.ts",
+      "import { a } from '@acme/g';\n\nexport const h = a;\n",
+    ),
+    (
+      "libs/lib-i/src/index.ts",
+      "export { a as ia } from '@acme/a';\n",
+    ),
+    (
+      "libs/lib-j/src/index.ts",
+      "import { ia } from '@acme/i';\n\nexport const j = ia;\n",
+    ),
+    (
+      "libs/lib-k/src/index.ts",
+      "import { n } from '@acme/new';\n\nexport const k = n;\n",
+    ),
+    ("libs/lib-l/src/index.ts", "export const l = 1;\n"),
+    (
+      "libs/lib-l/jest.config.ts",
+      "export default {\n  moduleNameMapper: { '@acme/a': '<rootDir>/../lib-a/src/index.ts' },\n};\n",
+    ),
+    ("libs/lib-m/src/index.ts", "export * from '@acme/g';\n"),
+    (
+      "libs/lib-n/src/index.ts",
+      "import { a } from '@acme/m';\n\nexport const n = a;\n",
+    ),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo
+}
+
+/// Every project that reaches `@acme/a` (exact alias) in the fixture.
+const USES_ACME_A: &[&str] = &[
+  "lib-b", "lib-c", "lib-f", "lib-g", "lib-h", "lib-i", "lib-j", "lib-l", "lib-n",
+];
+
+/// Re-targeting an alias affects the files that import it, whatever the form
+/// (import, require, `export *`, named re-export), and what uses them. It does
+/// not affect lib-a, whose code did not change, nor lib-d, which uses only a
+/// symbol of lib-b that does not touch the alias.
+#[test]
+fn test_root_tsconfig_aliases_changed_target() {
+  let repo = alias_repo();
+  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(USES_ACME_A)
+  );
+}
+
+/// A workspace-root project with no sourceRoot owns every path, so it is
+/// affected through the changed `tsconfig.base.json` it owns; its root is not
+/// scanned, and its top-level config mentioning the alias changes nothing.
+/// Nested projects are judged by their own roots: lib-y, whose non-analyzed
+/// config mentions the alias, is affected; lib-x, which never mentions it, is
+/// not.
+#[test]
+fn test_root_tsconfig_aliases_workspace_root_project() {
+  let tsconfig = |target: &str| {
+    format!(r#"{{ "compilerOptions": {{ "paths": {{ "@acme/a": ["{target}"] }} }} }}"#)
+  };
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  // JSON configs, which the analyzer does not parse, so only the scan sees them.
+  let mention = r#"{ "moduleNameMapper": { "@acme/a": "<rootDir>/libs/lib-a/src/index.ts" } }"#;
+  commit_files_on_main(
+    &repo,
+    &[
+      ("project.json", r#"{ "name": "workspace" }"#),
+      ("tsconfig.base.json", base.as_str()),
+      ("jest.config.json", mention),
+      (A_OTHER, "export const a = 2;\n"),
+      (
+        "libs/lib-x/project.json",
+        r#"{ "name": "lib-x", "sourceRoot": "libs/lib-x/src" }"#,
+      ),
+      ("libs/lib-x/src/index.ts", "export const x = 1;\n"),
+      ("libs/lib-x/jest.config.json", r#"{ "preset": "jest" }"#),
+      (
+        "libs/lib-y/project.json",
+        r#"{ "name": "lib-y", "sourceRoot": "libs/lib-y/src" }"#,
+      ),
+      ("libs/lib-y/src/index.ts", "export const y = 1;\n"),
+      ("libs/lib-y/jest.config.json", mention),
+    ],
+  );
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-y", "workspace"])
+  );
+}
+
+/// A workspace-root project with sourceRoot `src` owns no top-level file, so
+/// it is affected only through a file under `src` mentioning the alias: here
+/// `src/App.vue`, which the analyzer does not parse. lib-x, nested under
+/// `src` without mentioning the alias, stays unaffected; lib-y, whose config
+/// mentions it, is affected.
+#[test]
+fn test_root_tsconfig_aliases_workspace_root_project_with_source_root() {
+  let tsconfig = |target: &str| {
+    format!(r#"{{ "compilerOptions": {{ "paths": {{ "@acme/a": ["{target}"] }} }} }}"#)
+  };
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  let mention = r#"{ "moduleNameMapper": { "@acme/a": "<rootDir>/libs/lib-a/src/index.ts" } }"#;
+  commit_files_on_main(
+    &repo,
+    &[
+      (
+        "project.json",
+        r#"{ "name": "workspace", "sourceRoot": "src" }"#,
+      ),
+      ("tsconfig.base.json", base.as_str()),
+      (A_OTHER, "export const a = 2;\n"),
+      ("src/main.ts", "export const main = 1;\n"),
+      (
+        "src/App.vue",
+        "<script setup lang=\"ts\">\nimport { a } from '@acme/a';\n</script>\n",
+      ),
+      (
+        "src/libs/lib-x/project.json",
+        r#"{ "name": "lib-x", "sourceRoot": "src/libs/lib-x/src" }"#,
+      ),
+      ("src/libs/lib-x/src/index.ts", "export const x = 1;\n"),
+      ("src/libs/lib-x/jest.config.json", r#"{ "preset": "jest" }"#),
+      (
+        "libs/lib-y/project.json",
+        r#"{ "name": "lib-y", "sourceRoot": "libs/lib-y/src" }"#,
+      ),
+      ("libs/lib-y/src/index.ts", "export const y = 1;\n"),
+      ("libs/lib-y/jest.config.json", mention),
+    ],
+  );
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-y", "workspace"])
+  );
+}
+
+/// Aliases is the default strategy.
+#[test]
+fn test_root_tsconfig_aliases_is_the_default() {
+  let repo = alias_repo();
+  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
+
+  let mut affected = repo.get_affected();
+  affected.sort();
+  assert_eq!(affected, names(USES_ACME_A));
+}
+
+/// A removed alias still re-routes the imports that use it, even though they
+/// no longer resolve at head.
+#[test]
+fn test_root_tsconfig_aliases_removed_alias() {
+  let repo = alias_repo();
+  let without_a = alias_tsconfig(A_INDEX, "", "")
+    .replace("      \"@acme/a\": [\"libs/lib-a/src/index.ts\"],\n", "");
+  assert!(!without_a.contains("\"@acme/a\":"));
+  repo.change_and_commit("tsconfig.base.json", &without_a);
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(USES_ACME_A)
+  );
+}
+
+/// An added alias re-routes imports that already used its name.
+#[test]
+fn test_root_tsconfig_aliases_added_alias() {
+  let repo = alias_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_tsconfig(
+      A_INDEX,
+      ",\n      \"@acme/new\": [\"libs/lib-a/src/index.ts\"]",
+      "",
+    ),
+  );
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-k"])
+  );
+}
+
+/// A `prefix/*` alias matches every specifier under the prefix, including a
+/// side-effect import.
+#[test]
+fn test_root_tsconfig_aliases_wildcard_alias() {
+  let repo = alias_repo();
+  let tsconfig = alias_tsconfig(A_INDEX, "", "").replace(
+    "\"@acme/a/*\": [\"libs/lib-a/src/*\"]",
+    "\"@acme/a/*\": [\"libs/lib-a/src/other/*\"]",
+  );
+  repo.change_and_commit("tsconfig.base.json", &tsconfig);
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-e"])
+  );
+}
+
+/// `tsconfig.base.json` for the alias-consumer fixture, with `@acme/a` and
+/// `@acme/b` pointing at the given targets.
+fn alias_consumer_tsconfig(a_target: &str, b_target: &str) -> String {
+  let consumers: String = ["req", "side", "dyn", "same", "mixed", "struct"]
+    .iter()
+    .map(|n| format!(",\n      \"@acme/{n}\": [\"libs/lib-{n}/src/index.ts\"]"))
+    .collect();
+  format!(
+    r#"{{
+  "compilerOptions": {{
+    "baseUrl": ".",
+    "paths": {{
+      "@acme/a": ["{a_target}"],
+      "@acme/b": ["{b_target}"]{consumers}
+    }}
+  }}
+}}"#
+  )
+}
+
+const B_INDEX: &str = "libs/lib-b/src/index.ts";
+const B_OTHER: &str = "libs/lib-b/src/other.ts";
+
+/// A workspace where each lib-X reaches `@acme/a` in one way and lib-X-user
+/// imports an export of lib-X:
+///
+/// - lib-req `require`s `@acme/a`
+/// - lib-side side-effect-imports `@acme/a`
+/// - lib-dyn dynamically `import()`s `@acme/a`
+/// - lib-same imports `a` from `@acme/a` and also `require`s it; the user takes
+///   the export built from the `require`
+/// - lib-mixed imports `b` from `@acme/b` and `require`s `@acme/a`; the user
+///   takes the export built from the `require`
+/// - lib-struct only imports `a` from `@acme/a`; the user takes an export that
+///   does not use it (precision: lib-struct-user is not affected)
+fn alias_consumer_repo() -> TempNxRepo {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let project = |name: &str| format!(r#"{{ "name": "{name}", "sourceRoot": "libs/{name}/src" }}"#);
+  let libs = ["b", "req", "side", "dyn", "same", "mixed", "struct"];
+  let projects: Vec<(String, String)> = libs
+    .iter()
+    .flat_map(|n| [format!("lib-{n}"), format!("lib-{n}-user")])
+    .filter(|name| name != "lib-b-user")
+    .map(|name| (format!("libs/{name}/project.json"), project(&name)))
+    .collect();
+  let user = |n: &str, export: &str| {
+    (
+      format!("libs/lib-{n}-user/src/index.ts"),
+      format!("import {{ {export} }} from '@acme/{n}';\n\nexport const user = {export};\n"),
+    )
+  };
+  let users = [
+    user("req", "req"),
+    user("side", "side"),
+    user("dyn", "loadA"),
+    user("same", "late"),
+    user("mixed", "ma"),
+    user("struct", "unrelated"),
+  ];
+  let tsconfig = alias_consumer_tsconfig(A_INDEX, B_INDEX);
+  let mut files: Vec<(&str, &str)> = projects
+    .iter()
+    .chain(users.iter())
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", tsconfig.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+    (B_OTHER, "export const b = 3;\n"),
+    (
+      "libs/lib-req/src/index.ts",
+      "const { a } = require('@acme/a');\n\nexport const req = a;\n",
+    ),
+    (
+      "libs/lib-side/src/index.ts",
+      "import '@acme/a';\n\nexport const side = 1;\n",
+    ),
+    (
+      "libs/lib-dyn/src/index.ts",
+      "export const loadA = () => import('@acme/a');\n",
+    ),
+    (
+      "libs/lib-same/src/index.ts",
+      "import { a } from '@acme/a';\nconst { a: late } = require('@acme/a');\n\nexport const early = a;\n\nexport { late };\n",
+    ),
+    (
+      "libs/lib-mixed/src/index.ts",
+      "import { b } from '@acme/b';\nconst { a } = require('@acme/a');\n\nexport const mb = b;\n\nexport const ma = a;\n",
+    ),
+    (
+      "libs/lib-struct/src/index.ts",
+      "import { a } from '@acme/a';\n\nexport const sa = a;\n\nexport const unrelated = 0;\n",
+    ),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo
+}
+
+/// A file that reaches a changed alias through `require()`, a side-effect
+/// import or `import()` has no imported binding to follow, so every export of
+/// it is traced. A structured import in the same file does not hide another
+/// use of the same alias. A file whose only use is a structured import stays
+/// precise.
+#[test]
+fn test_root_tsconfig_aliases_traces_exports_of_unstructured_users() {
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_OTHER, B_INDEX),
+  );
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&[
+      "lib-dyn",
+      "lib-dyn-user",
+      "lib-mixed",
+      "lib-mixed-user",
+      "lib-req",
+      "lib-req-user",
+      "lib-same",
+      "lib-same-user",
+      "lib-side",
+      "lib-side-user",
+      "lib-struct",
+    ])
+  );
+}
+
+/// A structured import of one changed alias does not stand in for a `require`
+/// of another changed alias in the same file.
+#[test]
+fn test_root_tsconfig_aliases_traces_exports_of_mixed_users() {
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_INDEX, B_OTHER),
+  );
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(&["lib-mixed"]),
+    "only @acme/b changed: lib-mixed's structured import is traced precisely"
+  );
+
+  let repo = alias_consumer_repo();
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    &alias_consumer_tsconfig(A_OTHER, B_OTHER),
+  );
+  let affected = affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases);
+  assert!(
+    affected.contains(&"lib-mixed-user".to_string()),
+    "affected: {affected:?}"
+  );
+}
+
+/// Comments and trailing commas (valid tsconfig) still narrow.
+#[test]
+fn test_root_tsconfig_aliases_jsonc() {
+  let repo = alias_repo();
+  let jsonc = alias_tsconfig(A_OTHER, "", "\n    // where sources live").replace(
+    "\"libs/lib-m/src/index.ts\"]",
+    "\"libs/lib-m/src/index.ts\"],",
+  );
+  repo.change_and_commit("tsconfig.base.json", &jsonc);
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+    names(USES_ACME_A)
+  );
+}
+
+fn all_alias_repo_projects() -> Vec<String> {
+  names(&[
+    "lib-a", "lib-b", "lib-c", "lib-d", "lib-e", "lib-f", "lib-g", "lib-h", "lib-i", "lib-j",
+    "lib-k", "lib-l", "lib-m", "lib-n",
+  ])
+}
+
+/// Anything besides `paths` changing can affect every project, so it falls back
+/// to all of them: another compiler option, `baseUrl`, or an alias key with a
+/// `*` this matching does not model.
+#[test]
+fn test_root_tsconfig_aliases_falls_back_to_all() {
+  let cases = [
+    (
+      "strict",
+      alias_tsconfig(A_OTHER, "", "\n    \"strict\": true,"),
+    ),
+    (
+      "baseUrl",
+      alias_tsconfig(A_INDEX, "", "").replace("\"baseUrl\": \".\"", "\"baseUrl\": \"libs\""),
+    ),
+    (
+      "mid-* key",
+      alias_tsconfig(
+        A_INDEX,
+        ",\n      \"@acme/*-utils\": [\"libs/lib-a/src/*\"]",
+        "",
+      ),
+    ),
+    ("unparseable", "{ not json".to_string()),
+  ];
+  for (case, tsconfig) in cases {
+    let repo = alias_repo();
+    repo.change_and_commit("tsconfig.base.json", &tsconfig);
+    assert_eq!(
+      affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases),
+      all_alias_repo_projects(),
+      "case: {case}"
+    );
+  }
+}
+
+/// With an explicit head, a root tsconfig that did not exist at the base cannot
+/// be diffed, so it affects every project.
+#[test]
+fn test_root_tsconfig_aliases_missing_at_base_falls_back_to_all() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }"#,
+  );
+
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: Some("test-branch".to_string()),
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: RootTsconfigStrategy::Aliases,
+  };
+  let mut affected = find_affected(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+  assert_eq!(affected, names(&["lib-a", "lib-b"]));
+}
+
+/// `all` affects every project and `none` affects nothing, for the same change.
+#[test]
+fn test_root_tsconfig_all_and_none_strategies() {
+  let repo = alias_repo();
+  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
+
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::All),
+    all_alias_repo_projects()
+  );
+  assert_eq!(
+    affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::None),
+    Vec::<String>::new()
+  );
+}
+
+/// Report for `repo` under the `aliases` root-tsconfig strategy.
+fn alias_strategy_report(repo: &TempNxRepo) -> AffectedReport {
+  let config = TrueAffectedConfig {
+    cwd: repo.root().to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: domino::workspace::discover_projects(repo.root()).unwrap(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: RootTsconfigStrategy::Aliases,
+  };
+  find_affected_with_report(config, Arc::new(Profiler::new(false)))
+    .expect("find_affected_with_report failed")
+    .report
+    .expect("expected a report")
+}
+
+/// The report names the alias and the file that uses it, and records no global
+/// trigger.
+#[test]
+fn test_root_tsconfig_aliases_report() {
+  let repo = alias_repo();
+  repo.change_and_commit("tsconfig.base.json", &alias_tsconfig(A_OTHER, "", ""));
+
+  let report = alias_strategy_report(&repo);
+
+  assert!(report.global_triggers.is_empty());
+  let lib_b = report
+    .projects
+    .iter()
+    .find(|p| p.name == "lib-b")
+    .expect("lib-b should be affected");
+  assert!(
+    lib_b.causes.iter().any(|cause| matches!(
+      cause,
+      AffectCause::TsconfigPathAlias { alias, importing_files, file_count }
+        if alias == "@acme/a"
+          && importing_files == &[PathBuf::from("libs/lib-b/src/index.ts")]
+          && *file_count == 1
+    )),
+    "causes: {:?}",
+    lib_b.causes
+  );
+}
+
+/// Many files of one project using the same changed alias give one report
+/// entry for that project and alias; a second alias gets its own entry.
+#[test]
+fn test_root_tsconfig_aliases_report_one_entry_per_project_and_alias() {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let tsconfig = |a_target: &str, z_target: &str| {
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ "@acme/a": ["{a_target}"], "@acme/z": ["{z_target}"] }} }} }}"#
+    )
+  };
+  let base = tsconfig(A_INDEX, "libs/lib-a/src/z.ts");
+  let users: Vec<(String, String)> = (0..8)
+    .map(|i| {
+      (
+        format!("libs/lib-b/src/user-{i}.ts"),
+        format!("import {{ a }} from '@acme/a';\n\nexport const user{i} = a;\n"),
+      )
+    })
+    .collect();
+  let mut files: Vec<(&str, &str)> = users
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\nexport const z = 2;\n"),
+    ("libs/lib-a/src/z.ts", "export const z = 1;\n"),
+    (
+      "libs/lib-b/src/z-user.ts",
+      "import { z } from '@acme/z';\n\nexport const zUser = z;\n",
+    ),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER, A_OTHER));
+
+  let report = alias_strategy_report(&repo);
+  let lib_b = report
+    .projects
+    .iter()
+    .find(|p| p.name == "lib-b")
+    .expect("lib-b should be affected");
+  let entries_for = |wanted: &str| -> Vec<&AffectCause> {
+    lib_b
+      .causes
+      .iter()
+      .filter(
+        |cause| matches!(cause, AffectCause::TsconfigPathAlias { alias, .. } if alias == wanted),
+      )
+      .collect()
+  };
+
+  let user = |i: usize| PathBuf::from(format!("libs/lib-b/src/user-{i}.ts"));
+  assert_eq!(
+    entries_for("@acme/a"),
+    [&AffectCause::TsconfigPathAlias {
+      alias: "@acme/a".to_string(),
+      importing_files: (0..MAX_PATH_ALIAS_FILES_LISTED).map(user).collect(),
+      file_count: 8,
+    }],
+  );
+  assert_eq!(
+    entries_for("@acme/z"),
+    [&AffectCause::TsconfigPathAlias {
+      alias: "@acme/z".to_string(),
+      importing_files: vec![PathBuf::from("libs/lib-b/src/z-user.ts")],
+      file_count: 1,
+    }],
+  );
+}
+
+/// A project using several changed aliases lists their causes sorted by alias,
+/// so the report and JSON output are stable from run to run.
+#[test]
+fn test_root_tsconfig_aliases_report_orders_causes_by_alias() {
+  let aliases = [
+    "@acme/q", "@acme/c", "@acme/x", "@acme/a", "@acme/m", "@acme/f",
+  ];
+  let tsconfig = |target: &str| {
+    let paths: Vec<String> = aliases
+      .iter()
+      .map(|alias| format!(r#""{alias}": ["{target}"]"#))
+      .collect();
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ {} }} }} }}"#,
+      paths.join(", ")
+    )
+  };
+  let users: Vec<(String, String)> = aliases
+    .iter()
+    .enumerate()
+    .map(|(i, alias)| {
+      (
+        format!("libs/lib-b/src/user-{i}.ts"),
+        format!("import {{ a }} from '{alias}';\n\nexport const user{i} = a;\n"),
+      )
+    })
+    .collect();
+  let repo = TempNxRepo::new(r#"{}"#);
+  let base = tsconfig(A_INDEX);
+  let mut files: Vec<(&str, &str)> = users
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+
+  let report = alias_strategy_report(&repo);
+  let lib_b = report
+    .projects
+    .iter()
+    .find(|p| p.name == "lib-b")
+    .expect("lib-b should be affected");
+  let listed: Vec<&str> = lib_b
+    .causes
+    .iter()
+    .filter_map(|cause| match cause {
+      AffectCause::TsconfigPathAlias { alias, .. } => Some(alias.as_str()),
+      _ => None,
+    })
+    .collect();
+  let mut sorted = aliases.to_vec();
+  sorted.sort();
+  assert_eq!(listed, sorted);
+}
+
+/// Re-targets `@acme/a` in a workspace where lib-x (`@acme/x`) has `source` as
+/// its index and each `(project, name)` consumer imports `name` from `@acme/x`,
+/// and returns the affected projects.
+fn affected_by_retargeting_through(source: &str, consumers: &[(&str, &str)]) -> Vec<String> {
+  let repo = TempNxRepo::new(r#"{}"#);
+  let project = |name: &str| format!(r#"{{ "name": "{name}", "sourceRoot": "libs/{name}/src" }}"#);
+  let mut owned = vec![("libs/lib-x/project.json".to_string(), project("lib-x"))];
+  for (consumer, name) in consumers {
+    owned.push((format!("libs/{consumer}/project.json"), project(consumer)));
+    owned.push((
+      format!("libs/{consumer}/src/index.ts"),
+      format!("import {{ {name} }} from '@acme/x';\n\nexport const user = {name};\n"),
+    ));
+  }
+  let tsconfig = |a_target: &str| {
+    format!(
+      r#"{{ "compilerOptions": {{ "baseUrl": ".", "paths": {{ "@acme/a": ["{a_target}"], "@acme/x": ["libs/lib-x/src/index.ts"] }} }} }}"#
+    )
+  };
+  let base = tsconfig(A_INDEX);
+  let mut files: Vec<(&str, &str)> = owned
+    .iter()
+    .map(|(p, c)| (p.as_str(), c.as_str()))
+    .collect();
+  files.extend([
+    ("tsconfig.base.json", base.as_str()),
+    (A_OTHER, "export const a = 2;\n"),
+    ("libs/lib-x/src/index.ts", source),
+  ]);
+  commit_files_on_main(&repo, &files);
+  repo.change_and_commit("tsconfig.base.json", &tsconfig(A_OTHER));
+  affected_with_root_tsconfig_strategy(&repo, RootTsconfigStrategy::Aliases)
+}
+
+/// An imported binding of a changed alias is traced like a changed symbol:
+/// through the private code that uses it, even when an export also uses it
+/// directly, and through a re-export of the binding itself. An export that
+/// does not touch it stays unaffected.
+#[test]
+fn test_root_tsconfig_aliases_traces_the_imported_binding() {
+  let cases = [
+    (
+      "helper beside a direct use",
+      "import { a } from '@acme/a';\n\nconst helper = () => a;\n\nexport const direct = a;\n\nexport const viaHelper = helper();\n\nexport const other = 1;\n",
+      vec![("lib-direct", "direct"), ("lib-helper", "viaHelper"), ("lib-other", "other")],
+      vec!["lib-direct", "lib-helper", "lib-x"],
+    ),
+    (
+      "helper only",
+      "import { a } from '@acme/a';\n\nconst helper = () => a;\n\nexport const viaHelper = helper();\n\nexport const other = 1;\n",
+      vec![("lib-helper", "viaHelper"), ("lib-other", "other")],
+      vec!["lib-helper", "lib-x"],
+    ),
+    (
+      "binding re-exported",
+      "import { a } from '@acme/a';\n\nexport { a };\n\nexport const other = 1;\n",
+      vec![("lib-binding", "a"), ("lib-other", "other")],
+      vec!["lib-binding", "lib-x"],
+    ),
+  ];
+  for (case, source, consumers, expected) in cases {
+    assert_eq!(
+      affected_by_retargeting_through(source, &consumers),
+      names(&expected),
+      "case: {case}"
+    );
+  }
+}
+
+/// A file that re-exports a changed alias is traced through the re-exported
+/// names only: a consumer of an unrelated export of the same file stays
+/// unaffected. Under `export *` that holds because the file's own export
+/// shadows any name the star would pass through.
+#[test]
+fn test_root_tsconfig_aliases_re_exports_stay_precise() {
+  let cases = [
+    (
+      "named re-export",
+      "export { a } from '@acme/a';\n\nexport const other = 1;\n",
+    ),
+    (
+      "export *",
+      "export * from '@acme/a';\n\nexport const other = 1;\n",
+    ),
+  ];
+  for (case, source) in cases {
+    assert_eq!(
+      affected_by_retargeting_through(source, &[("lib-forwarded", "a"), ("lib-other", "other")]),
+      names(&["lib-forwarded", "lib-x"]),
+      "case: {case}"
+    );
+  }
+}
+
+/// `export {} from` a changed alias names nothing, so like a side-effect
+/// import it has no binding to follow and every export of the file is traced.
+#[test]
+fn test_root_tsconfig_aliases_empty_re_export_traces_every_export() {
+  assert_eq!(
+    affected_by_retargeting_through(
+      "export {} from '@acme/a';\n\nexport const other = 1;\n",
+      &[("lib-user", "other")]
+    ),
+    names(&["lib-user", "lib-x"])
+  );
+}
+
+/// A namedInput that lists the root tsconfig is the user's own declaration and
+/// invalidates globally whatever the strategy.
+#[test]
+fn test_root_tsconfig_strategy_keeps_declared_named_input() {
+  let repo = TempNxRepo::new(
+    r#"{
+      "namedInputs": {
+        "default": ["{projectRoot}/**/*", "sharedGlobals"],
+        "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"]
+      }
+    }"#,
+  );
+  commit_on_main(
+    &repo,
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": {} } }"#,
+  );
+  repo.change_and_commit(
+    "tsconfig.base.json",
+    r#"{ "compilerOptions": { "paths": { "@acme/a": ["libs/lib-a/src/index.ts"] } } }"#,
+  );
+
+  for strategy in [RootTsconfigStrategy::Aliases, RootTsconfigStrategy::None] {
+    assert_eq!(
+      affected_with_root_tsconfig_strategy(&repo, strategy.clone()),
+      names(&["lib-a", "lib-b"]),
+      "strategy: {strategy}"
+    );
+  }
 }
 
 // ============================================================================

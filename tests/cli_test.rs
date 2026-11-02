@@ -191,6 +191,48 @@ export function unusedFn() {
 }
 
 #[test]
+fn test_root_tsconfig_strategy_flag() {
+  let branch = TestBranch::new("test-root-tsconfig-strategy");
+  let tsconfig = fs::read_to_string(fixture_path().join("tsconfig.base.json")).unwrap();
+  branch.make_change(
+    "tsconfig.base.json",
+    &tsconfig.replacen(
+      r#""baseUrl": ".","#,
+      r#""baseUrl": ".", "strict": true,"#,
+      1,
+    ),
+  );
+
+  let affected = |extra: &[&str]| -> Vec<String> {
+    let mut args = vec!["affected", "--base", "main", "--json"];
+    args.extend_from_slice(extra);
+    let output = branch.run_domino(&args);
+    assert!(output.status.success(), "Command should succeed");
+    serde_json::from_slice(&output.stdout).expect("Output should be a JSON array")
+  };
+
+  // A compiler-option change is not narrowed: the default (aliases) and `all`
+  // both affect every project; `none` affects nothing.
+  for extra in [&[][..], &["--root-tsconfig-strategy", "all"][..]] {
+    let all = affected(extra);
+    assert!(
+      all.iter().any(|p| p == "proj1") && all.iter().any(|p| p == "proj2"),
+      "{extra:?}: a compiler-option change should affect every project, got: {all:?}"
+    );
+  }
+  assert_eq!(
+    affected(&["--root-tsconfig-strategy", "none"]),
+    Vec::<String>::new()
+  );
+
+  let invalid = branch.run_domino(&["affected", "--root-tsconfig-strategy", "some"]);
+  assert!(
+    !invalid.status.success(),
+    "an unknown strategy should be rejected"
+  );
+}
+
+#[test]
 fn test_json_output_with_no_changes() {
   let branch = TestBranch::new("test-json-no-changes");
 

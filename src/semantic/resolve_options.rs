@@ -1,5 +1,4 @@
 use crate::types::Project;
-use json_strip_comments::StripComments;
 use oxc_resolver::{AliasValue, ResolveOptions};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -303,15 +302,20 @@ pub(crate) fn parse_tsconfig_path_prefixes(cwd: &Path) -> Vec<String> {
 }
 
 fn read_tsconfig(path: &Path) -> Option<TsconfigJson> {
-  let content = match std::fs::read_to_string(path) {
+  let mut content = match std::fs::read_to_string(path) {
     Ok(c) => c,
     Err(e) => {
       warn!("Failed to read {}: {}", path.display(), e);
       return None;
     }
   };
-  let stripped = StripComments::new(content.as_bytes());
-  match serde_json::from_reader(stripped) {
+  // Strip in place: the streaming `StripComments` reader cannot look ahead, so
+  // it leaves trailing commas (valid tsconfig) in and the parse fails.
+  if let Err(e) = json_strip_comments::strip(&mut content) {
+    warn!("Failed to parse {}: {}", path.display(), e);
+    return None;
+  }
+  match serde_json::from_str(&content) {
     Ok(t) => Some(t),
     Err(e) => {
       warn!("Failed to parse {}: {}", path.display(), e);
@@ -656,6 +660,32 @@ mod tests {
       "wildcard suffix /* should be stripped"
     );
     assert_eq!(prefixes.len(), 2);
+  }
+
+  /// tsconfig is JSONC: TypeScript accepts trailing commas as well as comments,
+  /// and a file that fails to parse here loses every path alias.
+  #[test]
+  fn test_parse_tsconfig_path_prefixes_with_trailing_commas() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+
+    fs::write(
+      cwd.join("tsconfig.base.json"),
+      r#"{
+        // aliases
+        "compilerOptions": {
+          "paths": {
+            "@scope/my-lib": ["libs/my-lib/src/index.ts",],
+          },
+        },
+      }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+      parse_tsconfig_path_prefixes(cwd),
+      vec!["@scope/my-lib".to_string()]
+    );
   }
 
   #[test]

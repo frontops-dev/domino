@@ -2,14 +2,18 @@ use crate::error::Result;
 use crate::git;
 use crate::lockfile;
 use crate::named_inputs;
+use crate::path_aliases;
 use crate::profiler::Profiler;
+use crate::semantic::analyzer::FileSemanticData;
 use crate::semantic::{AssetReferenceFinder, ReferenceFinder, WorkspaceAnalyzer};
 use crate::types::{
   AffectCause, AffectedProjectInfo, AffectedReport, AffectedResult, ChangedFile, GlobalTrigger,
-  LockfileStrategy, Project, ReportTotals, TrueAffectedConfig,
+  LockfileStrategy, Project, ReportTotals, RootTsconfigStrategy, TrueAffectedConfig,
 };
 use crate::utils::{self, ProjectIndex};
+use oxc_ast::AstKind;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -148,9 +152,28 @@ fn find_affected_internal(
   // type, not only when a namedInputs / globalDependencies pattern lists it:
   // its path aliases feed module resolution for all projects. Appended after
   // the config-derived triggers so the report still names that config first.
+  // The `aliases` strategy narrows a paths-only change to the files using the
+  // changed aliases, traced in Step 5d once the analyzer exists.
   let root_tsconfig_triggers =
     named_inputs::root_tsconfig_triggers(&changed_files, &global_triggers);
-  global_triggers.extend(root_tsconfig_triggers);
+  let mut changed_aliases = Vec::new();
+  match config.root_tsconfig_strategy {
+    RootTsconfigStrategy::None => {}
+    RootTsconfigStrategy::Aliases if !root_tsconfig_triggers.is_empty() => {
+      match path_aliases::changed_aliases_between(&config.cwd, &merge_base, config.head.as_deref())
+      {
+        Some(aliases) => {
+          debug!(
+            "Root tsconfig changed only path aliases: {:?}",
+            aliases.iter().map(|a| &a.alias).collect::<Vec<_>>()
+          );
+          changed_aliases = aliases;
+        }
+        None => global_triggers.extend(root_tsconfig_triggers),
+      }
+    }
+    _ => global_triggers.extend(root_tsconfig_triggers),
+  }
 
   if !global_triggers.is_empty() && !generate_report {
     let mut all_projects: Vec<String> = config.projects.iter().map(|p| p.name.clone()).collect();
@@ -690,6 +713,175 @@ fn find_affected_internal(
     }
   }
 
+  // Step 5d: Trace a root tsconfig change narrowed to its path aliases (Step 1b).
+  // A file is matched on its source text, so side-effect imports and require()
+  // count; its structured imports and re-exports of the alias are then traced.
+  // A mention that is neither (require(), import(), a side-effect import,
+  // `export {} from`) has no binding to follow, so every export of that file
+  // is traced instead.
+  if !changed_aliases.is_empty() {
+    // Report users per (project, alias), so a widely used alias yields one
+    // cause per project rather than one per file. Ordered, so each project's
+    // causes come out sorted by alias without relying on a later sort.
+    let mut alias_users: Option<BTreeMap<(String, String), BTreeSet<PathBuf>>> =
+      generate_report.then(BTreeMap::default);
+    // Files the analyzer skipped (configs, e2e, non-JS sources) can only be
+    // marked, not traced.
+    let projects = config
+      .projects
+      .iter()
+      .map(|p| (p.root.as_path(), p.source_root.as_path()));
+    for (file_path, mentioned) in
+      path_aliases::files_mentioning(&config.cwd, projects, &changed_aliases, |path| {
+        analyzer.files.contains_key(path)
+      })
+    {
+      mark_path_alias_user(
+        &project_index,
+        &file_path,
+        &mentioned,
+        &mut affected_packages,
+        alias_users.as_mut(),
+      );
+    }
+
+    let mut alias_visited = FxHashSet::default();
+    // Names importers take from each file, built on first use: only files that
+    // reach an alias without a binding, or through `export *`, need it.
+    let mut names_imported_by_source: Option<FxHashMap<&Path, Vec<&String>>> = None;
+    for (file_path, file_data) in &analyzer.files {
+      let mentioned: Vec<_> = changed_aliases
+        .iter()
+        .filter(|alias| alias.mentioned_in(file_data.source()))
+        .collect();
+      if mentioned.is_empty() {
+        continue;
+      }
+      mark_path_alias_user(
+        &project_index,
+        file_path,
+        &mentioned,
+        &mut affected_packages,
+        alias_users.as_mut(),
+      );
+
+      let uses_alias = |specifier: &str| mentioned.iter().any(|alias| alias.matches(specifier));
+      let mut names_imported_from_file = || {
+        names_imported_by_source
+          .get_or_insert_with(|| {
+            let mut by_source: FxHashMap<&Path, Vec<&String>> = FxHashMap::default();
+            for (source, name) in analyzer.import_index.keys() {
+              by_source.entry(source.as_path()).or_default().push(name);
+            }
+            by_source
+          })
+          .get(file_path.as_path())
+          .into_iter()
+          .flatten()
+          .map(|name| (*name).clone())
+          .collect::<Vec<_>>()
+      };
+      let mut symbols: Vec<String> = Vec::new();
+
+      // Compared by offset rather than by specifier: the same specifier can be
+      // both imported and `require`d in one file. Any quoted mention that is
+      // not a structured specifier counts, including one in a comment, a
+      // `jest.mock('@alias')` or a `declare module '@alias'`, so such a file
+      // has every export traced: an over-selection accepted for never missing
+      // a real use.
+      let structured = structured_specifier_offsets(file_data);
+      let has_unstructured_mention = mentioned.iter().any(|alias| {
+        alias
+          .mention_offsets(file_data.source())
+          .any(|offset| !structured.contains(&offset))
+      });
+      if has_unstructured_mention {
+        symbols.extend(
+          analyzer
+            .exports
+            .get(file_path)
+            .into_iter()
+            .flatten()
+            .map(|export| export.exported_name.clone())
+            .filter(|name| name != "*"),
+        );
+        // Names an `export *` passes through are recorded only by importers.
+        symbols.extend(names_imported_from_file());
+      }
+
+      for import in analyzer.imports.get(file_path).into_iter().flatten() {
+        if !uses_alias(&import.from_module) {
+          continue;
+        }
+        // Traced as a changed symbol: through the code in this file that uses
+        // the binding, private helpers included, to the exports built on it,
+        // and through a re-export of the binding itself. An unused import
+        // reaches nothing; the file is still marked above.
+        symbols.push(import.local_name.clone());
+      }
+      for export in analyzer.exports.get(file_path).into_iter().flatten() {
+        if !export.re_export_from.as_deref().is_some_and(uses_alias) {
+          continue;
+        }
+        if export.exported_name == "*" {
+          // `export *` names nothing itself: trace every name importers take
+          // from this file, except those the file exports explicitly, which
+          // shadow anything the star would pass through.
+          let exports = analyzer.exports.get(file_path).into_iter().flatten();
+          let explicit: FxHashSet<&str> = exports
+            .map(|export| export.exported_name.as_str())
+            .filter(|name| *name != "*")
+            .collect();
+          symbols.extend(
+            names_imported_from_file()
+              .into_iter()
+              .filter(|name| !explicit.contains(name.as_str())),
+          );
+        } else {
+          symbols.push(export.exported_name.clone());
+        }
+      }
+      symbols.sort();
+      symbols.dedup();
+
+      for sym in symbols {
+        let mut state = AffectedState {
+          affected_packages: &mut affected_packages,
+          project_causes: if generate_report {
+            Some(&mut project_causes)
+          } else {
+            None
+          },
+          visited: &mut alias_visited,
+        };
+        if let Err(e) = process_changed_symbol(
+          &analyzer,
+          &reference_finder,
+          file_path,
+          &sym,
+          &project_index,
+          &mut state,
+        ) {
+          debug!("Error tracing path-alias symbol '{}': {}", sym, e);
+        }
+      }
+    }
+
+    for ((project, alias), files) in alias_users.into_iter().flatten() {
+      project_causes
+        .entry(project)
+        .or_default()
+        .push(AffectCause::TsconfigPathAlias {
+          alias,
+          file_count: files.len(),
+          importing_files: files
+            .into_iter()
+            .take(MAX_PATH_ALIAS_FILES_LISTED)
+            .collect(),
+        });
+    }
+  }
+
   // Step 6: Add implicit dependencies
   add_implicit_dependencies(
     &config.projects,
@@ -783,6 +975,60 @@ fn find_affected_internal(
     affected_projects,
     report,
   })
+}
+
+/// Most files a [`AffectCause::TsconfigPathAlias`] lists; the rest are only
+/// counted, so an alias used across a large project keeps the report small.
+pub const MAX_PATH_ALIAS_FILES_LISTED: usize = 5;
+
+/// Mark the projects owning `file_path`, which uses the `mentioned` changed path
+/// aliases. Its imports now resolve elsewhere, so it counts as changed and the
+/// unfiltered (direct-change) ownership lookup applies. When reporting, the file
+/// is collected under each (owning project, alias) in `alias_users`.
+fn mark_path_alias_user(
+  project_index: &ProjectIndex,
+  file_path: &Path,
+  mentioned: &[&path_aliases::AliasPattern],
+  affected_packages: &mut FxHashSet<String>,
+  alias_users: Option<&mut BTreeMap<(String, String), BTreeSet<PathBuf>>>,
+) {
+  let owners = project_index.get_owning_packages_by_path(file_path);
+  if let Some(users) = alias_users {
+    for pkg in &owners {
+      for alias in mentioned {
+        users
+          .entry((pkg.clone(), alias.alias.clone()))
+          .or_default()
+          .insert(file_path.to_path_buf());
+      }
+    }
+  }
+  affected_packages.extend(owners);
+}
+
+/// Byte offsets (at the opening quote) of the specifiers in `file_data` that
+/// Step 5d can trace through a binding: those of imports that bind a name and
+/// of re-exports that name something (`export *` included). Side-effect
+/// imports, `export {} from`, `import()` and `require()` are left out.
+fn structured_specifier_offsets(file_data: &FileSemanticData) -> FxHashSet<usize> {
+  file_data
+    .semantic()
+    .nodes()
+    .iter()
+    .filter_map(|node| match node.kind() {
+      AstKind::ImportDeclaration(decl)
+        if decl.specifiers.as_ref().is_some_and(|s| !s.is_empty()) =>
+      {
+        Some(decl.source.span)
+      }
+      AstKind::ExportNamedDeclaration(decl) if !decl.specifiers.is_empty() => {
+        decl.source.as_ref().map(|s| s.span)
+      }
+      AstKind::ExportAllDeclaration(decl) => Some(decl.source.span),
+      _ => None,
+    })
+    .map(|span| span.start as usize)
+    .collect()
 }
 
 fn process_changed_symbol(

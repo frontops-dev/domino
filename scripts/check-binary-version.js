@@ -6,10 +6,13 @@
 // previous one, as every release up to 2.2.0 did. The publish job runs this before
 // claiming the version, so a mismatch stops the release while it is still reversible.
 //
-// Usage: check-binary-version.js <binary> [expected]   (expected defaults to package.json)
+// Usage: check-binary-version.js <binary> <expected>
 
 const { spawnSync } = require('child_process')
-const path = require('path')
+
+// --version answers at once; a binary still running after this is hung, and the
+// publish job should fail instead of waiting out its time limit.
+const TIMEOUT_MS = 30 * 1000
 
 // clap prints `<bin name> <version>` for --version.
 function parseVersionOutput(output) {
@@ -17,12 +20,12 @@ function parseVersionOutput(output) {
   return match ? match[1] : null
 }
 
-function main({ binary, expected, log = console.log }) {
+function main({ binary, expected, timeoutMs = TIMEOUT_MS, log = console.log }) {
   if (!expected) {
     log('::error::No expected version to check the binary against')
     return 1
   }
-  const result = spawnSync(binary, ['--version'], { encoding: 'utf8' })
+  const result = spawnSync(binary, ['--version'], { encoding: 'utf8', timeout: timeoutMs })
   const reported = result.status === 0 ? parseVersionOutput(result.stdout) : null
   if (reported === null) {
     const detail = result.error ? result.error.message : (result.stderr || result.stdout || '').trim()
@@ -44,9 +47,10 @@ module.exports = { main, parseVersionOutput }
 if (require.main === module) {
   const [binary, expected] = process.argv.slice(2)
   if (!binary) {
-    console.error('Usage: check-binary-version.js <binary> [expected]')
+    console.error('Usage: check-binary-version.js <binary> <expected>')
     process.exit(1)
   }
-  const version = expected || require(path.join(__dirname, '..', 'package.json')).version
-  process.exit(main({ binary, expected: version }))
+  // No fallback for a missing version: an empty value from the workflow is a bug to
+  // surface, not something to paper over with whatever package.json holds.
+  process.exit(main({ binary, expected }))
 }

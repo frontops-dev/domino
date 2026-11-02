@@ -129,12 +129,14 @@ jobs:
     outputs:
       release: ${{ steps.version.outputs.release }}
       next_version: ${{ steps.version.outputs.next_version }}
-      bump: ${{ steps.version.outputs.bump }}
     steps:
+      # Only a push can release, so a pull request skips straight to release=false.
       - uses: actions/checkout@v6
+        if: github.event_name == 'push'
         with:
           fetch-depth: 0
       - name: Setup node
+        if: github.event_name == 'push'
         uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -152,11 +154,14 @@ jobs:
           # `[skip release]` anywhere in the pushed commit's message skips publishing but
           # still runs the full build and test matrix. The next unmarked push releases the
           # skipped commits too: the bump reads every commit subject since the last tag.
+          # Matched case-insensitively, as the contains() check it replaced was.
+          shopt -s nocasematch
           if [[ "$HEAD_COMMIT_MESSAGE" == *"[skip release]"* ]]; then
             echo "[skip release] in the commit message, nothing to release"
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          shopt -u nocasematch
 
           git fetch --force --tags origin main
 
@@ -173,8 +178,7 @@ jobs:
           # example after the version commit failed). Reuse its version: bumping from
           # it would publish a duplicate. The publish job's claim re-pushes the same tag,
           # npm publish skips what is already there, and the version commit gets another
-          # try. If a
-          # newer release has shipped since — or, with no tag on HEAD, the newest release
+          # try. If a newer release has shipped since — or, with no tag on HEAD, the newest release
           # is not an ancestor of HEAD — publishing would move `latest` backwards, so the
           # release is skipped instead, without failing, since nothing is wrong.
           RERUN=$(node scripts/release-rerun.js)
@@ -545,8 +549,10 @@ jobs:
     if: github.event_name == 'push' && needs.release-version.outputs.release == 'true'
     runs-on: ubuntu-latest
     # Main-branch runs are no longer cancelled, so several can be in flight at once.
-    # Releases must still happen one at a time: queue publishes instead of overlapping
-    # them, since each derives its version from the latest tag.
+    # Releases must still happen one at a time, so publishes never overlap. The group
+    # holds one running and one pending job: a third run queuing cancels the pending
+    # one, and since versions are planned before queuing, that third run then usually
+    # loses the tag claim too (see Claim version).
     concurrency:
       group: publish-main
       cancel-in-progress: false
@@ -626,13 +632,17 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Bumped to $NEW_VERSION"
       # Fails closed before the claim, the last reversible step: a binary built with any
-      # other version would ship it in --version and every report.
+      # other version would ship it in --version and every report. These are the two
+      # binaries that run on this runner; every leg sets the version the same way. A
+      # failure here needs "Re-run all jobs": failed jobs alone reuse the same artifacts.
       - name: Check binary version
         if: steps.version.outputs.superseded != 'true'
         run: |
-          BINARY=artifacts/bindings-x86_64-unknown-linux-gnu/domino-x86_64-unknown-linux-gnu
-          chmod +x "$BINARY"
-          node scripts/check-binary-version.js "$BINARY" "${{ steps.bump.outputs.new_version }}"
+          for TARGET in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
+            BINARY="artifacts/bindings-${TARGET}/domino-${TARGET}"
+            chmod +x "$BINARY"
+            node scripts/check-binary-version.js "$BINARY" "${{ steps.bump.outputs.new_version }}"
+          done
       - name: Claim version
         id: claim
         if: steps.version.outputs.superseded != 'true'
@@ -648,11 +658,12 @@ jobs:
             echo "claimed=true" >> $GITHUB_OUTPUT
           else
             # The version was decided before this run waited its turn, so a run that
-            # released just before it can have taken the same one. Nothing is published
-            # wrong: this run's commits wait for the next release. "Re-run all jobs"
-            # releases them now; "Re-run failed jobs" would reuse the stale version.
-            echo "::warning::${TAG} was claimed by another run, so this commit is not released yet — it goes out with the next release, or now with \"Re-run all jobs\" (not \"Re-run failed jobs\")"
-            echo "claimed=false" >> $GITHUB_OUTPUT
+            # released just before it can have taken the same one. Nothing wrong is
+            # published, but this run's commits are left unreleased, which needs someone
+            # to act, so the job fails. "Re-run all jobs" plans a fresh version and
+            # releases them; "Re-run failed jobs" would reuse the stale one and fail again.
+            echo "::error::${TAG} was claimed by another run, so this commit is not released. Use \"Re-run all jobs\" (not \"Re-run failed jobs\") to release it, or let the next release include it"
+            exit 1
           fi
       - name: Generate packages
         if: steps.claim.outputs.claimed == 'true'
@@ -719,7 +730,10 @@ jobs:
             fi
             echo "push attempt $i was rejected — rebasing onto origin/main"
             git fetch origin main
-            git rebase origin/main || {
+            # A version commit from an earlier release can land after this checkout,
+            # touching the same version lines. -X theirs resolves only those conflicting
+            # hunks, in favour of this (newer) version commit being replayed.
+            git rebase -X theirs origin/main || {
               echo "::error::v${{ steps.bump.outputs.new_version }} is published and tagged, but the version commit conflicts with main and must be pushed manually"
               exit 1
             }

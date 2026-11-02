@@ -1,5 +1,6 @@
 const { describe, it, before, after } = require('node:test')
 const assert = require('node:assert')
+const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -12,10 +13,16 @@ describe('parseVersionOutput', () => {
     assert.strictEqual(parseVersionOutput('domino 2.2.0-beta.1'), '2.2.0-beta.1')
   })
 
+  it('accepts a Windows line ending', () => {
+    assert.strictEqual(parseVersionOutput('domino 2.2.0\r\n'), '2.2.0')
+  })
+
   it('returns null for anything else', () => {
     assert.strictEqual(parseVersionOutput(''), null)
     assert.strictEqual(parseVersionOutput('error: unexpected argument'), null)
     assert.strictEqual(parseVersionOutput('other 2.2.0'), null)
+    // A version line followed by anything else is not what clap prints for --version.
+    assert.strictEqual(parseVersionOutput('domino 2.2.0\nwarning: something'), null)
   })
 })
 
@@ -66,5 +73,44 @@ describe('main', () => {
 
   it('fails without an expected version', () => {
     assert.strictEqual(run(fakeBinary('any', 'echo "domino 2.2.0"'), '').code, 1)
+  })
+
+  it('gives up on a binary that hangs', () => {
+    const lines = []
+    const started = Date.now()
+    const code = main({
+      binary: fakeBinary('hang', 'sleep 10'),
+      expected: '2.2.0',
+      timeoutMs: 200,
+      log: (line) => lines.push(line),
+    })
+    assert.strictEqual(code, 1)
+    assert.match(lines.join('\n'), /::error::/)
+    assert.ok(Date.now() - started < 5000, 'waited for the binary instead of timing out')
+  })
+})
+
+describe('command line', () => {
+  const script = path.join(__dirname, '..', 'scripts', 'check-binary-version.js')
+  let dir
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'check-binary-version-cli-'))
+    fs.writeFileSync(path.join(dir, 'bin'), '#!/bin/sh\necho "domino 2.2.0"\n', { mode: 0o755 })
+  })
+  after(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  const cli = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' })
+
+  it('exits 0 on a match and 1 on a mismatch', () => {
+    assert.strictEqual(cli(path.join(dir, 'bin'), '2.2.0').status, 0)
+    assert.strictEqual(cli(path.join(dir, 'bin'), '2.2.1').status, 1)
+  })
+
+  it('requires the expected version rather than guessing it', () => {
+    // An empty value from the workflow must fail, not fall back to package.json.
+    assert.strictEqual(cli(path.join(dir, 'bin'), '').status, 1)
+    assert.strictEqual(cli(path.join(dir, 'bin')).status, 1)
+    assert.strictEqual(cli().status, 1)
   })
 })

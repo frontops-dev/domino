@@ -443,22 +443,31 @@ jobs:
           # release is skipped instead, without failing, since nothing is wrong.
           RERUN=$(node scripts/release-rerun.js)
           read -r RERUN_ACTION RERUN_VERSION NEWEST_VERSION <<< "$RERUN"
-          if [ "$RERUN_ACTION" = "superseded" ]; then
-            if [ "$RERUN_VERSION" = "-" ]; then
-              echo "::notice::HEAD is behind v${NEWEST_VERSION}, which is not an ancestor — skipping release"
-            else
-              echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
-            fi
-            echo "superseded=true" >> "$GITHUB_OUTPUT"
-            echo "bump=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$RERUN_ACTION" = "reuse" ]; then
-            echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
-            echo "bump=rerun" >> "$GITHUB_OUTPUT"
-            echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # Anything but the three known actions (empty output included) stops the
+          # step: falling through to a normal bump could publish a duplicate release.
+          case "$RERUN_ACTION" in
+            superseded)
+              if [ "$RERUN_VERSION" = "-" ]; then
+                echo "::notice::HEAD is behind v${NEWEST_VERSION}, which is not an ancestor — skipping release"
+              else
+                echo "::notice::v${RERUN_VERSION} on HEAD is superseded by v${NEWEST_VERSION} — skipping release"
+              fi
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              echo "bump=none" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            reuse)
+              echo "HEAD is already released as v${RERUN_VERSION}; re-running that release"
+              echo "bump=rerun" >> "$GITHUB_OUTPUT"
+              echo "next_version=${RERUN_VERSION}" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            none) ;;
+            *)
+              echo "::error::unexpected release-rerun output: $RERUN"
+              exit 1
+              ;;
+          esac
 
           LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
@@ -593,6 +602,8 @@ jobs:
               if [ "$i" -lt 3 ]; then
                 echo "yarn install attempt $i failed — retrying in 30s"
                 sleep 30
+              else
+                echo "yarn install attempt $i failed — giving up"
               fi
             done
           fi

@@ -76,10 +76,12 @@ pub fn find_affected_with_report(
 }
 
 fn find_affected_internal(
-  config: TrueAffectedConfig,
+  mut config: TrueAffectedConfig,
   profiler: Arc<Profiler>,
   generate_report: bool,
 ) -> Result<AffectedResult> {
+  config.cwd = crate::utils::canonical_workspace_root(&config.cwd)?;
+
   debug!("Starting true-affected analysis");
   debug!("Base: {}", config.base);
   debug!("Projects: {}", config.projects.len());

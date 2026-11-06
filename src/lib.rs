@@ -142,7 +142,8 @@ mod napi_bindings {
   /// Discover projects in a workspace (Nx or Turborepo)
   #[napi]
   pub fn discover_projects(cwd: String) -> napi::Result<Vec<NapiProject>> {
-    let cwd_path = PathBuf::from(cwd);
+    let cwd_path = crate::utils::canonical_workspace_root(&PathBuf::from(cwd))
+      .map_err(|e| Error::from_reason(e.to_string()))?;
     let projects =
       workspace::discover_projects(&cwd_path).map_err(|e| Error::from_reason(e.to_string()))?;
 

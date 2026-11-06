@@ -4787,6 +4787,46 @@ export const obsolete = () => 2;
   );
 }
 
+/// A workspace root that is not in canonical form (relative, containing `..`,
+/// or reached through a symlink) must give the same result as the canonical
+/// one. `oxc_resolver` returns realpaths, and the import index made them
+/// workspace-relative with `strip_prefix(cwd)`, so a non-canonical `cwd`
+/// silently dropped every resolved import and only directly-changed projects
+/// were reported.
+#[test]
+fn test_non_canonical_cwd_still_traces_imports() {
+  let (_tmp, root, mut config) = scaffold_lib_app_repo(
+    r#"export const widget = () => 1;
+"#,
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    r#"export const widget = () => 2;
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change widget"]);
+
+  // Same directory as `root`, but spelled so that a realpath does not start
+  // with it textually.
+  config.cwd = root.join("apps").join("..");
+
+  let profiler = Arc::new(Profiler::new(false));
+  let mut affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+
+  assert_eq!(
+    affected,
+    vec!["app".to_string(), "lib".to_string()],
+    "app imports `widget` and must be affected even with a non-canonical cwd"
+  );
+}
+
 /// Deleting a *member* of an exported symbol (a property removed from an object)
 /// is also a pure `+Z,0` deletion. Recovery resolves the enclosing symbol
 /// (`widget`) from the base revision so `app`, which imports `widget`, is

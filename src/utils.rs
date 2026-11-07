@@ -12,6 +12,28 @@ use tracing::debug;
 /// (which report as `mts`/`cts`) without needing separate entries.
 const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 
+/// Resolve a workspace root to its absolute, canonical (symlink-free) form.
+///
+/// Every resolver call site makes `oxc_resolver`'s output workspace-relative
+/// with `strip_prefix(cwd)`. The resolver returns realpaths, so a relative
+/// root (`.`), one containing `..`, or one reached through a symlink (macOS
+/// `/var` → `/private/var`) fails that prefix check for every import, and the
+/// import index silently comes out empty. Normalising once at each entry point
+/// keeps all downstream comparisons in the same form.
+///
+/// `dunce` rather than `Path::canonicalize`: on Windows the std version returns
+/// a `\\?\C:\...` verbatim path, while `oxc_resolver` strips that prefix from
+/// the paths it returns, so the prefix check would fail there instead.
+pub fn canonical_workspace_root(cwd: &Path) -> crate::error::Result<PathBuf> {
+  dunce::canonicalize(cwd).map_err(|e| {
+    crate::error::DominoError::InvalidConfig(format!(
+      "cannot resolve workspace root {}: {}",
+      cwd.display(),
+      e
+    ))
+  })
+}
+
 /// Check if a file is a source file (TypeScript/JavaScript)
 /// These are files that can be parsed by the Oxc parser
 pub fn is_source_file(path: &Path) -> bool {
@@ -226,6 +248,29 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_canonical_workspace_root_removes_dot_segments() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let canonical = dunce::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+
+    let root = canonical_workspace_root(&tmp.path().join("sub").join("..").join(".")).unwrap();
+
+    assert_eq!(root, canonical);
+    assert!(root.is_absolute());
+  }
+
+  #[test]
+  fn test_canonical_workspace_root_reports_missing_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+
+    let err = canonical_workspace_root(&missing).unwrap_err();
+
+    assert!(matches!(err, crate::error::DominoError::InvalidConfig(_)));
+    assert!(err.to_string().contains("does-not-exist"), "{err}");
+  }
 
   #[test]
   fn test_is_source_file() {

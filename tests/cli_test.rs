@@ -190,6 +190,47 @@ export function unusedFn() {
   );
 }
 
+/// `--cwd .` must trace imports exactly like the default (absolute) cwd. A
+/// relative cwd used to fail every `strip_prefix(cwd)` on the resolver's
+/// realpaths, leaving the import index empty so import-only dependents
+/// (here `proj2`, which imports `proj1`) silently dropped out.
+#[test]
+fn test_relative_cwd_matches_default_cwd() {
+  let branch = TestBranch::new("test-relative-cwd");
+
+  branch.make_change(
+    "proj1/index.ts",
+    r#"export function proj1() {
+  return 'proj1-modified';
+}
+
+export function unusedFn() {
+  return 'unusedFn';
+}
+"#,
+  );
+
+  let parse = |output: std::process::Output| -> Vec<String> {
+    assert!(output.status.success(), "Command should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut projects: Vec<String> =
+      serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON ({e}): {stdout}"));
+    projects.sort();
+    projects
+  };
+
+  let default_cwd = parse(branch.run_domino(&["affected", "--base", "main", "--json"]));
+  let relative_cwd =
+    parse(branch.run_domino(&["affected", "--base", "main", "--json", "--cwd", "."]));
+
+  assert!(
+    relative_cwd.contains(&"proj2".to_string()),
+    "proj2 imports proj1 and must be affected with --cwd . Got: {:?}",
+    relative_cwd
+  );
+  assert_eq!(relative_cwd, default_cwd);
+}
+
 #[test]
 fn test_root_tsconfig_strategy_flag() {
   let branch = TestBranch::new("test-root-tsconfig-strategy");

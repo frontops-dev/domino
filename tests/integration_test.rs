@@ -4827,6 +4827,45 @@ fn test_non_canonical_cwd_still_traces_imports() {
   );
 }
 
+/// A workspace root reached through a symlink (a symlinked checkout, or macOS
+/// `/var` → `/private/var`) must trace imports too: the resolver returns
+/// realpaths, which do not start with the symlinked spelling.
+#[cfg(unix)]
+#[test]
+fn test_symlinked_cwd_still_traces_imports() {
+  let (_tmp, root, mut config) = scaffold_lib_app_repo(
+    r#"export const widget = () => 1;
+"#,
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    r#"export const widget = () => 2;
+"#,
+  )
+  .unwrap();
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "change widget"]);
+
+  let link_dir = TempDir::new().expect("Failed to create temp dir");
+  let link = link_dir.path().join("workspace-link");
+  std::os::unix::fs::symlink(&root, &link).expect("Failed to create symlink");
+  config.cwd = link;
+
+  let profiler = Arc::new(Profiler::new(false));
+  let mut affected = find_affected(config, profiler)
+    .expect("find_affected failed")
+    .affected_projects;
+  affected.sort();
+
+  assert_eq!(
+    affected,
+    vec!["app".to_string(), "lib".to_string()],
+    "app imports `widget` and must be affected when cwd is a symlink"
+  );
+}
+
 /// Deleting a *member* of an exported symbol (a property removed from an object)
 /// is also a pure `+Z,0` deletion. Recovery resolves the enclosing symbol
 /// (`widget`) from the base revision so `app`, which imports `widget`, is

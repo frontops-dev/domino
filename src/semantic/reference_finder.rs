@@ -24,6 +24,9 @@ pub struct ReferenceFinder<'a> {
 }
 
 impl<'a> ReferenceFinder<'a> {
+  /// `cwd` must be the same canonical workspace root the analyzer was built
+  /// with (see [`crate::utils::canonical_workspace_root`]); otherwise resolved
+  /// imports fail `strip_prefix(cwd)` and are dropped.
   pub fn new(analyzer: &'a WorkspaceAnalyzer, cwd: &Path, profiler: Arc<Profiler>) -> Self {
     Self {
       analyzer,

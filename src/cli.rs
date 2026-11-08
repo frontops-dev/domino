@@ -104,7 +104,11 @@ pub fn run() -> Result<()> {
       lockfile_strategy,
       root_tsconfig_strategy,
     } => {
-      let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap());
+      let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir()?,
+      };
+      let cwd = crate::utils::canonical_workspace_root(&cwd)?;
 
       // Enable profiling via --profile flag or DOMINO_PROFILE env var
       let enable_profiling = profile || std::env::var("DOMINO_PROFILE").is_ok();

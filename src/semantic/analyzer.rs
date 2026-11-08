@@ -178,6 +178,12 @@ pub struct WorkspaceAnalyzer {
 
 impl WorkspaceAnalyzer {
   /// Create a new workspace analyzer
+  ///
+  /// `cwd` must be the canonical workspace root (see
+  /// [`crate::utils::canonical_workspace_root`]); `core::find_affected` does
+  /// this for you. Resolved imports are realpaths made workspace-relative with
+  /// `strip_prefix(cwd)`, so a relative, `..`-containing or symlinked `cwd`
+  /// silently drops every resolved import from the index.
   pub fn new(projects: Vec<Project>, cwd: &Path, profiler: Arc<Profiler>) -> Result<Self> {
     let mut tsconfig_path_prefixes = super::parse_tsconfig_path_prefixes(cwd);
     tsconfig_path_prefixes.extend(super::package_name_prefixes(cwd, &projects));

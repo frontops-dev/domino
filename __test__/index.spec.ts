@@ -2,7 +2,7 @@ import test from 'ava'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 import { findAffected, discoverProjects } from '../index'
 
@@ -69,4 +69,41 @@ testWithGit('findAffected applies the root tsconfig strategy', (t) => {
   t.throws(() => findAffected({ ...options, rootTsconfigStrategy: 'some' }), {
     message: /Invalid root tsconfig strategy/,
   })
+})
+
+testWithGit('findAffected traces imports when cwd is relative', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'domino-relative-cwd-'))
+  t.teardown(() => rmSync(root, { recursive: true, force: true }))
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' })
+
+  writeFileSync(join(root, 'nx.json'), '{}')
+  writeFileSync(
+    join(root, 'tsconfig.base.json'),
+    '{ "compilerOptions": { "paths": { "@acme/lib": ["libs/lib/src/index.ts"] } } }',
+  )
+  mkdirSync(join(root, 'libs/lib/src'), { recursive: true })
+  writeFileSync(join(root, 'libs/lib/project.json'), JSON.stringify({ name: 'lib', sourceRoot: 'libs/lib/src' }))
+  writeFileSync(join(root, 'libs/lib/src/index.ts'), 'export const widget = () => 1\n')
+  mkdirSync(join(root, 'apps/app/src'), { recursive: true })
+  writeFileSync(join(root, 'apps/app/project.json'), JSON.stringify({ name: 'app', sourceRoot: 'apps/app/src' }))
+  writeFileSync(
+    join(root, 'apps/app/src/main.ts'),
+    "import { widget } from '@acme/lib'\nexport const run = () => widget()\n",
+  )
+  git('init', '-q', '-b', 'main')
+  git('add', '.')
+  git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'base')
+  git('checkout', '-q', '-b', 'feature')
+  writeFileSync(join(root, 'libs/lib/src/index.ts'), 'export const widget = () => 2\n')
+  git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-am', 'change widget')
+
+  // `app` is reached only through its import of `widget`, which a
+  // non-canonical root used to drop from the import index.
+  const cwd = relative(process.cwd(), root)
+  const projects = discoverProjects(cwd)
+  t.deepEqual(projects.map((p) => p.name).sort(), ['app', 'lib'])
+  t.deepEqual(findAffected({ cwd, base: 'main', projects, lockfileStrategy: 'none' }).affectedProjects.sort(), [
+    'app',
+    'lib',
+  ])
 })

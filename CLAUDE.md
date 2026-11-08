@@ -399,6 +399,19 @@ This allows:
 - Version bumps go through `yarn version` → `napi version` + `scripts/sync-version.js`,
   which keeps `Cargo.toml` and the native-binding version checks in `index.js` in sync with
   `package.json` (covered by `tests/sync-version.test.js`, run in the CI `lint` job).
+- The release version is decided by the `release-version` CI job, before `build`, because the
+  binaries compile it in (`--version`, JSON output, report headers). `build` sets it in
+  `package.json`, `Cargo.toml` and `index.js` before compiling. `publish` checks it again in its
+  serialized queue and refuses to claim the tag unless the linux-x64 gnu and musl binaries (the
+  two the runner can execute) report exactly that version (`scripts/check-binary-version.js`,
+  covered by `tests/check-binary-version.test.js`).
+  Because the version is decided before a run waits for earlier releases, two releasing merges
+  in quick succession can plan the same version, and with three the middle one's pending publish
+  is cancelled outright (a concurrency group keeps one pending job). A run that loses the tag
+  claim publishes nothing and fails, since its commits are left unreleased: "Re-run all jobs"
+  plans a fresh version and releases them, or the next release includes them. "Re-run failed
+  jobs" keeps the old plan and artifacts, so it fails the same way, after a lost claim or a
+  binary version mismatch alike.
 - A release that published but failed to push its version commit can be re-run safely: a
   release tag already on the commit makes the publish job reuse that version instead of bumping.
   The newest release tag (prereleases aside, unless the commit's own tag is one) must be the
@@ -468,6 +481,7 @@ node --test tests/publish-preview.test.js
 node --test tests/sync-version.test.js
 node --test tests/release-rerun.test.js
 node --test tests/wait-for-npm.test.js
+node --test tests/check-binary-version.test.js
 ```
 
 All tests must pass before committing.

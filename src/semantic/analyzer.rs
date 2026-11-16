@@ -594,7 +594,7 @@ impl WorkspaceAnalyzer {
   /// Parse a single file independently, returning all data needed for the merge phase.
   /// This is a pure function with no `&self` — safe to call from parallel iterators.
   fn parse_single_file(file_path: &Path, relative_path: PathBuf) -> Result<ParseResult> {
-    let source = fs::read_to_string(file_path)?;
+    let source = strip_bom(fs::read_to_string(file_path)?);
 
     let source_type = SourceType::from_path(file_path)
       .unwrap_or_else(|_| SourceType::default().with_typescript(true));
@@ -670,6 +670,7 @@ impl WorkspaceAnalyzer {
   /// against a base-revision snapshot of deleted code, which is never added to
   /// `self.files`.
   fn parse_source(file_path: &Path, source: String) -> Result<FileSemanticData> {
+    let source = strip_bom(source);
     let source_type = SourceType::from_path(file_path)
       .unwrap_or_else(|_| SourceType::default().with_typescript(true));
 
@@ -712,6 +713,24 @@ impl WorkspaceAnalyzer {
       lookup: FileLookup::default(),
     })
   }
+}
+
+/// Drop a leading UTF-8 byte order mark (U+FEFF) from `source`.
+///
+/// Oxc does not skip a BOM: its spans stay byte offsets into the original
+/// text, so the first statement starts at byte 3 and only the `Program` node
+/// contains offset 0, the start of git's line 1. A changed line 1 then
+/// resolves to no symbol. Oxc also only recognises a hashbang at byte 0, so a
+/// BOM before `#!` turns the whole file into a parse error and it loses all of
+/// its imports and exports. Every parse path strips the BOM before parsing, so
+/// the stored `source` (and the line index, spans and offsets computed from
+/// it) all describe the same text. Line numbers are unchanged: a BOM is not a
+/// newline.
+fn strip_bom(mut source: String) -> String {
+  if source.starts_with('\u{feff}') {
+    source.drain(..'\u{feff}'.len_utf8());
+  }
+  source
 }
 
 /// Visitor to collect dynamic imports (import() expressions)
@@ -1857,6 +1876,121 @@ enum Color { Red, Green, x }
     assert_eq!(
       containers_of_references("crlf-ref.ts", crlf, "a"),
       vec![vec!["t".to_string()]]
+    );
+  }
+
+  /// A leading BOM must not shift the first declaration away from line 1:
+  /// without stripping it, oxc starts the first statement at byte 3 and only
+  /// the `Program` node contains offset 0, so line 1 resolved to no symbol.
+  /// Covers the base-revision path (`parse_source`).
+  #[test]
+  fn find_top_level_symbols_bom_resolves_line_one() {
+    let source = "\u{feff}export const a = 1;\nexport const b = 2;\n";
+    assert_eq!(symbols_per_line("bom.ts", source, 2), names(&["a", "b"]));
+  }
+
+  /// Same as above through the working-tree path (`parse_single_file`, via
+  /// `WorkspaceAnalyzer::new` over a real file on disk).
+  #[test]
+  fn find_node_at_line_bom_file_on_disk_resolves_line_one() {
+    let (_tmp, analyzer) = analyzer_over_files(&[(
+      "src/bom.ts",
+      "\u{feff}export const a = 1;\nexport const b = 2;\n",
+    )]);
+    let file_path = Path::new("src/bom.ts");
+    let data = analyzer
+      .files
+      .get(file_path)
+      .expect("bom.ts should be parsed");
+    assert!(
+      !data.source().starts_with('\u{feff}'),
+      "the stored source must have its BOM stripped"
+    );
+    assert_eq!(
+      WorkspaceAnalyzer::find_top_level_symbols(data, 1, 0).unwrap(),
+      vec!["a".to_string()]
+    );
+    assert_eq!(
+      analyzer.find_node_at_line(file_path, 1, 0).unwrap(),
+      vec!["a".to_string()]
+    );
+    assert_eq!(
+      analyzer.find_node_at_line(file_path, 2, 0).unwrap(),
+      vec!["b".to_string()]
+    );
+  }
+
+  /// Oxc only recognises a hashbang at byte 0, so a BOM before `#!` made the
+  /// whole file a parse error: it lost every import and export.
+  #[test]
+  fn bom_before_hashbang_keeps_imports_and_exports() {
+    let (_tmp, analyzer) = analyzer_over_files(&[
+      ("src/lib.ts", "export const dep = 1;\n"),
+      (
+        "src/cli.ts",
+        "\u{feff}#!/usr/bin/env node\nexport const widget = () => 1;\nimport { dep } from './lib';\n",
+      ),
+    ]);
+    let file_path = Path::new("src/cli.ts");
+    let exports: Vec<&str> = analyzer
+      .exports
+      .get(file_path)
+      .into_iter()
+      .flatten()
+      .map(|e| e.exported_name.as_str())
+      .collect();
+    assert_eq!(exports, vec!["widget"]);
+    let imports: Vec<&str> = analyzer
+      .imports
+      .get(file_path)
+      .into_iter()
+      .flatten()
+      .map(|i| i.from_module.as_str())
+      .collect();
+    assert_eq!(imports, vec!["./lib"]);
+    assert_eq!(
+      analyzer.find_node_at_line(file_path, 2, 0).unwrap(),
+      vec!["widget".to_string()]
+    );
+  }
+
+  /// A reference on a BOM-prefixed line 1 reports the same position as in the
+  /// BOM-less file and resolves to the same container.
+  #[test]
+  fn local_reference_on_bom_line_matches_bom_less_position() {
+    let plain = "const a = 1; export const t = a;\nexport const u = a;\n";
+    let with_bom = format!("\u{feff}{plain}");
+    let positions = |file_name: &str, source: &str| {
+      let mut analyzer =
+        WorkspaceAnalyzer::new(vec![], Path::new("."), Arc::new(Profiler::new(false)))
+          .expect("Failed to create analyzer");
+      let file_path = Path::new(file_name);
+      analyzer.files.insert(
+        file_path.to_path_buf(),
+        WorkspaceAnalyzer::parse_source(file_path, source.to_string()).unwrap(),
+      );
+      analyzer
+        .find_local_references(file_path, "a")
+        .unwrap()
+        .iter()
+        .map(|r| (r.line, r.column))
+        .collect::<Vec<_>>()
+    };
+    let expected = positions("plain.ts", plain);
+    assert!(!expected.is_empty());
+    assert_eq!(positions("bom.ts", &with_bom), expected);
+    assert_eq!(
+      containers_of_references("bom-ref.ts", &with_bom, "a"),
+      vec![vec!["t".to_string()], vec!["u".to_string()]]
+    );
+  }
+
+  #[test]
+  fn find_top_level_symbols_bom_crlf_resolves_each_line() {
+    let source = "\u{feff}export const a = 1;\r\nexport const b = 2;\r\nexport const c = 3;\r\n";
+    assert_eq!(
+      symbols_per_line("bom-crlf.ts", source, 3),
+      names(&["a", "b", "c"])
     );
   }
 

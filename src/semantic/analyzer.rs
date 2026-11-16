@@ -1226,10 +1226,11 @@ impl WorkspaceAnalyzer {
     column: usize,
   ) -> Result<Vec<String>> {
     // Get the exact offset using both line and column
-    let line_start = file_data
-      .lines()
-      .line_to_offset(line)
-      .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
+    // A line past the end of the file (e.g. a `--head` diff against a shorter
+    // working tree) holds no declaration.
+    let Some(line_start) = file_data.lines().line_to_offset(line) else {
+      return Ok(Vec::new());
+    };
     let line_end = file_data
       .lines()
       .line_to_offset(line + 1)
@@ -1782,11 +1783,7 @@ enum Color { Red, Green, x }
       let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
       assert_eq!(at(1).unwrap(), vec!["a".to_string()], "{label}");
       assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
-      assert_eq!(
-        at(past).unwrap_or_default(),
-        Vec::<String>::new(),
-        "{label}"
-      );
+      assert_eq!(at(past).unwrap(), Vec::<String>::new(), "{label}");
     }
     // With a trailing newline line 3 is an empty line that git may report.
     for (label, source) in [
@@ -1797,8 +1794,8 @@ enum Color { Red, Green, x }
         WorkspaceAnalyzer::parse_source(Path::new("eof.ts"), source.to_string()).unwrap();
       let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
       assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
-      assert_eq!(at(3).unwrap_or_default(), Vec::<String>::new(), "{label}");
-      assert_eq!(at(4).unwrap_or_default(), Vec::<String>::new(), "{label}");
+      assert_eq!(at(3).unwrap(), Vec::<String>::new(), "{label}");
+      assert_eq!(at(4).unwrap(), Vec::<String>::new(), "{label}");
     }
   }
 

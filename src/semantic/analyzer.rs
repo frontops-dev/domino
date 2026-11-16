@@ -12,6 +12,7 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::node::NodeId;
+use oxc_syntax::symbol::SymbolId;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
@@ -119,6 +120,7 @@ pub struct FileSemanticData {
 struct FileLookup {
   lines: OnceLock<crate::utils::LineIndex>,
   nodes: OnceLock<NodeSpanIndex>,
+  symbols_by_name: OnceLock<FxHashMap<String, Vec<SymbolId>>>,
 }
 
 /// AST node tree flattened for position queries. Each node's subtree bounds cover
@@ -216,6 +218,22 @@ impl FileSemanticData {
       .lookup
       .lines
       .get_or_init(|| crate::utils::LineIndex::new(&self.source))
+  }
+
+  /// Every symbol declared with `name` (in any scope), in symbol-id order.
+  fn symbols_named(&self, name: &str) -> &[SymbolId] {
+    let by_name = self.lookup.symbols_by_name.get_or_init(|| {
+      let scoping = self.semantic.scoping();
+      let mut by_name: FxHashMap<String, Vec<SymbolId>> = FxHashMap::default();
+      for symbol_id in scoping.symbol_ids() {
+        by_name
+          .entry(scoping.symbol_name(symbol_id).to_string())
+          .or_default()
+          .push(symbol_id);
+      }
+      by_name
+    });
+    by_name.get(name).map(Vec::as_slice).unwrap_or_default()
   }
 
   fn node_spans(&self) -> &NodeSpanIndex {
@@ -943,24 +961,19 @@ impl WorkspaceAnalyzer {
 
     let mut references = Vec::new();
 
-    // Iterate through all symbols in the file
-    for symbol_id in file_data.semantic().scoping().symbol_ids() {
-      let name = file_data.semantic().scoping().symbol_name(symbol_id);
+    for &symbol_id in file_data.symbols_named(symbol_name) {
+      // Get all references to this symbol using the Semantic API directly
+      for reference in file_data.semantic().symbol_references(symbol_id) {
+        let span = file_data.semantic().reference_span(reference);
+        let (line, column) = file_data
+          .lines()
+          .offset_to_line_col(file_data.source(), span.start as usize);
 
-      if name == symbol_name {
-        // Get all references to this symbol using the Semantic API directly
-        for reference in file_data.semantic().symbol_references(symbol_id) {
-          let span = file_data.semantic().reference_span(reference);
-          let (line, column) = file_data
-            .lines()
-            .offset_to_line_col(file_data.source(), span.start as usize);
-
-          references.push(Reference {
-            file_path: file_path.to_path_buf(),
-            line,
-            column,
-          });
-        }
+        references.push(Reference {
+          file_path: file_path.to_path_buf(),
+          line,
+          column,
+        });
       }
     }
 

@@ -5904,8 +5904,8 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
     .affected_projects
 }
 
-/// Changed files that share downstream consumers are traced through one
-/// visited set. Whichever file is traced first claims the shared consumer;
+/// Changed files that share downstream consumers skip the nodes an earlier
+/// file already traced. Whichever file is traced first claims the shared consumer;
 /// the other file must still reach the consumer only it has, and the result
 /// must equal tracing each file on its own and with the report enabled.
 #[test]

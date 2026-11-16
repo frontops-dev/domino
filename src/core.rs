@@ -24,6 +24,10 @@ struct AffectedState<'a> {
   affected_packages: &'a mut FxHashSet<String>,
   project_causes: Option<&'a mut FxHashMap<String, Vec<AffectCause>>>,
   visited: &'a mut FxHashSet<(PathBuf, String)>,
+  /// Nodes fully traced by earlier changed files that finished without an error
+  /// (see `shared_visited` in `find_affected_internal`). Only read here; it is
+  /// extended between files, never during a traversal.
+  completed: Option<&'a FxHashSet<(PathBuf, String)>>,
 }
 
 /// Record a `DirectChange` cause for `pkg` for each changed line (or a
@@ -229,11 +233,20 @@ fn find_affected_internal(
   );
 
   // Traversal from a (file, symbol) node reaches the same packages no matter which
-  // changed file it started from, so one visited set serves every changed file.
-  // Without this, a diff touching many files that share consumers re-traces the
-  // same downstream graph once per file. The report path keeps a per-file set so
-  // its output (the cause paths recorded per changed file) stays identical to
-  // before this sharing was introduced.
+  // changed file it started from, so nodes traced by one changed file can be
+  // skipped by the next. Without this, a diff touching many files that share
+  // consumers re-traces the same downstream graph once per file.
+  //
+  // Each file still traces with its own per-file visited set, exactly as before.
+  // That set is merged in here only when every symbol of the file traced without
+  // an error: in a clean depth-first traversal, a node that skipped an ancestor
+  // still on the stack is covered once that ancestor completes, so by the end of
+  // the file every node in the set has its full closure in `affected_packages`.
+  // A file whose traversal failed part-way merges nothing, so a partially traced
+  // node can never suppress a later file's traversal.
+  //
+  // The report path does not use this set, so its output (the cause paths recorded
+  // per changed file) stays identical to before this sharing was introduced.
   let mut shared_visited: FxHashSet<(PathBuf, String)> = FxHashSet::default();
 
   // Step 6a: Process source files
@@ -396,19 +409,15 @@ fn find_affected_internal(
         file_path
       );
 
-      // Trace each unique symbol exactly once with a shared visited set. Without a
-      // report the set is also shared across changed files (`shared_visited`); with
-      // a report it is per file.
+      // Trace each unique symbol exactly once with a per-file visited set. Without
+      // a report, nodes completed by earlier error-free files (`shared_visited`) are
+      // skipped as well.
       // NOTE: sharing the visited set across symbols is correct for affected_packages
       // (set insert is idempotent) but means project_causes may not record every
       // independent cause path — a project affected via two different symbols will
       // only have the cause from whichever symbol was traced first.
-      let mut per_file_visited = FxHashSet::default();
-      let visited = if generate_report {
-        &mut per_file_visited
-      } else {
-        &mut shared_visited
-      };
+      let mut visited = FxHashSet::default();
+      let mut file_had_error = false;
       let mut state = AffectedState {
         affected_packages: &mut affected_packages,
         project_causes: if generate_report {
@@ -416,7 +425,8 @@ fn find_affected_internal(
         } else {
           None
         },
-        visited,
+        visited: &mut visited,
+        completed: (!generate_report).then_some(&shared_visited),
       };
 
       for symbol_name in &unique_symbols {
@@ -429,11 +439,16 @@ fn find_affected_internal(
           &project_index,
           &mut state,
         ) {
+          file_had_error = true;
           debug!(
             "Error processing symbol '{}' in {:?}: {}",
             symbol_name, file_path, e
           );
         }
+      }
+
+      if !generate_report {
+        promote_completed(&mut shared_visited, visited, file_had_error);
       }
     }
   }
@@ -568,6 +583,7 @@ fn find_affected_internal(
                       None
                     },
                     visited: &mut visited,
+                    completed: None,
                   };
 
                   debug!(
@@ -607,6 +623,7 @@ fn find_affected_internal(
                     None
                   },
                   visited: &mut visited,
+                  completed: None,
                 };
 
                 if let Err(e) = process_changed_symbol(
@@ -707,6 +724,7 @@ fn find_affected_internal(
                         None
                       },
                       visited: &mut lockfile_visited,
+                      completed: None,
                     };
                     if let Err(e) = process_changed_symbol(
                       &analyzer,
@@ -870,6 +888,7 @@ fn find_affected_internal(
             None
           },
           visited: &mut alias_visited,
+          completed: None,
         };
         if let Err(e) = process_changed_symbol(
           &analyzer,
@@ -1058,31 +1077,36 @@ fn process_changed_symbol(
 ) -> Result<()> {
   // Avoid infinite recursion
   let key = (file_path.to_path_buf(), symbol_name.to_string());
-  if !state.visited.insert(key) {
+  if state.completed.is_some_and(|done| done.contains(&key)) || !state.visited.insert(key) {
     return Ok(());
   }
 
-  let result = trace_changed_symbol(
+  trace_changed_symbol(
     analyzer,
     reference_finder,
     file_path,
     symbol_name,
     project_index,
     state,
-  );
-  if result.is_err() {
-    // The visited set can outlive this call (it is shared across changed files),
-    // so a node whose traversal failed part-way must not stay marked as done:
-    // a later changed file reaching it would otherwise skip the rest of its graph.
-    state
-      .visited
-      .remove(&(file_path.to_path_buf(), symbol_name.to_string()));
+  )
+}
+
+/// Merge a changed file's per-file visited set into the cross-file set once its
+/// traversal is over. A file where any symbol failed contributes nothing: a node
+/// can complete while skipping an ancestor that is still on the stack, and if that
+/// ancestor then fails, the skipped references were never traced.
+fn promote_completed(
+  completed: &mut FxHashSet<(PathBuf, String)>,
+  file_visited: FxHashSet<(PathBuf, String)>,
+  file_had_error: bool,
+) {
+  if !file_had_error {
+    completed.extend(file_visited);
   }
-  result
 }
 
 /// The traversal behind [`process_changed_symbol`], run once its `(file, symbol)`
-/// node has been claimed in the visited set.
+/// node has been claimed in the per-file visited set.
 fn trace_changed_symbol(
   analyzer: &WorkspaceAnalyzer,
   reference_finder: &ReferenceFinder,
@@ -1576,5 +1600,90 @@ mod tests {
       &names,
     );
     assert_eq!(expanded, vec!["app-a".to_string(), "app-b".to_string()]);
+  }
+
+  fn visited_key(file: &str, symbol: &str) -> (PathBuf, String) {
+    (PathBuf::from(file), symbol.to_string())
+  }
+
+  #[test]
+  fn test_promote_completed_skips_files_with_a_failed_traversal() {
+    let mut completed = FxHashSet::default();
+
+    let failed: FxHashSet<_> = [visited_key("a.ts", "a"), visited_key("b.ts", "b")]
+      .into_iter()
+      .collect();
+    promote_completed(&mut completed, failed, true);
+    assert!(
+      completed.is_empty(),
+      "a file whose traversal failed part-way must not mark any node as done"
+    );
+
+    let clean: FxHashSet<_> = [visited_key("c.ts", "c"), visited_key("d.ts", "d")]
+      .into_iter()
+      .collect();
+    promote_completed(&mut completed, clean.clone(), false);
+    assert_eq!(completed, clean);
+  }
+
+  #[test]
+  fn test_process_changed_symbol_skips_completed_and_keeps_failed_nodes_per_file() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let profiler = Arc::new(Profiler::new(false));
+    let analyzer = WorkspaceAnalyzer::new(vec![], dir.path(), profiler.clone()).unwrap();
+    let reference_finder = ReferenceFinder::new(&analyzer, dir.path(), profiler);
+    let project_index = ProjectIndex::new(&[], dir.path());
+
+    // Neither file is in the analyzer, so tracing either one fails with FileNotFound.
+    let done = dir.path().join("done.ts");
+    let missing = dir.path().join("missing.ts");
+    let completed: FxHashSet<_> = [(done.clone(), "done".to_string())].into_iter().collect();
+
+    let mut affected_packages = FxHashSet::default();
+    let mut visited = FxHashSet::default();
+    let mut state = AffectedState {
+      affected_packages: &mut affected_packages,
+      project_causes: None,
+      visited: &mut visited,
+      completed: Some(&completed),
+    };
+
+    // A node completed by an earlier clean file is skipped before any lookup.
+    process_changed_symbol(
+      &analyzer,
+      &reference_finder,
+      &done,
+      "done",
+      &project_index,
+      &mut state,
+    )
+    .expect("a completed node must be skipped, not traced");
+
+    // A node that fails stays in the per-file set, exactly like the per-file
+    // traversal before the cross-file set existed, so later symbols of the same
+    // file skip it rather than re-tracing it.
+    assert!(process_changed_symbol(
+      &analyzer,
+      &reference_finder,
+      &missing,
+      "missing",
+      &project_index,
+      &mut state,
+    )
+    .is_err());
+    assert!(process_changed_symbol(
+      &analyzer,
+      &reference_finder,
+      &missing,
+      "missing",
+      &project_index,
+      &mut state,
+    )
+    .is_ok());
+
+    assert_eq!(
+      visited,
+      [(missing, "missing".to_string())].into_iter().collect()
+    );
   }
 }

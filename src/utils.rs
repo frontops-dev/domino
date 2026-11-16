@@ -211,7 +211,8 @@ impl ProjectIndex {
 /// Lines are numbered the way git numbers hunk lines: only `\n` terminates a
 /// line, so line N starts right after the (N-1)th `\n`. A CRLF line's `\r`
 /// belongs to the line it ends, and a lone `\r` (classic Mac OS) does not
-/// start a new line. A line past the end of the text starts at `source.len()`.
+/// start a new line. A line past the end of the text has no start (`None`); the
+/// empty line after a trailing `\n` does, and starts at `source.len()`.
 // Kept as the reference that `LineIndex` is tested against.
 #[allow(dead_code)]
 pub fn line_to_offset(source: &str, line: usize) -> Option<usize> {
@@ -227,7 +228,8 @@ pub fn line_to_offset(source: &str, line: usize) -> Option<usize> {
       }
     }
   }
-  Some(source.len())
+  // Fewer than `line - 1` newlines: the line does not exist.
+  None
 }
 
 /// Convert byte offset to line and column
@@ -266,29 +268,19 @@ pub struct LineIndex {
   /// Byte positions of every `\n`. Line N (1-indexed) starts at
   /// `newlines[N - 2] + 1`.
   newlines: Vec<usize>,
-  /// Length of the source, the start offset reported for lines past the end.
-  len: usize,
 }
 
 impl LineIndex {
   pub fn new(source: &str) -> Self {
     let newlines = source.match_indices('\n').map(|(i, _)| i).collect();
-    Self {
-      newlines,
-      len: source.len(),
-    }
+    Self { newlines }
   }
 
   pub fn line_to_offset(&self, line: usize) -> Option<usize> {
     if line <= 1 {
       return Some(0);
     }
-    Some(
-      self
-        .newlines
-        .get(line - 2)
-        .map_or(self.len, |&newline| newline + 1),
-    )
+    self.newlines.get(line - 2).map(|&newline| newline + 1)
   }
 
   pub fn offset_to_line_col(&self, source: &str, offset: usize) -> (usize, usize) {
@@ -382,14 +374,10 @@ mod tests {
           "{source:?} line {line}"
         );
       }
-      // Past the last line: the end of the text, never beyond it.
+      // Past the last line: no such line, so no offset.
       let past = starts.len() + 1;
-      assert_eq!(index.line_to_offset(past), Some(source.len()), "{source:?}");
-      assert_eq!(
-        line_to_offset(source, past),
-        Some(source.len()),
-        "{source:?}"
-      );
+      assert_eq!(index.line_to_offset(past), None, "{source:?}");
+      assert_eq!(line_to_offset(source, past), None, "{source:?}");
     }
     // Lines and columns agree: a CRLF line's first byte is column 1 of it.
     let source = "ab\r\ncd\r\n";

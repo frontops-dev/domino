@@ -1488,7 +1488,10 @@ mod tests {
 
   #[test]
   fn node_span_index_matches_a_full_scan_at_every_offset() {
-    let source = r#"import { Component, Input } from '@angular/core';
+    let cases: &[(&str, &str)] = &[
+      (
+        "x.ts",
+        r#"import { Component, Input } from '@angular/core';
 
 @Component({ selector: 'x', template: '<b></b>' })
 export class Foo {
@@ -1501,24 +1504,144 @@ export { helper as h, Foo as F };
 export default function () { return `t${helper()}`; }
 export enum E { A = 'a', B = 'b' }
 export interface I { x: string }
-"#;
-    let data = WorkspaceAnalyzer::parse_source(Path::new("x.ts"), source.to_string()).unwrap();
-    let nodes = data.semantic().nodes();
-    for offset in 0..=source.len() + 1 {
-      let scanned: Vec<NodeId> = nodes
-        .iter()
-        .filter(|n| {
-          let span = n.kind().span();
-          span.start as usize <= offset && span.end as usize >= offset
-        })
-        .map(|n| n.id())
-        .collect();
-      assert_eq!(
-        data.node_spans().containing(nodes, offset),
-        scanned,
-        "offset {offset}"
-      );
+"#,
+      ),
+      (
+        "Widget.tsx",
+        r#"import { Child } from './child';
+
+export const Widget = ({ items }: { items: string[] }) => (
+  <section className="w">
+    <Child>
+      {items.map((i) => (
+        <span key={i}>{i}</span>
+      ))}
+    </Child>
+    <>{/* fragment */}<br /></>
+  </section>
+);
+"#,
+      ),
+      ("empty.ts", ""),
+      (
+        "bom.ts",
+        "\u{feff}export const a = 1;\nexport function f() { return a; }\n",
+      ),
+      (
+        "crlf.ts",
+        "export const a = 1;\r\n\r\nexport function f() {\r\n  return a;\r\n}\r\n",
+      ),
+      (
+        "default-decorated.ts",
+        "export default @Dec class C { constructor(@Inject() a) {} @Input() set v(x) {} }\n",
+      ),
+      ("decorated-before-export.ts", "@Dec export class D {}\n"),
+    ];
+    for &(file_name, source) in cases {
+      let data = WorkspaceAnalyzer::parse_source(Path::new(file_name), source.to_string()).unwrap();
+      let nodes = data.semantic().nodes();
+      for offset in 0..=source.len() + 1 {
+        let scanned: Vec<NodeId> = nodes
+          .iter()
+          .filter(|n| {
+            let span = n.kind().span();
+            span.start as usize <= offset && span.end as usize >= offset
+          })
+          .map(|n| n.id())
+          .collect();
+        assert_eq!(
+          data.node_spans().containing(nodes, offset),
+          scanned,
+          "{file_name}: offset {offset}"
+        );
+      }
     }
+  }
+
+  #[test]
+  fn symbols_named_matches_full_scan() {
+    let source = r#"import { y as x2 } from './y';
+
+export const x = 1;
+
+function takesX(x: number) {
+  {
+    let x = 2;
+    return x;
+  }
+}
+
+try {
+  takesX(x);
+} catch (x) {
+  console.log(x, x2);
+}
+
+interface Foo { a: string }
+const Foo = { a: 'a' };
+
+namespace NS {
+  export const x = 3;
+}
+
+enum Color { Red, Green, x }
+"#;
+    let data = WorkspaceAnalyzer::parse_source(Path::new("names.ts"), source.to_string()).unwrap();
+    let scoping = data.semantic().scoping();
+
+    let mut names: Vec<String> = scoping
+      .symbol_ids()
+      .map(|id| scoping.symbol_name(id).to_string())
+      .collect();
+    names.sort();
+    names.dedup();
+    // Guard against the fixture silently losing the duplicate-name cases that
+    // make this test meaningful.
+    let x_count = scoping
+      .symbol_ids()
+      .filter(|&id| scoping.symbol_name(id) == "x")
+      .count();
+    assert!(
+      x_count >= 4,
+      "expected several symbols named x, got {x_count}"
+    );
+
+    for name in &names {
+      let scanned: Vec<SymbolId> = scoping
+        .symbol_ids()
+        .filter(|&id| scoping.symbol_name(id) == name.as_str())
+        .collect();
+      assert_eq!(data.symbols_named(name), scanned.as_slice(), "name {name}");
+    }
+    assert!(data.symbols_named("not_declared_anywhere").is_empty());
+  }
+
+  #[test]
+  fn find_local_references_reaches_top_level_despite_shadowing_param() {
+    // The parameter `value` is declared (and gets its symbol id) before the
+    // top-level `value`; a lookup that stopped at the first symbol with the
+    // name would miss the use inside `g`.
+    let source =
+      "function f(value) { return value; }\nconst value = 1;\nexport const g = () => value;\n";
+    let file_path = Path::new("shadow.ts");
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), Arc::new(Profiler::new(false)))
+        .expect("Failed to create analyzer");
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      WorkspaceAnalyzer::parse_source(file_path, source.to_string()).unwrap(),
+    );
+
+    let refs = analyzer.find_local_references(file_path, "value").unwrap();
+    let lines: Vec<usize> = refs.iter().map(|r| r.line).collect();
+    assert!(
+      lines.contains(&3),
+      "use of top-level `value` inside `g` (line 3) missing: {lines:?}"
+    );
+    assert!(
+      lines.contains(&1),
+      "use of parameter `value` (line 1) missing: {lines:?}"
+    );
   }
   use std::path::Path;
 

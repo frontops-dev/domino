@@ -311,6 +311,14 @@ mod tests {
       "crlf\r\nline\r\n\r\nend",
       "\n\n\n",
       "héllo wörld\nñ\n日本語\nx",
+      // The CRLF, lone-CR and BOM rows are bug-compatible with the old helpers:
+      // `str::lines` strips `\r\n` as one terminator, so `line_to_offset`
+      // undercounts by a byte per CRLF line, and a leading BOM counts as a
+      // column. Those quirks are intentionally preserved; fixing them is out of
+      // scope here because it would change affected sets.
+      "a\rb",
+      "x\r",
+      "\u{feff}x",
     ];
     for source in sources {
       let index = LineIndex::new(source);

@@ -1698,6 +1698,63 @@ enum Color { Red, Green, x }
     );
   }
 
+  /// Resolve each line of `source` (as git numbers them) to its symbols.
+  fn symbols_per_line(file_name: &str, source: &str, lines: usize) -> Vec<Vec<String>> {
+    let file_data =
+      WorkspaceAnalyzer::parse_source(Path::new(file_name), source.to_string()).unwrap();
+    (1..=lines)
+      .map(|line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0).unwrap())
+      .collect()
+  }
+
+  fn names(per_line: &[&str]) -> Vec<Vec<String>> {
+    per_line.iter().map(|n| vec![n.to_string()]).collect()
+  }
+
+  /// Git counts lines by `\n`, so on a CRLF file line N starts right after the
+  /// (N-1)th `\n`. Summing `str::lines()` lengths undercounted each line start
+  /// by one byte per preceding CRLF, resolving a changed line to the previous
+  /// line's symbol (or none).
+  #[test]
+  fn find_top_level_symbols_crlf_resolves_each_line() {
+    let source =
+      "export const a = 1;\r\nexport const b = 2;\r\nexport const c = 3;\r\nexport const d = 4;\r\n";
+    assert_eq!(
+      symbols_per_line("crlf.ts", source, 4),
+      names(&["a", "b", "c", "d"])
+    );
+  }
+
+  #[test]
+  fn find_top_level_symbols_mixed_lf_crlf_resolves_each_line() {
+    let source =
+      "export const a = 1;\nexport const b = 2;\r\nexport const c = 3;\nexport const d = 4;\r\nexport const e = 5;";
+    assert_eq!(
+      symbols_per_line("mixed.ts", source, 5),
+      names(&["a", "b", "c", "d", "e"])
+    );
+  }
+
+  /// Multibyte text widens the byte gap per line; line starts must stay byte
+  /// offsets of the `\n` positions.
+  #[test]
+  fn find_top_level_symbols_crlf_multibyte_resolves_each_line() {
+    let source = "export const a = '日本語';\r\nexport const b = 'ü';\r\nexport const c = '🙂';\r\nexport const d = 4;\r\n";
+    assert_eq!(
+      symbols_per_line("crlf-multibyte.ts", source, 4),
+      names(&["a", "b", "c", "d"])
+    );
+  }
+
+  /// A lone `\r` does not end a line for git, so it must not for us either:
+  /// the declaration after it is still on line 1.
+  #[test]
+  fn find_top_level_symbols_lone_cr_stays_on_its_line() {
+    let source = "export const a = 1;\rexport const b = 2;\nexport const c = 3;\n";
+    let per_line = symbols_per_line("lone-cr.ts", source, 2);
+    assert_eq!(per_line[1], vec!["c".to_string()]);
+  }
+
   #[test]
   fn test_find_node_at_line_with_column_offset() {
     // Test that find_node_at_line uses column offset to find the correct container symbol

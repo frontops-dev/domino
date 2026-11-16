@@ -205,21 +205,29 @@ impl ProjectIndex {
   }
 }
 
-/// Convert line number to byte offset in source text
-/// Line numbers are 1-indexed, returns 0-indexed byte offset
+/// Convert a 1-indexed line number to the 0-indexed byte offset where that
+/// line starts. Line 0 is treated as line 1.
+///
+/// Lines are numbered the way git numbers hunk lines: only `\n` terminates a
+/// line, so line N starts right after the (N-1)th `\n`. A CRLF line's `\r`
+/// belongs to the line it ends, and a lone `\r` (classic Mac OS) does not
+/// start a new line. A line past the end of the text starts at `source.len()`.
 // Kept as the reference that `LineIndex` is tested against.
 #[allow(dead_code)]
 pub fn line_to_offset(source: &str, line: usize) -> Option<usize> {
-  if line == 0 {
+  let mut remaining = line.saturating_sub(1);
+  if remaining == 0 {
     return Some(0);
   }
-
-  source
-    .lines()
-    .take(line - 1) // line is 1-indexed
-    .map(|l| l.len() + 1) // +1 for newline character
-    .sum::<usize>()
-    .into()
+  for (i, &byte) in source.as_bytes().iter().enumerate() {
+    if byte == b'\n' {
+      remaining -= 1;
+      if remaining == 0 {
+        return Some(i + 1);
+      }
+    }
+  }
+  Some(source.len())
 }
 
 /// Convert byte offset to line and column
@@ -251,34 +259,36 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
 /// Precomputed line tables for one source text. Answers [`line_to_offset`] and
 /// [`offset_to_line_col`] with identical results, but in O(log lines) instead of
 /// a scan from the start of the file on every call.
+///
+/// Line numbering matches git's: only `\n` ends a line, so CRLF files number
+/// the same as LF files and a lone `\r` stays inside its line.
 pub struct LineIndex {
-  /// `line_offsets[k]` is `line_to_offset(source, k + 1)`, for every `k` up to
-  /// the number of lines.
-  line_offsets: Vec<usize>,
-  /// Byte positions of every `\n`.
+  /// Byte positions of every `\n`. Line N (1-indexed) starts at
+  /// `newlines[N - 2] + 1`.
   newlines: Vec<usize>,
+  /// Length of the source, the start offset reported for lines past the end.
+  len: usize,
 }
 
 impl LineIndex {
   pub fn new(source: &str) -> Self {
-    let mut line_offsets = vec![0];
-    let mut acc = 0;
-    for l in source.lines() {
-      acc += l.len() + 1;
-      line_offsets.push(acc);
-    }
     let newlines = source.match_indices('\n').map(|(i, _)| i).collect();
     Self {
-      line_offsets,
       newlines,
+      len: source.len(),
     }
   }
 
   pub fn line_to_offset(&self, line: usize) -> Option<usize> {
-    if line == 0 {
+    if line <= 1 {
       return Some(0);
     }
-    Some(self.line_offsets[(line - 1).min(self.line_offsets.len() - 1)])
+    Some(
+      self
+        .newlines
+        .get(line - 2)
+        .map_or(self.len, |&newline| newline + 1),
+    )
   }
 
   pub fn offset_to_line_col(&self, source: &str, offset: usize) -> (usize, usize) {
@@ -309,15 +319,17 @@ mod tests {
       "line1\nline2\nline3\n",
       "no trailing newline\nlast",
       "crlf\r\nline\r\n\r\nend",
+      "mixed\nline\r\nends\nhere\r\n",
       "\n\n\n",
+      "\r\n\r\n",
       "héllo wörld\nñ\n日本語\nx",
-      // The CRLF, lone-CR and BOM rows are bug-compatible with the old helpers:
-      // `str::lines` strips `\r\n` as one terminator, so `line_to_offset`
-      // undercounts by a byte per CRLF line, and a leading BOM counts as a
-      // column. Those quirks are intentionally preserved; fixing them is out of
-      // scope here because it would change affected sets.
+      "日本\r\nü\r\nx",
       "a\rb",
       "x\r",
+      "a\r\rb\nc",
+      // The BOM row is bug-compatible with the old helpers: a leading BOM
+      // counts as a column. That quirk is intentionally preserved; fixing it is
+      // out of scope here because it would change affected sets.
       "\u{feff}x",
     ];
     for source in sources {
@@ -337,6 +349,54 @@ mod tests {
         );
       }
     }
+  }
+
+  /// Line starts follow git's numbering: only `\n` ends a line. Pinned with
+  /// literal offsets so a bug shared by both implementations cannot hide
+  /// behind the equivalence test above.
+  #[test]
+  fn test_line_starts_follow_newlines_only() {
+    let cases: &[(&str, &[usize])] = &[
+      // CRLF: the `\r` belongs to the line it ends.
+      ("ab\r\ncd\r\nef\r\n", &[0, 4, 8, 12]),
+      // Mixed LF and CRLF.
+      ("ab\ncd\r\nef\ngh", &[0, 3, 7, 10]),
+      // Lone `\r` does not start a line.
+      ("a\rb\nc\r", &[0, 4]),
+      // Multibyte text before CRLF terminators (byte offsets, not chars).
+      ("日本\r\nü\r\nx", &[0, 8, 12]),
+      ("", &[0]),
+    ];
+    for &(source, starts) in cases {
+      let index = LineIndex::new(source);
+      for (k, &start) in starts.iter().enumerate() {
+        let line = k + 1;
+        assert_eq!(
+          line_to_offset(source, line),
+          Some(start),
+          "{source:?} line {line}"
+        );
+        assert_eq!(
+          index.line_to_offset(line),
+          Some(start),
+          "{source:?} line {line}"
+        );
+      }
+      // Past the last line: the end of the text, never beyond it.
+      let past = starts.len() + 1;
+      assert_eq!(index.line_to_offset(past), Some(source.len()), "{source:?}");
+      assert_eq!(
+        line_to_offset(source, past),
+        Some(source.len()),
+        "{source:?}"
+      );
+    }
+    // Lines and columns agree: a CRLF line's first byte is column 1 of it.
+    let source = "ab\r\ncd\r\n";
+    assert_eq!(offset_to_line_col(source, 4), (2, 1));
+    assert_eq!(LineIndex::new(source).offset_to_line_col(source, 4), (2, 1));
+    // A lone `\r` is an ordinary column, as in git.
+    assert_eq!(offset_to_line_col("a\rb", 2), (1, 3));
   }
 
   #[test]

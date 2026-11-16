@@ -231,8 +231,9 @@ fn find_affected_internal(
   // Traversal from a (file, symbol) node reaches the same packages no matter which
   // changed file it started from, so one visited set serves every changed file.
   // Without this, a diff touching many files that share consumers re-traces the
-  // same downstream graph once per file. The report keeps a per-file set so each
-  // changed file still records its own cause paths.
+  // same downstream graph once per file. The report path keeps a per-file set so
+  // its output (the cause paths recorded per changed file) stays identical to
+  // before this sharing was introduced.
   let mut shared_visited: FxHashSet<(PathBuf, String)> = FxHashSet::default();
 
   // Step 6a: Process source files
@@ -395,7 +396,9 @@ fn find_affected_internal(
         file_path
       );
 
-      // Trace each unique symbol exactly once with a shared visited set.
+      // Trace each unique symbol exactly once with a shared visited set. Without a
+      // report the set is also shared across changed files (`shared_visited`); with
+      // a report it is per file.
       // NOTE: sharing the visited set across symbols is correct for affected_packages
       // (set insert is idempotent) but means project_causes may not record every
       // independent cause path — a project affected via two different symbols will
@@ -1055,11 +1058,39 @@ fn process_changed_symbol(
 ) -> Result<()> {
   // Avoid infinite recursion
   let key = (file_path.to_path_buf(), symbol_name.to_string());
-  if state.visited.contains(&key) {
+  if !state.visited.insert(key) {
     return Ok(());
   }
-  state.visited.insert(key);
 
+  let result = trace_changed_symbol(
+    analyzer,
+    reference_finder,
+    file_path,
+    symbol_name,
+    project_index,
+    state,
+  );
+  if result.is_err() {
+    // The visited set can outlive this call (it is shared across changed files),
+    // so a node whose traversal failed part-way must not stay marked as done:
+    // a later changed file reaching it would otherwise skip the rest of its graph.
+    state
+      .visited
+      .remove(&(file_path.to_path_buf(), symbol_name.to_string()));
+  }
+  result
+}
+
+/// The traversal behind [`process_changed_symbol`], run once its `(file, symbol)`
+/// node has been claimed in the visited set.
+fn trace_changed_symbol(
+  analyzer: &WorkspaceAnalyzer,
+  reference_finder: &ReferenceFinder,
+  file_path: &Path,
+  symbol_name: &str,
+  project_index: &ProjectIndex,
+  state: &mut AffectedState,
+) -> Result<()> {
   debug!("Processing symbol '{}' in {:?}", symbol_name, file_path);
 
   // Get the source projects for causality tracking (may be multiple with shared sourceRoot)

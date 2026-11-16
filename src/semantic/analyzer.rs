@@ -154,6 +154,9 @@ impl NodeSpanIndex {
       if p == i {
         roots.push(i as u32);
       } else {
+        // The reverse-id pass below folds each node's bounds into its parent's
+        // in one sweep, which relies on oxc assigning parent ids below child ids.
+        debug_assert!(p < i, "parent id {p} not below child id {i}");
         parent[i] = p as u32;
         child_counts[p + 1] += 1;
       }

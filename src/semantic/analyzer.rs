@@ -1230,11 +1230,20 @@ impl WorkspaceAnalyzer {
       .lines()
       .line_to_offset(line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
-    let exact_offset = line_start + column;
     let line_end = file_data
       .lines()
       .line_to_offset(line + 1)
       .unwrap_or(file_data.source().len());
+    // `column` is 1-based and counted in chars (see `offset_to_line_col`), or 0
+    // for "start of line". Probe the char at 0-based index `column`, i.e. one
+    // char past the reference start, which keeps the historical ASCII probe
+    // point (`line_start + column`) while converting chars to bytes, so
+    // multibyte text earlier on the line cannot pull the probe back into a
+    // preceding declaration.
+    let exact_offset = file_data.source()[line_start..line_end]
+      .char_indices()
+      .nth(column)
+      .map_or(line_end, |(i, _)| line_start + i);
     let line_end_inclusive = line_end.saturating_sub(1);
 
     let specifier_names_on_line = |export_decl: &ExportNamedDeclaration| -> Vec<String> {
@@ -1753,6 +1762,66 @@ enum Color { Red, Green, x }
     let source = "export const a = 1;\rexport const b = 2;\nexport const c = 3;\n";
     let per_line = symbols_per_line("lone-cr.ts", source, 2);
     assert_eq!(per_line[1], vec!["c".to_string()]);
+  }
+
+  /// Resolve every reference to `symbol` in `source` through the real pipeline
+  /// (`find_local_references` → `find_node_at_line`), returning the container
+  /// symbols found for each reference.
+  fn containers_of_references(file_name: &str, source: &str, symbol: &str) -> Vec<Vec<String>> {
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), profiler).expect("Failed to create analyzer");
+    let file_path = Path::new(file_name);
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      WorkspaceAnalyzer::parse_source(file_path, source.to_string()).unwrap(),
+    );
+    let refs = analyzer.find_local_references(file_path, symbol).unwrap();
+    assert!(!refs.is_empty(), "expected references to {symbol}");
+    refs
+      .iter()
+      .map(|r| {
+        analyzer
+          .find_node_at_line(file_path, r.line, r.column)
+          .unwrap()
+      })
+      .collect()
+  }
+
+  /// A reference's column is counted in characters, but the line start is a
+  /// byte offset. Adding the two directly lands short of the reference by one
+  /// byte per extra UTF-8 byte before it on the line, which can fall into an
+  /// earlier declaration on the same line.
+  #[test]
+  fn find_node_at_line_column_counts_chars_after_multibyte_text() {
+    let source = "import { a } from './lib';\nexport const s = '日本語日本語日本語日本語'; export const t = a;\n";
+    assert_eq!(
+      containers_of_references("multibyte.ts", source, "a"),
+      vec![vec!["t".to_string()]]
+    );
+  }
+
+  /// ASCII probe points are unchanged: the reference at the very end of a
+  /// line, a one-character reference followed directly by another token, and
+  /// a reference after a CRLF line all resolve to their own declaration.
+  #[test]
+  fn find_node_at_line_column_ascii_edges() {
+    let end_of_line = "import { a } from './lib';\nexport const s = 1; export const t = a\n";
+    assert_eq!(
+      containers_of_references("eol.ts", end_of_line, "a"),
+      vec![vec!["t".to_string()]]
+    );
+    let adjacent =
+      "import { a } from './lib';\nexport const s = 1;export const t=a;export const u=2;\n";
+    assert_eq!(
+      containers_of_references("adjacent.ts", adjacent, "a"),
+      vec![vec!["t".to_string()]]
+    );
+    let crlf = "import { a } from './lib';\r\nexport const s = 'ü'; export const t = a;\r\n";
+    assert_eq!(
+      containers_of_references("crlf-ref.ts", crlf, "a"),
+      vec![vec!["t".to_string()]]
+    );
   }
 
   #[test]

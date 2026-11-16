@@ -228,6 +228,13 @@ fn find_affected_internal(
     asset_files.len()
   );
 
+  // Traversal from a (file, symbol) node reaches the same packages no matter which
+  // changed file it started from, so one visited set serves every changed file.
+  // Without this, a diff touching many files that share consumers re-traces the
+  // same downstream graph once per file. The report keeps a per-file set so each
+  // changed file still records its own cause paths.
+  let mut shared_visited: FxHashSet<(PathBuf, String)> = FxHashSet::default();
+
   // Step 6a: Process source files
   for changed_file in &source_files {
     let file_path = &changed_file.file_path;
@@ -393,7 +400,12 @@ fn find_affected_internal(
       // (set insert is idempotent) but means project_causes may not record every
       // independent cause path — a project affected via two different symbols will
       // only have the cause from whichever symbol was traced first.
-      let mut visited = FxHashSet::default();
+      let mut per_file_visited = FxHashSet::default();
+      let visited = if generate_report {
+        &mut per_file_visited
+      } else {
+        &mut shared_visited
+      };
       let mut state = AffectedState {
         affected_packages: &mut affected_packages,
         project_causes: if generate_report {
@@ -401,7 +413,7 @@ fn find_affected_internal(
         } else {
           None
         },
-        visited: &mut visited,
+        visited,
       };
 
       for symbol_name in &unique_symbols {

@@ -5904,6 +5904,100 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
     .affected_projects
 }
 
+/// Changed files that share downstream consumers are traced through one
+/// visited set. Whichever file is traced first claims the shared consumer;
+/// the other file must still reach the consumer only it has, and the result
+/// must equal tracing each file on its own and with the report enabled.
+#[test]
+fn test_changed_files_sharing_consumers_affect_union_of_each_file() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/core": ["libs/core/src/index.ts"],
+      "@scope/mid": ["libs/mid/src/index.ts"]
+    }
+  }
+}
+"#;
+  let files = [
+    ("libs/core/src/a.ts", "export const a = () => 'a';\n"),
+    ("libs/core/src/b.ts", "export const b = () => 'b';\n"),
+    (
+      "libs/core/src/index.ts",
+      "export { a } from './a';\nexport { b } from './b';\n",
+    ),
+    (
+      "libs/mid/src/index.ts",
+      "import { a, b } from '@scope/core';\n\nexport const mid = () => a() + b();\n",
+    ),
+    (
+      "apps/via-mid/src/main.ts",
+      "import { mid } from '@scope/mid';\n\nexport const run = () => mid();\n",
+    ),
+    (
+      "apps/b-only/src/main.ts",
+      "import { b } from '@scope/core';\n\nexport const run = () => b();\n",
+    ),
+    (
+      "apps/a-only/src/main.ts",
+      "import { a } from '@scope/core';\n\nexport const run = () => a();\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ];
+  let projects = || {
+    vec![
+      barrel_project("core", "libs/core/src"),
+      barrel_project("mid", "libs/mid/src"),
+      barrel_project("via-mid", "apps/via-mid/src"),
+      barrel_project("b-only", "apps/b-only/src"),
+      barrel_project("a-only", "apps/a-only/src"),
+    ]
+  };
+  let affected_after = |changed: &[(&str, &str)]| {
+    let (_tmp, root) = scaffold_repo(&files);
+    for (rel, contents) in changed {
+      fs::write(root.join(rel), contents).unwrap();
+    }
+    git_in(&root, &["add", "."]);
+    git_in(&root, &["commit", "-m", "change"]);
+    let mut affected = affected_in(&root, projects());
+    affected.sort();
+
+    let config = TrueAffectedConfig {
+      cwd: root.clone(),
+      base: "main".to_string(),
+      head: None,
+      projects: projects(),
+      lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_strategy: Default::default(),
+    };
+    let mut with_report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
+      .expect("find_affected_with_report failed")
+      .affected_projects;
+    with_report.sort();
+    assert_eq!(
+      affected, with_report,
+      "report path diverged for {changed:?}"
+    );
+    affected
+  };
+
+  let a_change = ("libs/core/src/a.ts", "export const a = () => 'a2';\n");
+  let b_change = ("libs/core/src/b.ts", "export const b = () => 'b2';\n");
+
+  let only_a = affected_after(&[a_change]);
+  let only_b = affected_after(&[b_change]);
+  let both = affected_after(&[a_change, b_change]);
+
+  assert_eq!(only_a, names(&["a-only", "core", "mid", "via-mid"]));
+  assert_eq!(only_b, names(&["b-only", "core", "mid", "via-mid"]));
+  let mut union: Vec<String> = only_a.into_iter().chain(only_b).collect();
+  union.sort();
+  union.dedup();
+  assert_eq!(both, union);
+}
+
 /// (a) Single-hop barrel: symbol changed in utils.ts, re-exported through
 /// `libs/my-lib/src/index.ts`, consumed from the barrel by another project.
 #[test]

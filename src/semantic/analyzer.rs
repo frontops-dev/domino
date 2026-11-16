@@ -10,13 +10,14 @@ use oxc_ast_visit::walk;
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_span::{GetSpan, SourceType};
+use oxc_syntax::node::NodeId;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::{debug, warn};
 use walkdir::WalkDir;
@@ -109,9 +110,121 @@ pub struct FileSemanticData {
   #[allow(dead_code)]
   allocator: Allocator,
   semantic: oxc_semantic::Semantic<'static>,
+  /// Lookup tables over `source` and `semantic`, built on first use. Holds only
+  /// owned data (offsets and node indices), never borrows from the fields above.
+  lookup: FileLookup,
+}
+
+#[derive(Default)]
+struct FileLookup {
+  lines: OnceLock<crate::utils::LineIndex>,
+  nodes: OnceLock<NodeSpanIndex>,
+}
+
+/// AST node tree flattened for position queries. Each node's subtree bounds cover
+/// its own span and every descendant's, so a query can skip any subtree whose
+/// bounds exclude the offset without assuming child spans nest inside the
+/// parent's (a decorated class can start before its `export` wrapper).
+struct NodeSpanIndex {
+  roots: Vec<u32>,
+  /// Children of node `i` are `child_ids[child_starts[i]..child_starts[i + 1]]`.
+  child_starts: Vec<u32>,
+  child_ids: Vec<u32>,
+  subtree_lo: Vec<u32>,
+  subtree_hi: Vec<u32>,
+}
+
+impl NodeSpanIndex {
+  fn new(nodes: &oxc_semantic::AstNodes<'_>) -> Self {
+    let n = nodes.len();
+    let mut roots = Vec::new();
+    let mut parent = vec![u32::MAX; n];
+    let mut child_counts = vec![0u32; n + 1];
+    let mut subtree_lo = Vec::with_capacity(n);
+    let mut subtree_hi = Vec::with_capacity(n);
+    for node in nodes.iter() {
+      let id = node.id();
+      let i = id.index();
+      let span = node.kind().span();
+      subtree_lo.push(span.start);
+      subtree_hi.push(span.end);
+      let p = nodes.parent_id(id).index();
+      if p == i {
+        roots.push(i as u32);
+      } else {
+        parent[i] = p as u32;
+        child_counts[p + 1] += 1;
+      }
+    }
+    for i in 1..=n {
+      child_counts[i] += child_counts[i - 1];
+    }
+    let child_starts = child_counts;
+    let mut fill = child_starts.clone();
+    let mut child_ids = vec![0u32; child_starts[n] as usize];
+    for (i, &p) in parent.iter().enumerate() {
+      if p != u32::MAX {
+        let slot = &mut fill[p as usize];
+        child_ids[*slot as usize] = i as u32;
+        *slot += 1;
+      }
+    }
+    for i in (0..n).rev() {
+      let p = parent[i];
+      if p != u32::MAX {
+        let p = p as usize;
+        subtree_lo[p] = subtree_lo[p].min(subtree_lo[i]);
+        subtree_hi[p] = subtree_hi[p].max(subtree_hi[i]);
+      }
+    }
+    Self {
+      roots,
+      child_starts,
+      child_ids,
+      subtree_lo,
+      subtree_hi,
+    }
+  }
+
+  /// Ids of every node whose span contains `offset` (inclusive at both ends),
+  /// in ascending id order: the same nodes, in the same order, that a scan of
+  /// `AstNodes::iter()` filtered on containment would yield.
+  fn containing(&self, nodes: &oxc_semantic::AstNodes<'_>, offset: usize) -> Vec<NodeId> {
+    let mut found = Vec::new();
+    let mut stack: Vec<u32> = self.roots.clone();
+    while let Some(i) = stack.pop() {
+      let i = i as usize;
+      if (self.subtree_lo[i] as usize) > offset || (self.subtree_hi[i] as usize) < offset {
+        continue;
+      }
+      let id = NodeId::new(i);
+      let span = nodes.kind(id).span();
+      if span.start as usize <= offset && span.end as usize >= offset {
+        found.push(id);
+      }
+      let range = self.child_starts[i] as usize..self.child_starts[i + 1] as usize;
+      stack.extend_from_slice(&self.child_ids[range]);
+    }
+    found.sort_unstable();
+    found
+  }
 }
 
 impl FileSemanticData {
+  fn lines(&self) -> &crate::utils::LineIndex {
+    self
+      .lookup
+      .lines
+      .get_or_init(|| crate::utils::LineIndex::new(&self.source))
+  }
+
+  fn node_spans(&self) -> &NodeSpanIndex {
+    self
+      .lookup
+      .nodes
+      .get_or_init(|| NodeSpanIndex::new(self.semantic.nodes()))
+  }
+
   /// The file's source text.
   pub fn source(&self) -> &str {
     &self.source
@@ -522,6 +635,7 @@ impl WorkspaceAnalyzer {
         source,
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
       imports,
       exports,
@@ -574,6 +688,7 @@ impl WorkspaceAnalyzer {
       source,
       allocator,
       semantic,
+      lookup: FileLookup::default(),
     })
   }
 }
@@ -836,7 +951,9 @@ impl WorkspaceAnalyzer {
         // Get all references to this symbol using the Semantic API directly
         for reference in file_data.semantic().symbol_references(symbol_id) {
           let span = file_data.semantic().reference_span(reference);
-          let (line, column) = self.span_to_line_col(file_data.source(), span);
+          let (line, column) = file_data
+            .lines()
+            .offset_to_line_col(file_data.source(), span.start as usize);
 
           references.push(Reference {
             file_path: file_path.to_path_buf(),
@@ -885,7 +1002,9 @@ impl WorkspaceAnalyzer {
           if let Expression::Identifier(ident) = &member_expr.object {
             if ident.name.as_str() == namespace_name {
               let span = member_expr.span;
-              let (line, column) = self.span_to_line_col(file_data.source(), span);
+              let (line, column) = file_data
+                .lines()
+                .offset_to_line_col(file_data.source(), span.start as usize);
               references.push(Reference {
                 file_path: file_path.to_path_buf(),
                 line,
@@ -900,7 +1019,9 @@ impl WorkspaceAnalyzer {
           if let oxc_ast::ast::TSTypeName::IdentifierReference(ident) = &qualified_name.left {
             if ident.name.as_str() == namespace_name {
               let span = qualified_name.span;
-              let (line, column) = self.span_to_line_col(file_data.source(), span);
+              let (line, column) = file_data
+                .lines()
+                .offset_to_line_col(file_data.source(), span.start as usize);
               references.push(Reference {
                 file_path: file_path.to_path_buf(),
                 line,
@@ -914,12 +1035,6 @@ impl WorkspaceAnalyzer {
     }
 
     Ok(references)
-  }
-
-  /// Convert span to line and column
-  fn span_to_line_col(&self, source: &str, span: Span) -> (usize, usize) {
-    let offset = span.start as usize;
-    crate::utils::offset_to_line_col(source, offset)
   }
 
   /// Extract the first binding identifier name from a `VariableDeclaration`.
@@ -1095,10 +1210,14 @@ impl WorkspaceAnalyzer {
     column: usize,
   ) -> Result<Vec<String>> {
     // Get the exact offset using both line and column
-    let line_start = crate::utils::line_to_offset(file_data.source(), line)
+    let line_start = file_data
+      .lines()
+      .line_to_offset(line)
       .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
     let exact_offset = line_start + column;
-    let line_end = crate::utils::line_to_offset(file_data.source(), line + 1)
+    let line_end = file_data
+      .lines()
+      .line_to_offset(line + 1)
       .unwrap_or(file_data.source().len());
     let line_end_inclusive = line_end.saturating_sub(1);
 
@@ -1127,37 +1246,34 @@ impl WorkspaceAnalyzer {
     let mut node_on_line_id = None;
     let mut smallest_span_size = usize::MAX;
 
-    for node in nodes.iter() {
+    for id in file_data.node_spans().containing(nodes, exact_offset) {
+      let node = nodes.get_node(id);
       let span = node.kind().span();
       let node_start = span.start as usize;
       let node_end = span.end as usize;
+      let span_size = node_end - node_start;
 
-      // Check if this exact offset is within the node's span
-      if node_start <= exact_offset && node_end >= exact_offset {
-        let span_size = node_end - node_start;
+      // Keep the smallest containing node, but prefer non-Program nodes when sizes are equal
+      // This handles the case where an ExportNamedDeclaration spans the entire file
+      let should_update = if span_size < smallest_span_size {
+        // Smaller node found - always update
+        true
+      } else if span_size == smallest_span_size {
+        // When sizes are equal, prefer non-Program nodes, but only update if we don't already
+        // have a non-Program node (to ensure deterministic selection - first non-Program wins)
+        let current_is_program = matches!(node.kind(), AstKind::Program(_));
+        let existing_is_program = node_on_line_id
+          .map(|id| matches!(nodes.get_node(id).kind(), AstKind::Program(_)))
+          .unwrap_or(true);
 
-        // Keep the smallest containing node, but prefer non-Program nodes when sizes are equal
-        // This handles the case where an ExportNamedDeclaration spans the entire file
-        let should_update = if span_size < smallest_span_size {
-          // Smaller node found - always update
-          true
-        } else if span_size == smallest_span_size {
-          // When sizes are equal, prefer non-Program nodes, but only update if we don't already
-          // have a non-Program node (to ensure deterministic selection - first non-Program wins)
-          let current_is_program = matches!(node.kind(), AstKind::Program(_));
-          let existing_is_program = node_on_line_id
-            .map(|id| matches!(nodes.get_node(id).kind(), AstKind::Program(_)))
-            .unwrap_or(true);
+        !current_is_program && existing_is_program
+      } else {
+        false
+      };
 
-          !current_is_program && existing_is_program
-        } else {
-          false
-        };
-
-        if should_update {
-          smallest_span_size = span_size;
-          node_on_line_id = Some(node.id());
-        }
+      if should_update {
+        smallest_span_size = span_size;
+        node_on_line_id = Some(node.id());
       }
     }
 
@@ -1353,6 +1469,41 @@ impl WorkspaceAnalyzer {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn node_span_index_matches_a_full_scan_at_every_offset() {
+    let source = r#"import { Component, Input } from '@angular/core';
+
+@Component({ selector: 'x', template: '<b></b>' })
+export class Foo {
+  @Input() value = 1;
+  method(a: number): number { return a + helper(); }
+}
+
+const helper = () => 2;
+export { helper as h, Foo as F };
+export default function () { return `t${helper()}`; }
+export enum E { A = 'a', B = 'b' }
+export interface I { x: string }
+"#;
+    let data = WorkspaceAnalyzer::parse_source(Path::new("x.ts"), source.to_string()).unwrap();
+    let nodes = data.semantic().nodes();
+    for offset in 0..=source.len() + 1 {
+      let scanned: Vec<NodeId> = nodes
+        .iter()
+        .filter(|n| {
+          let span = n.kind().span();
+          span.start as usize <= offset && span.end as usize >= offset
+        })
+        .map(|n| n.id())
+        .collect();
+      assert_eq!(
+        data.node_spans().containing(nodes, offset),
+        scanned,
+        "offset {offset}"
+      );
+    }
+  }
   use std::path::Path;
 
   /// Overwrite the stack region that `parse_single_file`'s frame occupied, so
@@ -1450,6 +1601,7 @@ export { MemoizedComponent };"#;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -1507,6 +1659,7 @@ export const MY_REGEX = new RegExp(combined)"#;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -1557,6 +1710,7 @@ var localVar = 2"#;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -1692,6 +1846,7 @@ export const Kept = 2;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -1949,6 +2104,7 @@ const DynamicImport = await import('./dynamic');
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -1995,6 +2151,7 @@ const DynamicImport = await import('./dynamic');
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -2040,6 +2197,7 @@ export const { a, b } = obj;"#;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -2085,6 +2243,7 @@ export function third() {
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -2145,6 +2304,7 @@ type Props = ui.ButtonProps;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 
@@ -2241,6 +2401,7 @@ type Props = ui.ButtonProps;
         source: source.to_string(),
         allocator,
         semantic,
+        lookup: FileLookup::default(),
       },
     );
 

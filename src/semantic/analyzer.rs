@@ -1226,15 +1226,25 @@ impl WorkspaceAnalyzer {
     column: usize,
   ) -> Result<Vec<String>> {
     // Get the exact offset using both line and column
-    let line_start = file_data
-      .lines()
-      .line_to_offset(line)
-      .ok_or_else(|| DominoError::Other(format!("Invalid line number: {}", line)))?;
-    let exact_offset = line_start + column;
+    // A line past the end of the file (e.g. a `--head` diff against a shorter
+    // working tree) holds no declaration.
+    let Some(line_start) = file_data.lines().line_to_offset(line) else {
+      return Ok(Vec::new());
+    };
     let line_end = file_data
       .lines()
       .line_to_offset(line + 1)
       .unwrap_or(file_data.source().len());
+    // `column` is 1-based and counted in chars (see `offset_to_line_col`), or 0
+    // for "start of line". Probe the char at 0-based index `column`, i.e. one
+    // char past the reference start, which keeps the historical ASCII probe
+    // point (`line_start + column`) while converting chars to bytes, so
+    // multibyte text earlier on the line cannot pull the probe back into a
+    // preceding declaration.
+    let exact_offset = file_data.source()[line_start..line_end]
+      .char_indices()
+      .nth(column)
+      .map_or(line_end, |(i, _)| line_start + i);
     let line_end_inclusive = line_end.saturating_sub(1);
 
     let specifier_names_on_line = |export_decl: &ExportNamedDeclaration| -> Vec<String> {
@@ -1695,6 +1705,158 @@ enum Color { Red, Green, x }
       symbols,
       vec!["Widget".to_string()],
       "symbol on line 1 should resolve after the parsing function returned"
+    );
+  }
+
+  /// Resolve each line of `source` (as git numbers them) to its symbols.
+  fn symbols_per_line(file_name: &str, source: &str, lines: usize) -> Vec<Vec<String>> {
+    let file_data =
+      WorkspaceAnalyzer::parse_source(Path::new(file_name), source.to_string()).unwrap();
+    (1..=lines)
+      .map(|line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0).unwrap())
+      .collect()
+  }
+
+  fn names(per_line: &[&str]) -> Vec<Vec<String>> {
+    per_line.iter().map(|n| vec![n.to_string()]).collect()
+  }
+
+  /// Git counts lines by `\n`, so on a CRLF file line N starts right after the
+  /// (N-1)th `\n`. Summing `str::lines()` lengths undercounted each line start
+  /// by one byte per preceding CRLF, resolving a changed line to the previous
+  /// line's symbol (or none).
+  #[test]
+  fn find_top_level_symbols_crlf_resolves_each_line() {
+    let source =
+      "export const a = 1;\r\nexport const b = 2;\r\nexport const c = 3;\r\nexport const d = 4;\r\n";
+    assert_eq!(
+      symbols_per_line("crlf.ts", source, 4),
+      names(&["a", "b", "c", "d"])
+    );
+  }
+
+  #[test]
+  fn find_top_level_symbols_mixed_lf_crlf_resolves_each_line() {
+    let source =
+      "export const a = 1;\nexport const b = 2;\r\nexport const c = 3;\nexport const d = 4;\r\nexport const e = 5;";
+    assert_eq!(
+      symbols_per_line("mixed.ts", source, 5),
+      names(&["a", "b", "c", "d", "e"])
+    );
+  }
+
+  /// Multibyte text widens the byte gap per line; line starts must stay byte
+  /// offsets of the `\n` positions.
+  #[test]
+  fn find_top_level_symbols_crlf_multibyte_resolves_each_line() {
+    let source = "export const a = '日本語';\r\nexport const b = 'ü';\r\nexport const c = '🙂';\r\nexport const d = 4;\r\n";
+    assert_eq!(
+      symbols_per_line("crlf-multibyte.ts", source, 4),
+      names(&["a", "b", "c", "d"])
+    );
+  }
+
+  /// A lone `\r` does not end a line for git, so it must not for us either:
+  /// the declaration after it is still on line 1. Pins existing behaviour (it
+  /// also passes on the code before the CRLF fix).
+  #[test]
+  fn find_top_level_symbols_lone_cr_stays_on_its_line() {
+    let source = "export const a = 1;\rexport const b = 2;\nexport const c = 3;\n";
+    let per_line = symbols_per_line("lone-cr.ts", source, 2);
+    assert_eq!(per_line[1], vec!["c".to_string()]);
+  }
+
+  /// A line past the end of the file resolves to nothing (an error the callers
+  /// log and skip), never to the last declaration. Without a trailing newline
+  /// the last declaration ends exactly at EOF, so an offset of `source.len()`
+  /// would fall inside its inclusive span.
+  #[test]
+  fn find_top_level_symbols_past_eof_resolves_nothing() {
+    let cases: &[(&str, &str, usize)] = &[
+      // (source, label, number of the first line past the end)
+      ("export const a = 1;\nexport const b = 2", "lf", 3),
+      ("export const a = 1;\r\nexport const b = 2", "crlf", 3),
+    ];
+    for &(source, label, past) in cases {
+      let file_data =
+        WorkspaceAnalyzer::parse_source(Path::new("eof.ts"), source.to_string()).unwrap();
+      let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
+      assert_eq!(at(1).unwrap(), vec!["a".to_string()], "{label}");
+      assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
+      assert_eq!(at(past).unwrap(), Vec::<String>::new(), "{label}");
+    }
+    // With a trailing newline line 3 is an empty line that git may report.
+    for (label, source) in [
+      ("lf", "export const a = 1;\nexport const b = 2;\n"),
+      ("crlf", "export const a = 1;\r\nexport const b = 2;\r\n"),
+    ] {
+      let file_data =
+        WorkspaceAnalyzer::parse_source(Path::new("eof.ts"), source.to_string()).unwrap();
+      let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
+      assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
+      assert_eq!(at(3).unwrap(), Vec::<String>::new(), "{label}");
+      assert_eq!(at(4).unwrap(), Vec::<String>::new(), "{label}");
+    }
+  }
+
+  /// Resolve every reference to `symbol` in `source` through the real pipeline
+  /// (`find_local_references` → `find_node_at_line`), returning the container
+  /// symbols found for each reference.
+  fn containers_of_references(file_name: &str, source: &str, symbol: &str) -> Vec<Vec<String>> {
+    let profiler = Arc::new(Profiler::new(false));
+    let mut analyzer =
+      WorkspaceAnalyzer::new(vec![], Path::new("."), profiler).expect("Failed to create analyzer");
+    let file_path = Path::new(file_name);
+    analyzer.files.insert(
+      file_path.to_path_buf(),
+      WorkspaceAnalyzer::parse_source(file_path, source.to_string()).unwrap(),
+    );
+    let refs = analyzer.find_local_references(file_path, symbol).unwrap();
+    assert!(!refs.is_empty(), "expected references to {symbol}");
+    refs
+      .iter()
+      .map(|r| {
+        analyzer
+          .find_node_at_line(file_path, r.line, r.column)
+          .unwrap()
+      })
+      .collect()
+  }
+
+  /// A reference's column is counted in characters, but the line start is a
+  /// byte offset. Adding the two directly lands short of the reference by one
+  /// byte per extra UTF-8 byte before it on the line, which can fall into an
+  /// earlier declaration on the same line.
+  #[test]
+  fn find_node_at_line_column_counts_chars_after_multibyte_text() {
+    let source = "import { a } from './lib';\nexport const s = '日本語日本語日本語日本語'; export const t = a;\n";
+    assert_eq!(
+      containers_of_references("multibyte.ts", source, "a"),
+      vec![vec!["t".to_string()]]
+    );
+  }
+
+  /// ASCII probe points are unchanged: the reference at the very end of a
+  /// line, a one-character reference followed directly by another token, and
+  /// a reference after a CRLF line all resolve to their own declaration. Pins
+  /// existing behaviour (it also passes on the code before the CRLF fix).
+  #[test]
+  fn find_node_at_line_column_ascii_edges() {
+    let end_of_line = "import { a } from './lib';\nexport const s = 1; export const t = a\n";
+    assert_eq!(
+      containers_of_references("eol.ts", end_of_line, "a"),
+      vec![vec!["t".to_string()]]
+    );
+    let adjacent =
+      "import { a } from './lib';\nexport const s = 1;export const t=a;export const u=2;\n";
+    assert_eq!(
+      containers_of_references("adjacent.ts", adjacent, "a"),
+      vec![vec!["t".to_string()]]
+    );
+    let crlf = "import { a } from './lib';\r\nexport const s = 'ü'; export const t = a;\r\n";
+    assert_eq!(
+      containers_of_references("crlf-ref.ts", crlf, "a"),
+      vec![vec!["t".to_string()]]
     );
   }
 

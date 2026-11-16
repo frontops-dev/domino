@@ -319,9 +319,10 @@ mod tests {
       "a\rb",
       "x\r",
       "a\r\rb\nc",
-      // The BOM row is bug-compatible with the old helpers: a leading BOM
-      // counts as a column. That quirk is intentionally preserved; fixing it is
-      // out of scope here because it would change affected sets.
+      // A leading BOM counts as a column here, matching the old helpers. The
+      // analyzer strips the BOM before parsing (`strip_bom` in
+      // `semantic/analyzer.rs`), so it never reaches a `LineIndex` from there;
+      // the row only pins that both implementations agree on it.
       "\u{feff}x",
     ];
     for source in sources {

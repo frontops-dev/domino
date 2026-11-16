@@ -7821,3 +7821,111 @@ fn test_crlf_lib_change_affects_consumer_of_changed_line_only() {
     "app-b consumes the unchanged `b`; got {affected:?}"
   );
 }
+
+/// Commit `lib_base` as `libs/lib/src/index.ts` byte for byte (no line-ending
+/// normalisation), apply `from` -> `to` to it on a feature branch, and return
+/// the affected projects. `app-widget` consumes `widget`, `app-other` consumes
+/// `other`.
+fn affected_after_raw_lib_edit(lib_base: &str, from: &str, to: &str) -> Vec<String> {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp.path().canonicalize().expect("canonicalize temp dir");
+
+  let files: &[(&str, &[u8])] = &[
+    (".gitattributes", b"* -text\n"),
+    ("libs/lib/src/index.ts", lib_base.as_bytes()),
+    (
+      "apps/app-widget/src/main.ts",
+      b"import { widget } from '@scope/lib';\n\nexport const useWidget = () => widget();\n",
+    ),
+    (
+      "apps/app-other/src/main.ts",
+      b"import { other } from '@scope/lib';\n\nexport const useOther = () => other();\n",
+    ),
+    (
+      "tsconfig.base.json",
+      br#"{ "compilerOptions": { "paths": { "@scope/lib": ["libs/lib/src/index.ts"] } } }"#,
+    ),
+  ];
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "core.autocrlf", "false"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  for (rel, contents) in files {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, contents).unwrap();
+  }
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+  assert!(
+    git_in(&root, &["show", "HEAD:libs/lib/src/index.ts"]).starts_with('\u{feff}'),
+    "the committed lib must keep its BOM"
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  assert!(lib_base.contains(from));
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    lib_base.replace(from, to),
+  )
+  .unwrap();
+  git_in(&root, &["commit", "-am", "change widget"]);
+
+  affected_in(
+    &root,
+    vec![
+      barrel_project("lib", "libs/lib/src"),
+      barrel_project("app-widget", "apps/app-widget/src"),
+      barrel_project("app-other", "apps/app-other/src"),
+    ],
+  )
+}
+
+fn assert_only_widget_consumer_affected(affected: &[String]) {
+  assert!(
+    affected.contains(&"app-widget".to_string()),
+    "app-widget consumes the changed `widget`; got {affected:?}"
+  );
+  assert!(
+    !affected.contains(&"app-other".to_string()),
+    "app-other consumes the unchanged `other`; got {affected:?}"
+  );
+}
+
+/// A UTF-8 BOM before the first declaration. Oxc keeps byte offsets into the
+/// original text, so without stripping the BOM line 1 maps to offset 0, which
+/// only the `Program` node contains: the changed `widget` resolved to no
+/// symbol and its consumer was missed.
+#[test]
+fn test_bom_lib_change_on_line_one_affects_consumer() {
+  let affected = affected_after_raw_lib_edit(
+    "\u{feff}export const widget = () => 1;\nexport const other = () => 2;\n",
+    "() => 1;",
+    "() => 42;",
+  );
+  assert_only_widget_consumer_affected(&affected);
+}
+
+/// A BOM before a hashbang: oxc only recognises `#!` at byte 0, so the file
+/// failed to parse and lost all its exports, dropping every consumer.
+#[test]
+fn test_bom_hashbang_lib_change_affects_consumer() {
+  let affected = affected_after_raw_lib_edit(
+    "\u{feff}#!/usr/bin/env node\nexport const widget = () => 1;\nexport const other = () => 2;\n",
+    "() => 1;",
+    "() => 42;",
+  );
+  assert_only_widget_consumer_affected(&affected);
+}
+
+/// BOM and CRLF line endings together.
+#[test]
+fn test_bom_crlf_lib_change_on_line_one_affects_consumer() {
+  let affected = affected_after_raw_lib_edit(
+    "\u{feff}export const widget = () => 1;\r\nexport const other = () => 2;\r\n",
+    "() => 1;",
+    "() => 42;",
+  );
+  assert_only_widget_consumer_affected(&affected);
+}

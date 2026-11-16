@@ -1756,12 +1756,50 @@ enum Color { Red, Green, x }
   }
 
   /// A lone `\r` does not end a line for git, so it must not for us either:
-  /// the declaration after it is still on line 1.
+  /// the declaration after it is still on line 1. Pins existing behaviour (it
+  /// also passes on the code before the CRLF fix).
   #[test]
   fn find_top_level_symbols_lone_cr_stays_on_its_line() {
     let source = "export const a = 1;\rexport const b = 2;\nexport const c = 3;\n";
     let per_line = symbols_per_line("lone-cr.ts", source, 2);
     assert_eq!(per_line[1], vec!["c".to_string()]);
+  }
+
+  /// A line past the end of the file resolves to nothing (an error the callers
+  /// log and skip), never to the last declaration. Without a trailing newline
+  /// the last declaration ends exactly at EOF, so an offset of `source.len()`
+  /// would fall inside its inclusive span.
+  #[test]
+  fn find_top_level_symbols_past_eof_resolves_nothing() {
+    let cases: &[(&str, &str, usize)] = &[
+      // (source, label, number of the first line past the end)
+      ("export const a = 1;\nexport const b = 2", "lf", 3),
+      ("export const a = 1;\r\nexport const b = 2", "crlf", 3),
+    ];
+    for &(source, label, past) in cases {
+      let file_data =
+        WorkspaceAnalyzer::parse_source(Path::new("eof.ts"), source.to_string()).unwrap();
+      let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
+      assert_eq!(at(1).unwrap(), vec!["a".to_string()], "{label}");
+      assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
+      assert_eq!(
+        at(past).unwrap_or_default(),
+        Vec::<String>::new(),
+        "{label}"
+      );
+    }
+    // With a trailing newline line 3 is an empty line that git may report.
+    for (label, source) in [
+      ("lf", "export const a = 1;\nexport const b = 2;\n"),
+      ("crlf", "export const a = 1;\r\nexport const b = 2;\r\n"),
+    ] {
+      let file_data =
+        WorkspaceAnalyzer::parse_source(Path::new("eof.ts"), source.to_string()).unwrap();
+      let at = |line| WorkspaceAnalyzer::find_top_level_symbols(&file_data, line, 0);
+      assert_eq!(at(2).unwrap(), vec!["b".to_string()], "{label}");
+      assert_eq!(at(3).unwrap_or_default(), Vec::<String>::new(), "{label}");
+      assert_eq!(at(4).unwrap_or_default(), Vec::<String>::new(), "{label}");
+    }
   }
 
   /// Resolve every reference to `symbol` in `source` through the real pipeline
@@ -1803,7 +1841,8 @@ enum Color { Red, Green, x }
 
   /// ASCII probe points are unchanged: the reference at the very end of a
   /// line, a one-character reference followed directly by another token, and
-  /// a reference after a CRLF line all resolve to their own declaration.
+  /// a reference after a CRLF line all resolve to their own declaration. Pins
+  /// existing behaviour (it also passes on the code before the CRLF fix).
   #[test]
   fn find_node_at_line_column_ascii_edges() {
     let end_of_line = "import { a } from './lib';\nexport const s = 1; export const t = a\n";

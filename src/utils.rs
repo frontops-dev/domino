@@ -207,6 +207,8 @@ impl ProjectIndex {
 
 /// Convert line number to byte offset in source text
 /// Line numbers are 1-indexed, returns 0-indexed byte offset
+// Kept as the reference that `LineIndex` is tested against.
+#[allow(dead_code)]
 pub fn line_to_offset(source: &str, line: usize) -> Option<usize> {
   if line == 0 {
     return Some(0);
@@ -222,6 +224,7 @@ pub fn line_to_offset(source: &str, line: usize) -> Option<usize> {
 
 /// Convert byte offset to line and column
 /// Returns (line, column) both 1-indexed
+#[allow(dead_code)]
 pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
   let mut line = 1;
   let mut col = 1;
@@ -245,9 +248,96 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
   (line, col)
 }
 
+/// Precomputed line tables for one source text. Answers [`line_to_offset`] and
+/// [`offset_to_line_col`] with identical results, but in O(log lines) instead of
+/// a scan from the start of the file on every call.
+pub struct LineIndex {
+  /// `line_offsets[k]` is `line_to_offset(source, k + 1)`, for every `k` up to
+  /// the number of lines.
+  line_offsets: Vec<usize>,
+  /// Byte positions of every `\n`.
+  newlines: Vec<usize>,
+}
+
+impl LineIndex {
+  pub fn new(source: &str) -> Self {
+    let mut line_offsets = vec![0];
+    let mut acc = 0;
+    for l in source.lines() {
+      acc += l.len() + 1;
+      line_offsets.push(acc);
+    }
+    let newlines = source.match_indices('\n').map(|(i, _)| i).collect();
+    Self {
+      line_offsets,
+      newlines,
+    }
+  }
+
+  pub fn line_to_offset(&self, line: usize) -> Option<usize> {
+    if line == 0 {
+      return Some(0);
+    }
+    Some(self.line_offsets[(line - 1).min(self.line_offsets.len() - 1)])
+  }
+
+  pub fn offset_to_line_col(&self, source: &str, offset: usize) -> (usize, usize) {
+    let newlines_before = self.newlines.partition_point(|&p| p < offset);
+    let line_start = if newlines_before == 0 {
+      0
+    } else {
+      self.newlines[newlines_before - 1] + 1
+    };
+    let col = 1
+      + source[line_start..]
+        .char_indices()
+        .take_while(|&(i, _)| line_start + i < offset)
+        .count();
+    (newlines_before + 1, col)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_line_index_matches_scanning_helpers() {
+    let sources = [
+      "",
+      "a",
+      "line1\nline2\nline3\n",
+      "no trailing newline\nlast",
+      "crlf\r\nline\r\n\r\nend",
+      "\n\n\n",
+      "héllo wörld\nñ\n日本語\nx",
+      // The CRLF, lone-CR and BOM rows are bug-compatible with the old helpers:
+      // `str::lines` strips `\r\n` as one terminator, so `line_to_offset`
+      // undercounts by a byte per CRLF line, and a leading BOM counts as a
+      // column. Those quirks are intentionally preserved; fixing them is out of
+      // scope here because it would change affected sets.
+      "a\rb",
+      "x\r",
+      "\u{feff}x",
+    ];
+    for source in sources {
+      let index = LineIndex::new(source);
+      for line in 0..source.len() + 4 {
+        assert_eq!(
+          index.line_to_offset(line),
+          line_to_offset(source, line),
+          "line_to_offset({source:?}, {line})"
+        );
+      }
+      for offset in 0..source.len() + 4 {
+        assert_eq!(
+          index.offset_to_line_col(source, offset),
+          offset_to_line_col(source, offset),
+          "offset_to_line_col({source:?}, {offset})"
+        );
+      }
+    }
+  }
 
   #[test]
   fn test_canonical_workspace_root_removes_dot_segments() {

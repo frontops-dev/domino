@@ -132,7 +132,7 @@ pub struct Reference {
   pub file_path: PathBuf,
   /// Line number (1-indexed)
   pub line: usize,
-  /// Column number (0-indexed)
+  /// Column number (1-indexed, counted in chars)
   #[allow(dead_code)]
   pub column: usize,
 }

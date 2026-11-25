@@ -7748,3 +7748,76 @@ fn test_target_defaults_array_form() {
   );
   assert_eq!(affected, vec!["lib-a".to_string(), "lib-b".to_string()]);
 }
+
+/// A lib file with Windows (CRLF) line endings. Git numbers hunk lines by `\n`,
+/// so the changed line must map to the byte offset right after the previous
+/// `\n`. Summing `str::lines()` lengths undercounted each line start by a byte
+/// per preceding CRLF, so a change to `c` (line 3) resolved to `b`: the app
+/// consuming `c` was missed and the app consuming `b` was wrongly marked.
+#[test]
+fn test_crlf_lib_change_affects_consumer_of_changed_line_only() {
+  let tmp = TempDir::new().expect("Failed to create temp dir");
+  let root = tmp.path().canonicalize().expect("canonicalize temp dir");
+
+  let lib_base =
+    "export const a = 1;\r\nexport const b = 2;\r\nexport const c = 3;\r\nexport const d = 4;\r\n";
+  let files: &[(&str, &[u8])] = &[
+    // Keep git from normalising line endings regardless of user config.
+    (".gitattributes", b"* -text\n"),
+    ("libs/lib/src/index.ts", lib_base.as_bytes()),
+    (
+      "apps/app-b/src/main.ts",
+      b"import { b } from '@scope/lib';\r\n\r\nexport const useB = () => b;\r\n",
+    ),
+    (
+      "apps/app-c/src/main.ts",
+      b"import { c } from '@scope/lib';\r\n\r\nexport const useC = () => c;\r\n",
+    ),
+    (
+      "tsconfig.base.json",
+      br#"{ "compilerOptions": { "paths": { "@scope/lib": ["libs/lib/src/index.ts"] } } }"#,
+    ),
+  ];
+  git_in(&root, &["init"]);
+  git_in(&root, &["config", "core.autocrlf", "false"]);
+  git_in(&root, &["config", "user.email", "test@test.com"]);
+  git_in(&root, &["config", "user.name", "Test"]);
+  git_in(&root, &["branch", "-M", "main"]);
+  for (rel, contents) in files {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, contents).unwrap();
+  }
+  git_in(&root, &["add", "."]);
+  git_in(&root, &["commit", "-m", "initial"]);
+  assert!(
+    git_in(&root, &["show", "HEAD:libs/lib/src/index.ts"]).contains("\r\n"),
+    "the committed lib must keep its CRLF line endings"
+  );
+
+  git_in(&root, &["checkout", "-b", "feature"]);
+  fs::write(
+    root.join("libs/lib/src/index.ts"),
+    lib_base.replace("export const c = 3;", "export const c = 30;"),
+  )
+  .unwrap();
+  git_in(&root, &["commit", "-am", "change c"]);
+
+  let affected = affected_in(
+    &root,
+    vec![
+      barrel_project("lib", "libs/lib/src"),
+      barrel_project("app-b", "apps/app-b/src"),
+      barrel_project("app-c", "apps/app-c/src"),
+    ],
+  );
+
+  assert!(
+    affected.contains(&"app-c".to_string()),
+    "app-c consumes the changed `c`; got {affected:?}"
+  );
+  assert!(
+    !affected.contains(&"app-b".to_string()),
+    "app-b consumes the unchanged `b`; got {affected:?}"
+  );
+}

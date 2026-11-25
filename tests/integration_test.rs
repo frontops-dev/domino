@@ -5904,6 +5904,288 @@ fn affected_in(root: &std::path::Path, projects: Vec<Project>) -> Vec<String> {
     .affected_projects
 }
 
+/// Changed files that share downstream consumers skip the nodes an earlier
+/// file already traced. Whichever file is traced first claims the shared consumer;
+/// the other file must still reach the consumer only it has, and the result
+/// must equal tracing each file on its own and with the report enabled.
+#[test]
+fn test_changed_files_sharing_consumers_affect_union_of_each_file() {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/core": ["libs/core/src/index.ts"],
+      "@scope/mid": ["libs/mid/src/index.ts"]
+    }
+  }
+}
+"#;
+  let files = [
+    ("libs/core/src/a.ts", "export const a = () => 'a';\n"),
+    ("libs/core/src/b.ts", "export const b = () => 'b';\n"),
+    (
+      "libs/core/src/index.ts",
+      "export { a } from './a';\nexport { b } from './b';\n",
+    ),
+    (
+      "libs/mid/src/index.ts",
+      "import { a, b } from '@scope/core';\n\nexport const mid = () => a() + b();\n",
+    ),
+    (
+      "apps/via-mid/src/main.ts",
+      "import { mid } from '@scope/mid';\n\nexport const run = () => mid();\n",
+    ),
+    (
+      "apps/b-only/src/main.ts",
+      "import { b } from '@scope/core';\n\nexport const run = () => b();\n",
+    ),
+    (
+      "apps/a-only/src/main.ts",
+      "import { a } from '@scope/core';\n\nexport const run = () => a();\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ];
+  let projects = || {
+    vec![
+      barrel_project("core", "libs/core/src"),
+      barrel_project("mid", "libs/mid/src"),
+      barrel_project("via-mid", "apps/via-mid/src"),
+      barrel_project("b-only", "apps/b-only/src"),
+      barrel_project("a-only", "apps/a-only/src"),
+    ]
+  };
+  let affected_after = |changed: &[(&str, &str)]| {
+    let (_tmp, root) = scaffold_repo(&files);
+    for (rel, contents) in changed {
+      fs::write(root.join(rel), contents).unwrap();
+    }
+    git_in(&root, &["add", "."]);
+    git_in(&root, &["commit", "-m", "change"]);
+    let mut affected = affected_in(&root, projects());
+    affected.sort();
+
+    let config = TrueAffectedConfig {
+      cwd: root.clone(),
+      base: "main".to_string(),
+      head: None,
+      projects: projects(),
+      lockfile_strategy: LockfileStrategy::None,
+      root_tsconfig_strategy: Default::default(),
+    };
+    let mut with_report = find_affected_with_report(config, Arc::new(Profiler::new(false)))
+      .expect("find_affected_with_report failed")
+      .affected_projects;
+    with_report.sort();
+    assert_eq!(
+      affected, with_report,
+      "report path diverged for {changed:?}"
+    );
+    affected
+  };
+
+  let a_change = ("libs/core/src/a.ts", "export const a = () => 'a2';\n");
+  let b_change = ("libs/core/src/b.ts", "export const b = () => 'b2';\n");
+
+  let only_a = affected_after(&[a_change]);
+  let only_b = affected_after(&[b_change]);
+  let both = affected_after(&[a_change, b_change]);
+
+  assert_eq!(only_a, names(&["a-only", "core", "mid", "via-mid"]));
+  assert_eq!(only_b, names(&["b-only", "core", "mid", "via-mid"]));
+  let mut union: Vec<String> = only_a.into_iter().chain(only_b).collect();
+  union.sort();
+  union.dedup();
+  assert_eq!(both, union);
+}
+
+/// Fixture for the shared-mid tests: two core files `a_file` / `b_file`
+/// (exporting `a` / `b`), a mid lib whose `midA` uses `a` and `midB` uses `b`
+/// behind a barrel, and two-hop chains `x -> x2` (via `midA`) and `y -> y2`
+/// (via `midB`). Every changed file reaches the same mid file, but through a
+/// different symbol, so a visited set keyed by file alone would drop one chain.
+///
+/// Each element of `scenarios` is a list of changed files; every scenario is
+/// committed on its own branch off `main` in one repo, so report paths are
+/// comparable across scenarios. Returns the temp dir guard and the repo root.
+fn shared_mid_repo(
+  a_file: &str,
+  b_file: &str,
+  scenarios: &[(&str, &[&str])],
+) -> (TempDir, PathBuf) {
+  let tsconfig = r#"{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@scope/core": ["libs/core/src/index.ts"],
+      "@scope/mid": ["libs/mid/src/index.ts"],
+      "@scope/x": ["libs/x/src/index.ts"],
+      "@scope/y": ["libs/y/src/index.ts"]
+    }
+  }
+}
+"#;
+  let a_path = format!("libs/core/src/{a_file}.ts");
+  let b_path = format!("libs/core/src/{b_file}.ts");
+  let core_index =
+    format!("export {{ a }} from './{a_file}';\nexport {{ b }} from './{b_file}';\n");
+  let files = [
+    (a_path.as_str(), "export const a = () => 'a';\n"),
+    (b_path.as_str(), "export const b = () => 'b';\n"),
+    ("libs/core/src/index.ts", core_index.as_str()),
+    (
+      "libs/mid/src/mid.ts",
+      "import { a, b } from '@scope/core';\n\nexport const midA = () => a();\nexport const midB = () => b();\n",
+    ),
+    (
+      "libs/mid/src/index.ts",
+      "export { midA, midB } from './mid';\n",
+    ),
+    (
+      "libs/x/src/index.ts",
+      "import { midA } from '@scope/mid';\n\nexport const xVal = () => midA();\n",
+    ),
+    (
+      "apps/x2/src/main.ts",
+      "import { xVal } from '@scope/x';\n\nexport const run = () => xVal();\n",
+    ),
+    (
+      "libs/y/src/index.ts",
+      "import { midB } from '@scope/mid';\n\nexport const yVal = () => midB();\n",
+    ),
+    (
+      "apps/y2/src/main.ts",
+      "import { yVal } from '@scope/y';\n\nexport const run = () => yVal();\n",
+    ),
+    ("tsconfig.base.json", tsconfig),
+  ];
+  let (tmp, root) = scaffold_repo(&files);
+  for (branch, changed) in scenarios {
+    git_in(&root, &["checkout", "-q", "main"]);
+    git_in(&root, &["checkout", "-q", "-b", branch]);
+    for which in *changed {
+      let (rel, contents) = match *which {
+        "a" => (&a_path, "export const a = () => 'a2';\n"),
+        "b" => (&b_path, "export const b = () => 'b2';\n"),
+        other => panic!("unknown change {other}"),
+      };
+      fs::write(root.join(rel), contents).unwrap();
+    }
+    git_in(&root, &["add", "."]);
+    git_in(&root, &["commit", "-q", "-m", branch]);
+  }
+  (tmp, root)
+}
+
+fn shared_mid_projects() -> Vec<Project> {
+  vec![
+    barrel_project("core", "libs/core/src"),
+    barrel_project("mid", "libs/mid/src"),
+    barrel_project("x", "libs/x/src"),
+    barrel_project("x2", "apps/x2/src"),
+    barrel_project("y", "libs/y/src"),
+    barrel_project("y2", "apps/y2/src"),
+  ]
+}
+
+fn shared_mid_config(root: &Path) -> TrueAffectedConfig {
+  TrueAffectedConfig {
+    cwd: root.to_path_buf(),
+    base: "main".to_string(),
+    head: None,
+    projects: shared_mid_projects(),
+    lockfile_strategy: LockfileStrategy::None,
+    root_tsconfig_strategy: Default::default(),
+  }
+}
+
+const SHARED_MID_SCENARIOS: &[(&str, &[&str])] = &[
+  ("only-a", &["a"]),
+  ("only-b", &["b"]),
+  ("both", &["a", "b"]),
+];
+
+/// Changed files whose traversals meet in the same file through different
+/// symbols must each keep their own downstream chain (two hops deep), and the
+/// result must not depend on the order the files are processed in.
+#[test]
+fn test_changed_files_reaching_shared_file_via_different_symbols() {
+  // Default names put `a` first in diff order; the second pair makes `b` sort
+  // before `a`.
+  for (a_file, b_file) in [("a", "b"), ("z-a", "b")] {
+    let (_tmp, root) = shared_mid_repo(a_file, b_file, SHARED_MID_SCENARIOS);
+    let mut results = Vec::new();
+    for (branch, _) in SHARED_MID_SCENARIOS {
+      git_in(&root, &["checkout", "-q", branch]);
+      let mut affected = affected_in(&root, shared_mid_projects());
+      affected.sort();
+      results.push(affected);
+    }
+    let [only_a, only_b, both] = <[Vec<String>; 3]>::try_from(results).unwrap();
+
+    assert_eq!(
+      only_a,
+      names(&["core", "mid", "x", "x2"]),
+      "files ({a_file}, {b_file})"
+    );
+    assert_eq!(
+      only_b,
+      names(&["core", "mid", "y", "y2"]),
+      "files ({a_file}, {b_file})"
+    );
+    assert_eq!(
+      both,
+      names(&["core", "mid", "x", "x2", "y", "y2"]),
+      "files ({a_file}, {b_file})"
+    );
+    let mut union: Vec<String> = only_a.into_iter().chain(only_b).collect();
+    union.sort();
+    union.dedup();
+    assert_eq!(both, union, "files ({a_file}, {b_file})");
+  }
+}
+
+/// With a report, a multi-file diff records exactly the causes the single-file
+/// diffs record between them.
+#[test]
+fn test_report_causes_multi_file_equal_union_of_single_file_reports() {
+  use std::collections::BTreeSet;
+
+  let (_tmp, root) = shared_mid_repo("a", "b", SHARED_MID_SCENARIOS);
+  let causes_on = |branch: &str| -> BTreeSet<(String, AffectCause)> {
+    git_in(&root, &["checkout", "-q", branch]);
+    let report =
+      find_affected_with_report(shared_mid_config(&root), Arc::new(Profiler::new(false)))
+        .expect("find_affected_with_report failed")
+        .report
+        .expect("expected a report");
+    report
+      .projects
+      .into_iter()
+      .flat_map(|p| {
+        let name = p.name;
+        p.causes.into_iter().map(move |c| (name.clone(), c))
+      })
+      .collect()
+  };
+
+  let only_a = causes_on("only-a");
+  let only_b = causes_on("only-b");
+  let both = causes_on("both");
+
+  let union: BTreeSet<_> = only_a.union(&only_b).cloned().collect();
+  assert_eq!(both, union);
+
+  let has_imported = |project: &str, symbol: &str| {
+    both.iter().any(|(p, c)| {
+      p == project && matches!(c, AffectCause::ImportedSymbol { symbol: s, .. } if s == symbol)
+    })
+  };
+  assert!(has_imported("y", "midB"), "y via midB missing: {both:#?}");
+  assert!(has_imported("y2", "yVal"), "y2 via y missing: {both:#?}");
+  assert!(has_imported("x", "midA"), "x via midA missing: {both:#?}");
+  assert!(has_imported("x2", "xVal"), "x2 via x missing: {both:#?}");
+}
+
 /// (a) Single-hop barrel: symbol changed in utils.ts, re-exported through
 /// `libs/my-lib/src/index.ts`, consumed from the barrel by another project.
 #[test]
